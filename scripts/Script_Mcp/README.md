@@ -20,7 +20,7 @@ place where touching engine state is safe. No zmq/protobuf dependency, unlike
 AttackReason, attitude, current target/attacker, last-hit timestamp, status
 effects, hitpoints/stamina/mana.
 
-## Known gap: headless world loading
+## Headless world loading: solved by the engine's own quickload
 `gCSession::Start()` reaches INGAME for both `LoadGame` and `NewGame`, but the
 world stays empty (bare sky, no player), and `gCWorld::LoadGameWorld()` returns
 false in every context tried:
@@ -32,12 +32,21 @@ false in every context tried:
 | `Start(LoadGame)` / `Start(NewGame)` alone | session runs, world empty |
 | a save written by this very build | false — so it is not save compatibility |
 
-So loading a world is neither `Start` nor `LoadGameWorld`; the GUI drives
-something else, and the SDK exposes no world-loading entry point. Tracing that
-needs a debugger on `gCSession::OnGameMenuClicked` (exported), not more guesses.
+So loading a world is neither `Start` nor `LoadGameWorld`. What does work is the
+engine's own quickload action (`gESessionKey_QuickLoad`), which runs the correct
+internal path:
 
-Driving the menu through OS input does not substitute for it either: the menu
+    new_game            # gCSession::Start(NewGame) -> INGAME (empty world, ~216 s)
+    g3_input keys=[f9]  # engine quickload -> the QuickSave world really loads
+
+Verified end to end: after F9 the player is `PC_Hero` at level 63 from the
+QuickSave, standing in Varant, and screenshots show the real world. So the whole
+cycle is scriptable today, without touching the menu.
+
+Menu automation through OS input is a dead end and is not needed: the menu
 ignores the keyboard, its cursor follows relative mouse deltas only, and
-`PrintWindow` captures that cursor unreliably, so clicking blind does not land.
+`PrintWindow` captures that cursor unreliably.
 
-Until then: load a save by hand, after which every command works INGAME.
+Still open: `nearby_npcs` returns nothing in a loaded world, so `Entity::GetNPCs()`
+is the wrong source - switch to enumerating `eCSceneAdmin` entities (or the
+processing-range list `Game.dll` RVA 0x3F664 that Script_ModMe hooks).
