@@ -324,6 +324,7 @@ def tool_launch(args):
     width = int(args.get("width", 1600))
     height = int(args.get("height", 900))
     window_mode = int(args.get("window_mode", 1))  # 0=fullscreen 1=windowed 2=borderless
+    previous_focus = user32.GetForegroundWindow()
     saved = edit_useroptions(width, height, window_mode)
     if saved is not None and not os.path.exists(UO_BACKUP):
         open(UO_BACKUP, "w", encoding="ascii", errors="replace").write(saved)
@@ -348,6 +349,8 @@ def tool_launch(args):
                 break
             except TimeoutError:
                 time.sleep(2)
+    if not args.get("keep_focus"):
+        _restore_focus(previous_focus)
     return {"ok": True, "pid": p.pid, "remote_control_loaded": rc_loaded, "heartbeat": status,
             "window": f"{width}x{height} mode={window_mode}"}
 
@@ -488,6 +491,162 @@ def tool_screenshot(args):
     return {"ok": True, "path": path, "size": list(size)}
 
 
+VK = {"escape": 0x1B, "space": 0x20, "return": 0x0D, "up": 0x26, "down": 0x28,
+      "left": 0x25, "right": 0x27, "f5": 0x74, "f9": 0x78, "w": 0x57, "a": 0x41,
+      "s": 0x53, "d": 0x44, "tab": 0x09}
+
+
+class _KeyInput(ctypes.Structure):
+    _fields_ = [("wVk", wt.WORD), ("wScan", wt.WORD), ("dwFlags", wt.DWORD),
+                ("time", wt.DWORD), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+
+class _MouseInput(ctypes.Structure):
+    _fields_ = [("dx", wt.LONG), ("dy", wt.LONG), ("mouseData", wt.DWORD),
+                ("dwFlags", wt.DWORD), ("time", wt.DWORD), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+
+class _InputUnion(ctypes.Union):
+    _fields_ = [("ki", _KeyInput), ("mi", _MouseInput)]
+
+
+class _Input(ctypes.Structure):
+    _fields_ = [("type", wt.DWORD), ("u", _InputUnion)]
+
+
+def _force_foreground(hwnd):
+    """Make hwnd the foreground window despite Windows' foreground lock.
+
+    A background process may not just call SetForegroundWindow (it returns 0 and
+    nothing happens). Attaching our input queue to both the current foreground
+    thread and the target thread lifts the restriction for the duration.
+    """
+    if user32.GetForegroundWindow() == hwnd:
+        return True
+    current = user32.GetForegroundWindow()
+    our_tid = kernel32.GetCurrentThreadId()
+    fg_tid = user32.GetWindowThreadProcessId(current, None)
+    target_tid = user32.GetWindowThreadProcessId(hwnd, None)
+    user32.AttachThreadInput(our_tid, fg_tid, True)
+    user32.AttachThreadInput(our_tid, target_tid, True)
+    try:
+        user32.ShowWindow(hwnd, 9)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        user32.AttachThreadInput(our_tid, target_tid, False)
+        user32.AttachThreadInput(our_tid, fg_tid, False)
+    time.sleep(0.25)
+    return user32.GetForegroundWindow() == hwnd
+
+
+def _focus_game():
+    """Focus the game and return (hwnd, previously focused window).
+
+    Input injection always lands on the foreground window, so this is the one
+    operation that has to steal focus - the caller gives it back.
+    """
+    pid = game_pid()
+    if not pid:
+        raise RuntimeError("game not running")
+    hwnd = game_hwnd(pid)
+    if not hwnd:
+        raise RuntimeError("no game window")
+    previous = user32.GetForegroundWindow()
+    if not _force_foreground(hwnd):
+        raise RuntimeError("could not bring the game window to the foreground")
+    time.sleep(0.3)
+    return hwnd, previous
+
+
+def _restore_focus(previous):
+    if previous and previous != user32.GetForegroundWindow():
+        _force_foreground(previous)
+
+
+def _send_key(vk, down_ms=60):
+    # The game reads DirectInput, so posting messages is not enough - inject real
+    # scancode events and let Windows deliver them to the focused window.
+    scan = user32.MapVirtualKeyW(vk, 0)
+    KEYEVENTF_SCANCODE, KEYEVENTF_KEYUP = 0x0008, 0x0002
+    down = _Input(type=1, u=_InputUnion(ki=_KeyInput(0, scan, KEYEVENTF_SCANCODE, 0, None)))
+    up = _Input(type=1, u=_InputUnion(ki=_KeyInput(0, scan, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, 0, None)))
+    user32.SendInput(1, ctypes.byref(down), ctypes.sizeof(_Input))
+    time.sleep(down_ms / 1000.0)
+    user32.SendInput(1, ctypes.byref(up), ctypes.sizeof(_Input))
+
+
+def _click_client(hwnd, x, y):
+    point = wt.POINT(x, y)
+    user32.ClientToScreen(hwnd, ctypes.byref(point))
+    user32.SetCursorPos(point.x, point.y)
+    time.sleep(0.25)
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
+    down = _Input(type=0, u=_InputUnion(mi=_MouseInput(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, None)))
+    up = _Input(type=0, u=_InputUnion(mi=_MouseInput(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, None)))
+    user32.SendInput(1, ctypes.byref(down), ctypes.sizeof(_Input))
+    time.sleep(0.06)
+    user32.SendInput(1, ctypes.byref(up), ctypes.sizeof(_Input))
+
+
+def _move_relative(dx, dy, steps=8):
+    # The in-game cursor follows relative mouse deltas, so SetCursorPos cannot
+    # place it - feed motion the way a real mouse would.
+    MOUSEEVENTF_MOVE = 0x0001
+    for i in range(steps):
+        step_x = int(round(dx / steps))
+        step_y = int(round(dy / steps))
+        move = _Input(type=0, u=_InputUnion(mi=_MouseInput(step_x, step_y, 0, MOUSEEVENTF_MOVE, 0, None)))
+        user32.SendInput(1, ctypes.byref(move), ctypes.sizeof(_Input))
+        time.sleep(0.02)
+
+
+def _click_here():
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
+    down = _Input(type=0, u=_InputUnion(mi=_MouseInput(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, None)))
+    up = _Input(type=0, u=_InputUnion(mi=_MouseInput(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, None)))
+    user32.SendInput(1, ctypes.byref(down), ctypes.sizeof(_Input))
+    time.sleep(0.08)
+    user32.SendInput(1, ctypes.byref(up), ctypes.sizeof(_Input))
+
+
+def tool_input(args):
+    hwnd, previous = _focus_game()
+    done = []
+    for key in args.get("keys") or []:
+        vk = VK.get(str(key).lower())
+        if vk is None:
+            _restore_focus(previous)
+            return {"ok": False, "error": f"unknown key '{key}'", "known": sorted(VK)}
+        _send_key(vk)
+        done.append(f"key:{key}")
+        time.sleep(float(args.get("delay", 0.4)))
+    if args.get("move"):
+        dx, dy = args["move"]
+        _move_relative(dx, dy)
+        done.append(f"move:{dx},{dy}")
+        time.sleep(float(args.get("delay", 0.4)))
+    if args.get("click_here"):
+        _click_here()
+        done.append("click_here")
+        time.sleep(float(args.get("delay", 0.4)))
+    if args.get("click"):
+        x, y = args["click"]
+        rect = wt.RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(rect))
+        # Fractions let the caller stay resolution-independent.
+        if isinstance(x, float) and 0.0 <= x <= 1.0:
+            x = int(rect.right * x)
+        if isinstance(y, float) and 0.0 <= y <= 1.0:
+            y = int(rect.bottom * y)
+        _click_client(hwnd, int(x), int(y))
+        done.append(f"click:{x},{y}")
+        time.sleep(float(args.get("delay", 0.4)))
+    if not args.get("keep_focus"):
+        _restore_focus(previous)
+    return {"ok": True, "did": done, "focus_restored": not args.get("keep_focus")}
+
+
 def tool_logs(args):
     which = args.get("which", "paru")
     n = int(args.get("lines", 60))
@@ -548,6 +707,8 @@ TOOLS = {
                  {"type": "object", "properties": {"template_name": {"type": "string"}, "template_guid": {"type": "string"}, "position": {"type": "array", "items": {"type": "number"}}, "at_entity": {"type": "string"}, "at_entity_guid": {"type": "string"}}}),
     "g3_property": (tool_property, "Read raw Genome property data of an entity. Args: name|guid, get=[{property_set, property}] (omit both for the whole entity, set-only for a whole property set). Returns hex blobs (Genome binary serialization).",
                     {"type": "object", "properties": {"name": {"type": "string"}, "guid": {"type": "string"}, "get": {"type": "array", "items": {"type": "object", "properties": {"property_set": {"type": "string"}, "property": {"type": "string"}}}}}}),
+    "g3_input": (tool_input, "Send real input to the game (it is focused for the duration, then focus returns). Args: keys=[\"escape\",...]; move=[dx,dy] relative mouse motion (the in-game cursor ignores absolute positioning); click_here=true to click where the in-game cursor is; keep_focus=true to leave the game focused; delay.",
+                 {"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}}, "move": {"type": "array", "items": {"type": "number"}}, "click_here": {"type": "boolean"}, "click": {"type": "array", "items": {"type": "number"}}, "keep_focus": {"type": "boolean"}, "delay": {"type": "number"}}}),
     "g3_screenshot": (tool_screenshot, "Capture the game window to a PNG; returns the file path.", {"type": "object", "properties": {}}),
     "g3_logs": (tool_logs, "Tail a game log. Args: which = paru|paru_patch|crash, lines.",
                 {"type": "object", "properties": {"which": {"type": "string"}, "lines": {"type": "integer"}}}),

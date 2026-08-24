@@ -146,6 +146,25 @@ mCMcpAdmin::~mCMcpAdmin(void)
 
 void mCMcpAdmin::Process(void)
 {
+    if (!m_PendingSave.IsEmpty())
+    {
+        bCString SaveName = m_PendingSave;
+        m_PendingSave = "";
+
+        gCWorld *pWorld = gCWorld::GetCurrentWorld();
+        if (!pWorld)
+            m_LastSaveResult = "no world";
+        else if (!gCSession::GetInstance().IsSaveAllowed())
+            m_LastSaveResult = "saving not allowed right now";
+        else
+        {
+            eCProcessibleElement::eEResult Result = pWorld->CreateSaveGame(SaveName);
+            bCString Tmp;
+            Tmp.Format("CreateSaveGame -> %d", static_cast<GEInt>(Result));
+            m_LastSaveResult = Tmp;
+        }
+    }
+
     if (!m_PendingLoad.IsEmpty())
     {
         bCString SaveName = m_PendingLoad;
@@ -276,6 +295,7 @@ bCString mCMcpAdmin::Dispatch(bCString const &a_RequestJson)
             .Bool("game_running", Session.IsGameRunning())
             .Bool("paused", Session.IsPaused())
             .Str("last_load", m_LastLoadResult)
+            .Str("last_save", m_LastSaveResult)
             .Finish();
     }
 
@@ -317,6 +337,25 @@ bCString mCMcpAdmin::Dispatch(bCString const &a_RequestJson)
         m_PendingLoad = SaveName;
         m_PendingLoadOrder = Request.GetString("order", "world_first");
         return mCJsonWriter().Bool("ok", GETrue).Str("loading", SaveName).Finish();
+    }
+
+    if (Command == "new_game")
+    {
+        m_PendingLoad = "new";
+        m_PendingLoadOrder = "new_game";
+        return mCJsonWriter().Bool("ok", GETrue).Str("starting", bCString("new game")).Finish();
+    }
+
+    if (Command == "save_game")
+    {
+        bCString SaveName = Request.GetString("name");
+        if (SaveName.IsEmpty())
+            return Fail("name required");
+        if (!gCSession::GetInstance().IsGameRunning())
+            return Fail("no running game to save");
+
+        m_PendingSave = SaveName;
+        return mCJsonWriter().Bool("ok", GETrue).Str("saving", SaveName).Finish();
     }
 
     if (Command == "combat_state")

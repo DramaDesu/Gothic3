@@ -47,4 +47,6 @@ class mCMcpAdmin : public eCEngineComponentBase
     bCString m_PendingLoad;
     bCString m_PendingLoadOrder;
     bCString m_LastLoadResult;
+    bCString m_PendingSave;
+    bCString m_LastSaveResult;
 };
