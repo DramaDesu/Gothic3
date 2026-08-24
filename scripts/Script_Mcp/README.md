@@ -14,6 +14,7 @@ place where touching engine state is safe. No zmq/protobuf dependency, unlike
     {"cmd":"load_save","name":"QuickSave",
      "order":"world_first|session_first|session_only|new_game"}
     {"cmd":"combat_state"}                  -> player, or {"focus":true} / {"name":"..."}
+    {"cmd":"attack_speed","value":1.5}      -> live attack-speed multiplier (0.1..10)
     {"cmd":"nearby_npcs","radius":2000}     -> combat snapshot of every NPC in range
 
 `combat_state` reports what actually decides how a fight feels: CombatState,
@@ -47,6 +48,11 @@ Menu automation through OS input is a dead end and is not needed: the menu
 ignores the keyboard, its cursor follows relative mouse deltas only, and
 `PrintWindow` captures that cursor unreliably.
 
-Still open: `nearby_npcs` returns nothing in a loaded world, so `Entity::GetNPCs()`
-is the wrong source - switch to enumerating `eCSceneAdmin` entities (or the
-processing-range list `Game.dll` RVA 0x3F664 that Script_ModMe hooks).
+Entity enumeration goes through `eCSceneAdmin`'s entity map (a derived view
+reaches the protected member); `Entity::GetNPCs()` comes back empty in a live
+world. Player attributes come from the script-layer `PlayerMemory` - the hero's
+`gCDamageReceiver_PS` only carries placeholders (hp 1/1).
+
+A full run against the QuickSave world reports the hero at level 63 with
+10320 hp, 1004 strength, and 144 NPCs within 20000 units, including which of
+them currently target `PC_Hero`.

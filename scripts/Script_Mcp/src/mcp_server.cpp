@@ -3,8 +3,20 @@
 #include "mcp_json.h"
 
 #include <g3sdk/Script.h>
+#include <g3sdk/util/Hook.h>
 #include <g3sdk/util/Logging.h>
+#include <g3sdk/util/Memory.h>
 #include <g3sdk/util/Util.h>
+
+// Combat feel knob: Script_Game computes an attack speed per swing and we scale
+// it on the way out, so it can be retuned live instead of per build.
+GEFloat g_fAttackSpeedMultiplier = 1.0f;
+mCCallHook g_HookAttackSpeed;
+
+void GE_STDCALL ApplyAttackSpeedMultiplier(GEFloat &o_fAttackSpeed)
+{
+    o_fAttackSpeed *= g_fAttackSpeedMultiplier;
+}
 
 namespace
 {
@@ -15,6 +27,17 @@ bCString Fail(GELPCChar a_pError)
 {
     return mCJsonWriter().Bool("ok", GEFalse).Str("error", bCString(a_pError)).Finish();
 }
+
+// eCSceneAdmin keeps every entity in a protected map; a derived view is the
+// cheapest way to walk it (Entity::GetNPCs() comes back empty in a live world).
+class mCSceneEntities : public eCSceneAdmin
+{
+  public:
+    bTPtrMap<bCPropertyID, eCEntity *> &All()
+    {
+        return m_mapEntities;
+    }
+};
 
 eCEntity *FindEntityByName(bCString const &a_Name)
 {
@@ -67,7 +90,22 @@ bCString DescribeCombat(eCEntity *a_pEntity)
             Writer.Str("current_attacker", pAttacker->GetName());
     }
 
-    if (gCDamageReceiver_PS const *pDamage =
+    if (GetPropertySet<gCPlayerMemory_PS>(a_pEntity, eEPropertySetType_PlayerMemory))
+    {
+        // The hero's real attributes live in the script-layer PlayerMemory;
+        // his gCDamageReceiver_PS carries placeholder values.
+        Entity Wrapper(a_pEntity);
+        Writer.Int("hitpoints", Wrapper.PlayerMemory.GetHitPoints());
+        Writer.Int("hitpoints_max", Wrapper.PlayerMemory.GetHitPointsMax());
+        Writer.Int("stamina", Wrapper.PlayerMemory.GetStaminaPoints());
+        Writer.Int("stamina_max", Wrapper.PlayerMemory.GetStaminaPointsMax());
+        Writer.Int("mana", Wrapper.PlayerMemory.GetManaPoints());
+        Writer.Int("mana_max", Wrapper.PlayerMemory.GetManaPointsMax());
+        Writer.Int("strength", Wrapper.PlayerMemory.GetStrength());
+        Writer.Int("dexterity", Wrapper.PlayerMemory.GetDexterity());
+        Writer.Bool("is_player", GETrue);
+    }
+    else if (gCDamageReceiver_PS const *pDamage =
             GetPropertySet<gCDamageReceiver_PS>(a_pEntity, eEPropertySetType_DamageReceiver))
     {
         Writer.Int("hitpoints", pDamage->GetHitPoints());
@@ -358,6 +396,18 @@ bCString mCMcpAdmin::Dispatch(bCString const &a_RequestJson)
         return mCJsonWriter().Bool("ok", GETrue).Str("saving", SaveName).Finish();
     }
 
+    if (Command == "attack_speed")
+    {
+        if (Request.Has("value"))
+        {
+            GEFloat fValue = Request.GetFloat("value", 1.0f);
+            if (fValue < 0.1f || fValue > 10.0f)
+                return Fail("value must be between 0.1 and 10.0");
+            g_fAttackSpeedMultiplier = fValue;
+        }
+        return mCJsonWriter().Bool("ok", GETrue).Float("multiplier", g_fAttackSpeedMultiplier).Finish();
+    }
+
     if (Command == "combat_state")
     {
         eCEntity *pEntity = ResolveEntity(Request);
@@ -375,13 +425,19 @@ bCString mCMcpAdmin::Dispatch(bCString const &a_RequestJson)
         GEFloat fRadius = Request.GetFloat("radius", 2000.0f);
         bCVector const &PlayerPosition = pPlayer->GetWorldPosition();
 
-        bTObjArray<Entity> arrNpcs = Entity::GetNPCs();
+        eCSceneAdmin *pSceneAdmin = FindModule<eCSceneAdmin>();
+        if (!pSceneAdmin)
+            return Fail("no scene admin");
+
+        bTPtrMap<bCPropertyID, eCEntity *> &Entities = static_cast<mCSceneEntities *>(pSceneAdmin)->All();
         bCString List = "[";
         GEInt iEmitted = 0;
-        for (GEInt i = 0; i < arrNpcs.GetCount(); i++)
+        for (bTValMap<bCPropertyID, eCEntity *>::bCIterator Iter = Entities.Begin(); Iter != Entities.End(); Iter++)
         {
-            eCEntity *pEntity = arrNpcs[i].GetInstance();
+            eCEntity *pEntity = *Iter;
             if (!pEntity || pEntity == pPlayer)
+                continue;
+            if (!GetPropertySet<gCNPC_PS>(pEntity, eEPropertySetType_NPC))
                 continue;
 
             bCVector Delta = pEntity->GetWorldPosition() - PlayerPosition;
