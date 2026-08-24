@@ -92,6 +92,19 @@ bCString DescribeCombat(eCEntity *a_pEntity)
             Writer.Str("current_attacker", pAttacker->GetName());
     }
 
+    if (GetPropertySet<gCScriptRoutine_PS>(a_pEntity, eEPropertySetType_ScriptRoutine))
+    {
+        // CombatState is only a 0/1 flag; the actual per-frame combat machine is
+        // Action + AniState + the state clock, and the animation phase says
+        // whether the swing is winding up, active, or recovering.
+        Entity Routine(a_pEntity);
+        Writer.Int("action", static_cast<GEI32>(static_cast<gEAction>(Routine.Routine.Action)));
+        Writer.Int("ani_state", static_cast<GEI32>(static_cast<gEAniState>(Routine.Routine.AniState)));
+        Writer.Int("ani_phase", static_cast<GEI32>(Routine.GetCurrentAniPhase()));
+        Writer.Float("state_time", Routine.Routine.GetStateTime());
+        Writer.Str("task", Routine.Routine.GetCurrentTask());
+    }
+
     if (GetPropertySet<gCPlayerMemory_PS>(a_pEntity, eEPropertySetType_PlayerMemory))
     {
         // The hero's real attributes live in the script-layer PlayerMemory;
@@ -560,6 +573,19 @@ bCString mCMcpAdmin::Dispatch(bCString const &a_RequestJson)
             eCEntity *pSpawned = Session.SpawnEntity(Template, Position, GETrue);
             if (!pSpawned)
                 continue;
+
+            // A spawned template is neutral and just stands there, so an arena
+            // run has to make it hostile, point it at the player and put it in
+            // the attack routine - otherwise nothing happens and the fight is
+            // measured as perfectly safe.
+            if (Request.GetFloat("hostile", 1.0f) != 0.0f)
+            {
+                Entity Foe(pSpawned);
+                Entity Player(pPlayer);
+                Foe.NPC.AttitudeToPlayer2 = gEAttitude_Hostile;
+                Foe.NPC.SetCurrentTarget(Player);
+                Foe.Routine.SetTask(bCString("ZS_Attack"));
+            }
             if (iSpawned++)
                 List += ",";
             List += mCJsonWriter().Str("name", pSpawned->GetName()).Vector("position", pSpawned->GetWorldPosition()).Finish();
@@ -568,6 +594,19 @@ bCString mCMcpAdmin::Dispatch(bCString const &a_RequestJson)
         if (!iSpawned)
             return Fail("nothing spawned - is the template name right?");
         return mCJsonWriter().Bool("ok", GETrue).Int("spawned", iSpawned).Raw("entities", List).Finish();
+    }
+
+    if (Command == "tips")
+    {
+        eCDynamicEntity *pPlayer = gCSession::GetInstance().GetPlayer();
+        gCPlayerMemory_PS *pMemory =
+            GetPropertySet<gCPlayerMemory_PS>(pPlayer, eEPropertySetType_PlayerMemory);
+        if (!pMemory)
+            return Fail("no player memory");
+
+        // Tutorial popups hold the fight still, which quietly ruins measurements.
+        pMemory->AccessHideTips() = Request.Has("hide") ? (Request.GetFloat("hide", 1.0f) != 0.0f) : GETrue;
+        return mCJsonWriter().Bool("ok", GETrue).Bool("hide_tips", pMemory->GetHideTips()).Finish();
     }
 
     if (Command == "attack_speed")
