@@ -12,3 +12,4 @@ mcp/.useroptions.bak
 __pycache__/
 *.log
 *.dll
+.useroptions.bak
