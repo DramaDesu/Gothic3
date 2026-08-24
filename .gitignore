@@ -1,0 +1,14 @@
+# third-party clones (separate repos, do not vendor)
+/gothic3sdk/
+/gothic3sdk-examples/
+/gothic3sdk-jackydima/
+/g3dit/
+/Script_G3Fixes/
+/G3Archive/
+# build & runtime artifacts
+build/
+mcp/shots/
+mcp/.useroptions.bak
+__pycache__/
+*.log
+*.dll
