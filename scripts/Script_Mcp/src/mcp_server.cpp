@@ -215,6 +215,60 @@ void mCMcpAdmin::Process(void)
         {
             m_LastLoadResult = "no world";
         }
+        else if (Order == "hud" || Order.IsEmpty())
+        {
+            // Mirrors gCHUDFileManager::LoadGame, which is what the menu runs:
+            // the savegame header names the world, that world gets (re)activated
+            // - RestartWorld does Deactivate+Activate for an inactive world -
+            // and only then does LoadGameWorld restore the save into it.
+            gCProject *pProject = gCProject::GetCurrentProject();
+            if (!pProject)
+            {
+                m_LastLoadResult = "no current project";
+            }
+            else
+            {
+                GEU8 HeaderBuffer[0x100];
+                memset(HeaderBuffer, 0, sizeof(HeaderBuffer));
+                gCWorld::gCSaveGameHeader &Header = *reinterpret_cast<gCWorld::gCSaveGameHeader *>(HeaderBuffer);
+                if (pWorld->GetSaveGameHeader(SaveName, Header) != bEResult_Ok)
+                {
+                    m_LastLoadResult = "savegame header not readable";
+                }
+                else
+                {
+                    bCString WorldName = *reinterpret_cast<bCString *>(HeaderBuffer + 0x0C);
+                    gCWorld *pTarget = pProject->AccessWorld(WorldName);
+                    if (!pTarget)
+                    {
+                        m_LastLoadResult = bCString("world not found: ") + WorldName;
+                    }
+                    else
+                    {
+                        Session.Stop();
+                        pTarget->RestartWorld(GEFalse);
+                        GEBool bLoaded = pTarget->LoadGameWorld(SaveName, GETrue);
+                        if (!bLoaded)
+                        {
+                            m_LastLoadResult = bCString("LoadGameWorld failed for world ") + WorldName;
+                        }
+                        else
+                        {
+                            eCSceneAdmin *pSceneAdmin = FindModule<eCSceneAdmin>();
+                            eCEntity *pCamera =
+                                pSceneAdmin ? pSceneAdmin->GetEntityByName(bCString("PC_Camera")) : 0;
+                            Session.GotoLoadedPosition(pCamera, GETrue);
+                            Session.Start(gESession_StartMode_LoadGame);
+                            // The GUI closes its menu as part of loading; we do it
+                            // too so the world is actually visible afterwards.
+                            if (gCGUIManager *pGui = Session.GetGUIManager())
+                                pGui->CloseMenu();
+                            m_LastLoadResult = bCString("loaded ") + SaveName + " in " + WorldName;
+                        }
+                    }
+                }
+            }
+        }
         else if (Order == "session_first")
         {
             Session.Start(gESession_StartMode_LoadGame);
@@ -373,7 +427,7 @@ bCString mCMcpAdmin::Dispatch(bCString const &a_RequestJson)
 
         // Answer before the world goes away; the load runs at the next frame start.
         m_PendingLoad = SaveName;
-        m_PendingLoadOrder = Request.GetString("order", "world_first");
+        m_PendingLoadOrder = Request.GetString("order", "hud");
         return mCJsonWriter().Bool("ok", GETrue).Str("loading", SaveName).Finish();
     }
 
