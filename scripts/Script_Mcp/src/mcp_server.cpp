@@ -596,6 +596,69 @@ bCString mCMcpAdmin::Dispatch(bCString const &a_RequestJson)
         return mCJsonWriter().Bool("ok", GETrue).Int("spawned", iSpawned).Raw("entities", List).Finish();
     }
 
+    if (Command == "aggro")
+    {
+        eCDynamicEntity *pPlayer = gCSession::GetInstance().GetPlayer();
+        if (!pPlayer)
+            return Fail("no player");
+
+        eCSceneAdmin *pSceneAdmin = FindModule<eCSceneAdmin>();
+        if (!pSceneAdmin)
+            return Fail("no scene admin");
+
+        // Hostility set at spawn time gets overwritten once the engine finishes
+        // initialising the NPC and drops it into its default routine, so this is
+        // applied afterwards, as a separate step.
+        GEFloat fRadius = Request.GetFloat("radius", 1500.0f);
+        bCString Filter = Request.GetString("template");
+        bCVector const &Origin = pPlayer->GetWorldPosition();
+        Entity Player(pPlayer);
+
+        bTPtrMap<bCPropertyID, eCEntity *> &Entities = static_cast<mCSceneEntities *>(pSceneAdmin)->All();
+        GEInt iTouched = 0;
+        for (bTValMap<bCPropertyID, eCEntity *>::bCIterator Iter = Entities.Begin(); Iter != Entities.End(); Iter++)
+        {
+            eCEntity *pEntity = *Iter;
+            if (!pEntity || pEntity == pPlayer)
+                continue;
+            gCNPC_PS *pNpc = GetPropertySet<gCNPC_PS>(pEntity, eEPropertySetType_NPC);
+            if (!pNpc)
+                continue;
+            if (!Filter.IsEmpty() && pEntity->GetName().Find(Filter) < 0)
+                continue;
+            if ((pEntity->GetWorldPosition() - Origin).GetMagnitude() > fRadius)
+                continue;
+
+            gCDamageReceiver_PS const *pDamage =
+                GetPropertySet<gCDamageReceiver_PS>(pEntity, eEPropertySetType_DamageReceiver);
+            if (!pDamage || pDamage->GetHitPoints() <= 1)
+                continue; // not simulated yet, or already dead
+
+            Entity Foe(pEntity);
+            Foe.NPC.AttitudeToPlayer2 = gEAttitude_Hostile;
+            Foe.NPC.SetCurrentTarget(Player);
+            Foe.Routine.SetTask(bCString("ZS_Attack"));
+            iTouched++;
+        }
+        return mCJsonWriter().Bool("ok", GETrue).Int("aggroed", iTouched).Finish();
+    }
+
+    if (Command == "close_menu")
+    {
+        gCGUIManager *pGui = gCSession::GetInstance().GetGUIManager();
+        if (!pGui)
+            return Fail("no gui manager");
+
+        // Pressing Escape to dismiss a popup opens the main menu instead, which
+        // pauses everything - closing it from code avoids that trap entirely.
+        GEBool bWasOpen = pGui->IsMenuOpen();
+        if (bWasOpen)
+            pGui->CloseMenu();
+        if (pGui->IsAnyPageOpen())
+            pGui->CloseDialog();
+        return mCJsonWriter().Bool("ok", GETrue).Bool("was_open", bWasOpen).Bool("menu_open", pGui->IsMenuOpen()).Finish();
+    }
+
     if (Command == "tips")
     {
         eCDynamicEntity *pPlayer = gCSession::GetInstance().GetPlayer();

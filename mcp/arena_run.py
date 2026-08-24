@@ -31,14 +31,18 @@ time.sleep(3)
 print("tips off:", call({"cmd":"tips","hide":1}), flush=True)
 # dismiss whatever popup is on screen and move away from the scripted start scene
 g3.tool_input({"keys":["return"],"delay":0.8})
-g3.tool_input({"keys":["escape"],"delay":0.8})
+print("close_menu:", call({"cmd":"close_menu"}), flush=True)
+st=call({"cmd":"ping"})
+print("state before run:", st, flush=True)
 p=call({"cmd":"combat_state"})["entity"]
 x,y,z=p["position"]
 print("player at", p["position"], "hp", p["hitpoints"], flush=True)
 print("teleport aside:", call({"cmd":"teleport","x":x+4000,"y":y+200,"z":z+4000}), flush=True)
 time.sleep(3)
 print("spawn 2 orcs:", json.dumps(call({"cmd":"spawn","template":"Orc_Warrior_01","count":2,"distance":500}), ensure_ascii=False)[:220], flush=True)
-time.sleep(2)
+time.sleep(4)
+print("aggro:", call({"cmd":"aggro","radius":1500}), flush=True)
+time.sleep(1)
 
 rows=[]; t0=time.time(); last_near=0; near={}
 while time.time()-t0 < 70:
@@ -57,6 +61,8 @@ while time.time()-t0 < 70:
             last_near=now
         except Exception: pass
     foes=[v for v in near.values() if v["state"].get("attitude_to_player")==4]
+    if now-last_near > 1.5 and call({"cmd":"ping"}).get("state")=="MENU":
+        call({"cmd":"close_menu"})
     rows.append({"t":round(now,2), "hp":e.get("hitpoints"), "action":e.get("action"),
                  "ani_state":e.get("ani_state"), "ani_phase":e.get("ani_phase"),
                  "state_time":e.get("state_time"), "task":e.get("task",""),

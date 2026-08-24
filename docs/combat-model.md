@@ -49,3 +49,27 @@ measurement that turns "combat feels bad" into a number.
 - **Blocking is time-boxed and asymmetric.** The hero can block for at most
   2.5 s; NPCs can block longer. In vanilla a block that outlasts stamina bleeds
   the overflow into health.
+
+## First arena measurement (2 orcs vs a passive fresh hero)
+
+`Orc_Warrior_01` x2, spawned 500 units away and aggroed, against a level-1 hero
+with 200 hp who does not fight back. 70 s recorded at ~9 Hz
+([raw data](arena-run-2orcs.csv)).
+
+| measurement | value |
+| --- | --- |
+| damage per hit | 25–50, average 37 |
+| share of a fresh health bar per hit | 12–25 % |
+| hits to kill | 5.5 average, 4 worst case |
+| shortest gap between hits | 0.53 s |
+| gaps during sustained contact | 0.53 / 1.17 / 1.49 / 3.22 s, average 1.60 s → ~37 hits per minute |
+| player staggered | 4 episodes, ~0.3 s each |
+
+Two things stand out already. A common early-game enemy removes a fifth of the
+health bar per swing, so four to six connected hits end a new character. And the
+shortest observed gap is half a second, which is faster than a stagger recovery
+plus a swing - the shape people describe as being chain-hit.
+
+The caveat matters: the hero stood still, so this measures incoming pressure
+only. Stagger time is not representative until the player is actually swinging
+and blocking, since stagger is charged against the victim's own action.
