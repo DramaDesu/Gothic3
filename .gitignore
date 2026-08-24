@@ -13,3 +13,9 @@ __pycache__/
 *.log
 *.dll
 .useroptions.bak
+# one-off run scripts and their raw output (curated data lives in docs/)
+mcp/cycle.py
+mcp/fresh*.py
+mcp/arena_log.*
+mcp/arena2.csv
+mcp/*.log
