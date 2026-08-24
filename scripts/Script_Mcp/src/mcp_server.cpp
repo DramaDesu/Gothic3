@@ -2,6 +2,8 @@
 
 #include "mcp_json.h"
 
+#include <math.h>
+
 #include <g3sdk/Script.h>
 #include <g3sdk/util/Hook.h>
 #include <g3sdk/util/Logging.h>
@@ -196,10 +198,12 @@ void mCMcpAdmin::Process(void)
             m_LastSaveResult = "saving not allowed right now";
         else
         {
-            eCProcessibleElement::eEResult Result = pWorld->CreateSaveGame(SaveName);
-            bCString Tmp;
-            Tmp.Format("CreateSaveGame -> %d", static_cast<GEInt>(Result));
-            m_LastSaveResult = Tmp;
+            // SaveGameWorld is the counterpart of LoadGameWorld. CreateSaveGame is
+            // an editor-side call: it fails here and leaves the session with no
+            // current world, which then breaks saving and listing entirely.
+            eCGfxImageData *pThumbnail = pWorld->CreateSaveGameImageFromBB();
+            GEBool bSaved = pWorld->SaveGameWorld(SaveName, pThumbnail, 0, 0);
+            m_LastSaveResult = bSaved ? bCString("saved ") + SaveName : bCString("SaveGameWorld failed");
         }
     }
 
@@ -282,8 +286,27 @@ void mCMcpAdmin::Process(void)
         }
         else if (Order == "new_game")
         {
-            Session.Start(gESession_StartMode_NewGame);
-            m_LastLoadResult = "new_game: started";
+            // Mirrors gCHUDFileManager::NewGame: activate the world first, or the
+            // session ends up running with no current world at all (which then
+            // breaks saving and the savegame listing).
+            gCProject *pProject = gCProject::GetCurrentProject();
+            gCWorld *pTarget = pProject ? pProject->AccessWorld(bCString("G3_World_01")) : 0;
+            if (!pTarget)
+            {
+                m_LastLoadResult = "new_game: world G3_World_01 not found";
+            }
+            else
+            {
+                // No explicit Stop()/Deactivate() here: gCWorld::Activate calls
+                // gCSession::Stop() itself, and it dies with "no world left" if we
+                // have already torn the world down underneath it.
+                pTarget->RestartWorld(GEFalse);
+                Session.GotoStartPosition(GETrue);
+                Session.Start(gESession_StartMode_NewGame);
+                if (gCGUIManager *pGui = Session.GetGUIManager())
+                    pGui->CloseMenu();
+                m_LastLoadResult = "new_game: started in G3_World_01";
+            }
         }
         else
         {
@@ -448,6 +471,103 @@ bCString mCMcpAdmin::Dispatch(bCString const &a_RequestJson)
 
         m_PendingSave = SaveName;
         return mCJsonWriter().Bool("ok", GETrue).Str("saving", SaveName).Finish();
+    }
+
+    if (Command == "attributes")
+    {
+        eCDynamicEntity *pPlayer = gCSession::GetInstance().GetPlayer();
+        if (!pPlayer)
+            return Fail("no player");
+
+        Entity Wrapper(pPlayer);
+        GELPCChar const c_pNames[] = {"Strength", "Dexterity", "HitPoints", "ManaPoints", "StaminaPoints"};
+        bCString List = "[";
+        for (GEInt i = 0; i < 5; i++)
+        {
+            if (i)
+                List += ",";
+            bCString Name(c_pNames[i]);
+            // A value the UI shows is base + modifier; splitting them tells us
+            // whether a suspicious number comes from the save or from buffs.
+            List += mCJsonWriter()
+                        .Str("name", Name)
+                        .Int("value", Wrapper.PlayerMemory.GetValue(Name))
+                        .Int("base", Wrapper.PlayerMemory.GetBaseValue(Name))
+                        .Int("modifier", Wrapper.PlayerMemory.GetModifier(Name))
+                        .Int("maximum", Wrapper.PlayerMemory.GetMaximum(Name))
+                        .Finish();
+        }
+        List += "]";
+        return mCJsonWriter().Bool("ok", GETrue).Raw("attributes", List).Finish();
+    }
+
+    if (Command == "teleport")
+    {
+        eCDynamicEntity *pPlayer = gCSession::GetInstance().GetPlayer();
+        if (!pPlayer)
+            return Fail("no player");
+
+        bCVector Target;
+        if (Request.Has("x"))
+        {
+            Target.SetX(Request.GetFloat("x"));
+            Target.SetY(Request.GetFloat("y"));
+            Target.SetZ(Request.GetFloat("z"));
+        }
+        else if (Request.Has("to"))
+        {
+            eCEntity *pTarget = FindEntityByName(Request.GetString("to"));
+            if (!pTarget)
+                return Fail("target entity not found");
+            Target = pTarget->GetWorldPosition();
+        }
+        else
+            return Fail("give x/y/z or to");
+
+        pPlayer->SetWorldPosition(Target);
+        return mCJsonWriter().Bool("ok", GETrue).Vector("position", pPlayer->GetWorldPosition()).Finish();
+    }
+
+    if (Command == "spawn")
+    {
+        bCString Template = Request.GetString("template");
+        if (Template.IsEmpty())
+            return Fail("template required");
+
+        eCDynamicEntity *pPlayer = gCSession::GetInstance().GetPlayer();
+        if (!pPlayer)
+            return Fail("no player");
+
+        GEInt iCount = static_cast<GEInt>(Request.GetFloat("count", 1.0f));
+        if (iCount < 1 || iCount > 20)
+            return Fail("count must be 1..20");
+        GEFloat fDistance = Request.GetFloat("distance", 600.0f);
+
+        bCVector const &Origin = pPlayer->GetWorldPosition();
+        gCSession &Session = gCSession::GetInstance();
+        bCString List = "[";
+        GEInt iSpawned = 0;
+        for (GEInt i = 0; i < iCount; i++)
+        {
+            // Spread them on a circle around the player so a group fight starts
+            // from a repeatable formation rather than one pile.
+            GEFloat fAngle = 6.2831853f * static_cast<GEFloat>(i) / static_cast<GEFloat>(iCount);
+            bCVector Position;
+            Position.SetX(Origin.GetX() + fDistance * cosf(fAngle));
+            Position.SetY(Origin.GetY() + 100.0f);
+            Position.SetZ(Origin.GetZ() + fDistance * sinf(fAngle));
+
+            eCEntity *pSpawned = Session.SpawnEntity(Template, Position, GETrue);
+            if (!pSpawned)
+                continue;
+            if (iSpawned++)
+                List += ",";
+            List += mCJsonWriter().Str("name", pSpawned->GetName()).Vector("position", pSpawned->GetWorldPosition()).Finish();
+        }
+        List += "]";
+        if (!iSpawned)
+            return Fail("nothing spawned - is the template name right?");
+        return mCJsonWriter().Bool("ok", GETrue).Int("spawned", iSpawned).Raw("entities", List).Finish();
     }
 
     if (Command == "attack_speed")
