@@ -20,9 +20,24 @@ place where touching engine state is safe. No zmq/protobuf dependency, unlike
 AttackReason, attitude, current target/attacker, last-hit timestamp, status
 effects, hitpoints/stamina/mana.
 
-## Known gap: headless savegame loading
-`gCSession::Start(gESession_StartMode_LoadGame)` does get the session INGAME, but
-`gCWorld::LoadGameWorld()` returns false both from the menu and from a live
-session, so the world comes up empty. The menu's real load path has not been
-traced yet — that needs a debugger on the GUI callback, not more guessing.
+## Known gap: headless world loading
+`gCSession::Start()` reaches INGAME for both `LoadGame` and `NewGame`, but the
+world stays empty (bare sky, no player), and `gCWorld::LoadGameWorld()` returns
+false in every context tried:
+
+| attempt | result |
+| --- | --- |
+| `LoadGameWorld` from the menu | false |
+| `LoadGameWorld` with a live session | false |
+| `Start(LoadGame)` / `Start(NewGame)` alone | session runs, world empty |
+| a save written by this very build | false — so it is not save compatibility |
+
+So loading a world is neither `Start` nor `LoadGameWorld`; the GUI drives
+something else, and the SDK exposes no world-loading entry point. Tracing that
+needs a debugger on `gCSession::OnGameMenuClicked` (exported), not more guesses.
+
+Driving the menu through OS input does not substitute for it either: the menu
+ignores the keyboard, its cursor follows relative mouse deltas only, and
+`PrintWindow` captures that cursor unreliably, so clicking blind does not land.
+
 Until then: load a save by hand, after which every command works INGAME.
