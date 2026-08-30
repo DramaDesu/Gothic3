@@ -63,7 +63,8 @@ add_custom_target(shaders DEPENDS ${SHADER_OUTPUTS})
 add_library(render STATIC
   src/render/window.cpp
   src/render/vulkan.cpp
-  src/render/renderer.cpp)
+  src/render/renderer.cpp
+  src/render/texture.cpp)
 target_include_directories(render PUBLIC src)
 target_link_libraries(render PUBLIC genome Vulkan::Vulkan)
 

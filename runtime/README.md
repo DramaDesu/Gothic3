@@ -21,7 +21,7 @@ motions, skins a character and draws it in a Vulkan window.
     g3actor "…/Gothic 3/Data/_compiledAnimation.pak" G3_Orc_Body_Warrior.xact
     g3actor "…/Gothic 3/Data/_compiledAnimation.pak" # parse every actor
     g3anim  "…/Gothic 3/Data/_compiledAnimation.pak" G3_Orc_Body_Warrior.xact             "Orc_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_400.xmot"
-    g3view  "…/Gothic 3/Data/_compiledAnimation.pak" G3_Orc_Body_Warrior.xact             "Orc_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_400.xmot"
+    g3view  "…/Gothic 3/Data/_compiledAnimation.pak" G3_Orc_Body_Warrior.xact             "Orc_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_400.xmot"             --data "…/Gothic 3/Data" --switch 2
 
 ## What the data looks like
 
@@ -136,6 +136,19 @@ it keeps the GPU side to one pipeline until there is a reason to move it.
 Arrow keys orbit, W/S zoom, Space pauses, Escape quits. Passing no motion draws
 the bind pose, because a clip with no parts leaves every bone at its rest
 transform.
+
+![The orc, textured](../docs/orc-textured.png)
+
+Pass `--data` and the viewer follows the whole chain by itself: submesh names a
+material, the material names a source texture that never shipped, and the skin
+variant picks the file that did. For the orc at variant 2 that lands on
+`g3_orc_warrior_body_diffuse_s3.ximg` (1024x1024 DXT1) and
+`g3_orc_warrior_body_normal_s1.ximg` (512x512 DXT5), which is exactly what the
+material tooling predicted.
+
+Normal maps are sampled in the DXT5nm layout - Y from green, X from alpha, Z
+rebuilt in the shader - and the block data goes to the GPU compressed, as BC1
+and BC3. One draw per submesh, since each carries its own material.
 
 ![The orc in bind pose](../docs/orc-bind-pose.png)
 

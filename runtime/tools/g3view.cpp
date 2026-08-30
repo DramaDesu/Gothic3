@@ -4,6 +4,8 @@
 //
 // Left/right drag-free orbit with the arrow keys, W/S to zoom, Space to pause.
 
+#include "genome/image.h"
+#include "genome/material.h"
 #include "genome/pak.h"
 #include "render/renderer.h"
 #include "render/window.h"
@@ -12,6 +14,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <set>
 #include <iostream>
 
 namespace
@@ -85,10 +90,24 @@ std::array<float, 16> multiply(const std::array<float, 16> &a, const std::array<
 
 int main(int argc, char **argv)
 {
+    // Unbuffered, so a redirected log shows progress while the window is up.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+
     if (argc < 3)
     {
-        std::puts("usage: g3view <archive.pak> <actor.xact> [motion.xmot]");
+        std::puts("usage: g3view <archive.pak> <actor.xact> [motion.xmot] [--data <Data dir>] [--switch n]\n"
+                  "  --data points at the game's Data folder so materials and textures load too");
         return 2;
+    }
+
+    std::string dataDirectory;
+    int materialSwitch = 0;
+    for (int index = 3; index + 1 < argc; ++index)
+    {
+        if (std::string(argv[index]) == "--data")
+            dataDirectory = argv[index + 1];
+        else if (std::string(argv[index]) == "--switch")
+            materialSwitch = std::atoi(argv[index + 1]);
     }
 
     std::string error;
@@ -97,6 +116,15 @@ int main(int argc, char **argv)
     {
         std::cerr << "error: " << error << "\n";
         return 1;
+    }
+
+    std::unique_ptr<genome::PakArchive> materials, images_;
+    if (!dataDirectory.empty())
+    {
+        materials = genome::PakArchive::open(dataDirectory + "/_compiledMaterial.pak", nullptr);
+        images_ = genome::PakArchive::open(dataDirectory + "/_compiledImage.pak", nullptr);
+        if (!materials || !images_)
+            std::puts("warning: could not open the material or image archive; drawing untextured");
     }
 
     genome::Actor actor;
@@ -108,7 +136,8 @@ int main(int argc, char **argv)
 
     genome::Motion motion;
     const genome::Skeleton skeleton = genome::buildSkeleton(actor);
-    if (argc > 3 && !genome::loadMotion(archive->read(argv[3], &error), motion, &error))
+    const bool hasMotion = argc > 3 && argv[3][0] != 45;
+    if (hasMotion && !genome::loadMotion(archive->read(argv[3], &error), motion, &error))
     {
         std::cerr << "motion: " << error << "\n";
         return 1;
@@ -130,8 +159,69 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    // Each submesh names a material, the material names source textures, and the
+    // skin variant picks which of them actually shipped.
+    std::vector<render::CharacterRenderer::SubmeshTextures> textures(actor.submeshes.size());
+    std::vector<genome::Image> images;
+    images.reserve(actor.submeshes.size() * 2);
+
+    if (materials && images_)
+    {
+        // The resolver asks about bare base names, so the archive is indexed the
+        // same way: leaf name, lower-cased, extension removed.
+        std::set<std::string> imageNames;
+        for (const genome::PakEntry &entry : images_->entries())
+        {
+            if (entry.deleted || entry.path.size() < 6 || entry.path.compare(entry.path.size() - 5, 5, ".ximg") != 0)
+                continue;
+            const std::size_t slash = entry.path.find_last_of('/');
+            const std::string leaf = slash == std::string::npos ? entry.path : entry.path.substr(slash + 1);
+            imageNames.insert(leaf.substr(0, leaf.size() - 5));
+        }
+        const auto exists = [&](const std::string &name) { return imageNames.count(name) != 0; };
+        const auto loadSlot = [&](const genome::Material &material, genome::Slot slot) -> const genome::Image * {
+            const genome::Sampler *sampler = material.texture(slot);
+            if (!sampler)
+                return nullptr;
+            const genome::TextureResolution resolved = genome::resolveTexture(*sampler, materialSwitch, exists);
+            if (resolved.fileName.empty())
+                return nullptr;
+
+            genome::Image image;
+            std::string imageError;
+            if (!genome::loadImage(images_->read(resolved.fileName, &imageError), image, &imageError))
+            {
+                std::printf("  %s: %s\n", resolved.fileName.c_str(), imageError.c_str());
+                return nullptr;
+            }
+            std::printf("  %-8s %s (%ux%u %s)\n", slot == genome::Slot::Diffuse ? "diffuse" : "normal",
+                        resolved.fileName.c_str(), image.width, image.height, genome::formatName(image.format));
+            images.push_back(std::move(image));
+            return &images.back();
+        };
+
+        for (std::size_t index = 0; index < actor.submeshes.size(); ++index)
+        {
+            const std::uint8_t materialIndex = actor.submeshes[index].materialIndex;
+            if (materialIndex >= actor.materials.size() || actor.materials[materialIndex].empty())
+                continue;
+
+            genome::Material material;
+            std::string materialError;
+            if (!genome::loadMaterial(materials->read(actor.materials[materialIndex], &materialError), material,
+                                      &materialError))
+            {
+                std::printf("  %s: %s\n", actor.materials[materialIndex].c_str(), materialError.c_str());
+                continue;
+            }
+            std::printf("submesh %zu uses %s\n", index, actor.materials[materialIndex].c_str());
+            textures[index].diffuse = loadSlot(material, genome::Slot::Diffuse);
+            textures[index].normal = loadSlot(material, genome::Slot::Normal);
+        }
+    }
+
     render::CharacterRenderer renderer;
-    if (!renderer.create(device, actor, &error))
+    if (!renderer.create(device, actor, textures, &error))
     {
         std::cerr << "renderer: " << error << "\n";
         return 1;

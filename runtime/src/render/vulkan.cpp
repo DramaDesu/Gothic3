@@ -335,6 +335,46 @@ std::uint32_t Device::findMemoryType(std::uint32_t mask, VkMemoryPropertyFlags p
     return 0;
 }
 
+bool Device::allocate(const VkMemoryRequirements &requirements, bool hostVisible, VkDeviceMemory &memory,
+                      std::string *error)
+{
+    const VkMemoryPropertyFlags properties =
+        hostVisible ? (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                    : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    VkMemoryAllocateInfo info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    info.allocationSize = requirements.size;
+    info.memoryTypeIndex = findMemoryType(requirements.memoryTypeBits, properties);
+    return check(vkAllocateMemory(m_device, &info, nullptr, &memory), error, "vkAllocateMemory");
+}
+
+VkCommandBuffer Device::beginOneShot()
+{
+    VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocate.commandPool = m_commandPool;
+    allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate.commandBufferCount = 1;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_device, &allocate, &command);
+
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(command, &begin);
+    return command;
+}
+
+void Device::endOneShot(VkCommandBuffer command)
+{
+    vkEndCommandBuffer(command);
+
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command;
+    vkQueueSubmit(m_queue, 1, &submit, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_queue);
+    vkFreeCommandBuffers(m_device, m_commandPool, 1, &command);
+}
+
 Buffer Device::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible, std::string *error)
 {
     Buffer buffer;

@@ -52,6 +52,13 @@ class Device
     Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible, std::string *error);
     void destroyBuffer(Buffer &buffer);
 
+    bool allocate(const VkMemoryRequirements &requirements, bool hostVisible, VkDeviceMemory &memory,
+                  std::string *error);
+
+    // Records and runs a command buffer immediately, for uploads at load time.
+    VkCommandBuffer beginOneShot();
+    void endOneShot(VkCommandBuffer command);
+
   private:
     bool pickPhysicalDevice(std::string *error);
     bool createSwapchain(std::string *error);

@@ -42,14 +42,40 @@ VkShaderModule loadShader(VkDevice device, const std::string &path)
 
 } // namespace
 
-bool CharacterRenderer::create(Device &device, const genome::Actor &actor, std::string *error)
+namespace
+{
+
+// A one-pixel image standing in for a missing map, so the shader never has to
+// ask whether a texture exists.
+genome::Image solidImage(std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a)
+{
+    genome::Image image;
+    image.width = 1;
+    image.height = 1;
+    image.faceCount = 1;
+    image.format = genome::ImageFormat::A8R8G8B8;
+    image.data = {b, g, r, a};
+    image.levels.push_back({1, 1, 0, 4});
+    image.faceStride = 4;
+    return image;
+}
+
+} // namespace
+
+bool CharacterRenderer::create(Device &device, const genome::Actor &actor,
+                               const std::vector<SubmeshTextures> &textures, std::string *error)
 {
     // Submesh indices are local, so they are rebased while the submeshes are
-    // concatenated into one buffer.
+    // concatenated into one buffer; each keeps its slice for drawing.
     std::vector<std::uint32_t> indices;
     std::uint32_t base = 0;
     for (const genome::ActorSubmesh &submesh : actor.submeshes)
     {
+        Part part;
+        part.firstIndex = static_cast<std::uint32_t>(indices.size());
+        part.indexCount = static_cast<std::uint32_t>(submesh.indices.size());
+        m_parts.push_back(part);
+
         for (std::uint32_t index : submesh.indices)
             indices.push_back(index + base);
         base += static_cast<std::uint32_t>(submesh.vertices.size());
@@ -71,6 +97,68 @@ bool CharacterRenderer::create(Device &device, const genome::Actor &actor, std::
         return false;
     std::memcpy(m_indexBuffer.mapped, indices.data(), sizeof(std::uint32_t) * indices.size());
 
+    const genome::Image white = solidImage(255, 255, 255, 255);
+    const genome::Image flat = solidImage(0, 128, 0, 128); // neutral in the DXT5nm layout
+    if (!createTexture(device, white, true, m_white, error) || !createTexture(device, flat, false, m_flat, error))
+        return false;
+
+    for (std::size_t index = 0; index < m_parts.size(); ++index)
+    {
+        const SubmeshTextures wanted = index < textures.size() ? textures[index] : SubmeshTextures{};
+        if (wanted.diffuse && !createTexture(device, *wanted.diffuse, true, m_parts[index].diffuse, error))
+            return false;
+        if (wanted.normal && !createTexture(device, *wanted.normal, false, m_parts[index].normal, error))
+            return false;
+    }
+
+    VkDescriptorSetLayoutBinding bindings[2]{};
+    for (std::uint32_t binding = 0; binding < 2; ++binding)
+    {
+        bindings[binding].binding = binding;
+        bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[binding].descriptorCount = 1;
+        bindings[binding].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount = 2;
+    layoutInfo.pBindings = bindings;
+    vkCreateDescriptorSetLayout(device.device(), &layoutInfo, nullptr, &m_descriptorLayout);
+
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                  static_cast<std::uint32_t>(m_parts.size() * 2)};
+    VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = static_cast<std::uint32_t>(m_parts.size());
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    vkCreateDescriptorPool(device.device(), &poolInfo, nullptr, &m_descriptorPool);
+
+    for (Part &part : m_parts)
+    {
+        VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocate.descriptorPool = m_descriptorPool;
+        allocate.descriptorSetCount = 1;
+        allocate.pSetLayouts = &m_descriptorLayout;
+        vkAllocateDescriptorSets(device.device(), &allocate, &part.descriptor);
+
+        const Texture &diffuse = part.diffuse.valid() ? part.diffuse : m_white;
+        const Texture &normal = part.normal.valid() ? part.normal : m_flat;
+        VkDescriptorImageInfo images[2]{
+            {diffuse.sampler, diffuse.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {normal.sampler, normal.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        };
+        VkWriteDescriptorSet writes[2]{};
+        for (std::uint32_t binding = 0; binding < 2; ++binding)
+        {
+            writes[binding] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            writes[binding].dstSet = part.descriptor;
+            writes[binding].dstBinding = binding;
+            writes[binding].descriptorCount = 1;
+            writes[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[binding].pImageInfo = &images[binding];
+        }
+        vkUpdateDescriptorSets(device.device(), 2, writes, 0, nullptr);
+    }
+
     return createPipeline(device, error);
 }
 
@@ -90,6 +178,8 @@ bool CharacterRenderer::createPipeline(Device &device, std::string *error)
     pushRange.size = sizeof(PushConstants);
 
     VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &m_descriptorLayout;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushRange;
     vkCreatePipelineLayout(device.device(), &layoutInfo, nullptr, &m_layout);
@@ -248,11 +338,30 @@ void CharacterRenderer::draw(Device &device, const std::array<float, 16> &viewPr
     const VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(command, 0, 1, &m_vertexBuffer[device.frameIndex()].handle, &offset);
     vkCmdBindIndexBuffer(command, m_indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(command, static_cast<std::uint32_t>(m_indexCount), 1, 0, 0, 0);
+
+    // One draw per submesh, because each carries its own material.
+    for (const Part &part : m_parts)
+    {
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &part.descriptor, 0,
+                                nullptr);
+        vkCmdDrawIndexed(command, part.indexCount, 1, part.firstIndex, 0, 0);
+    }
 }
 
 void CharacterRenderer::destroy(Device &device)
 {
+    for (Part &part : m_parts)
+    {
+        destroyTexture(device, part.diffuse);
+        destroyTexture(device, part.normal);
+    }
+    destroyTexture(device, m_white);
+    destroyTexture(device, m_flat);
+    if (m_descriptorPool)
+        vkDestroyDescriptorPool(device.device(), m_descriptorPool, nullptr);
+    if (m_descriptorLayout)
+        vkDestroyDescriptorSetLayout(device.device(), m_descriptorLayout, nullptr);
+
     for (Buffer &buffer : m_vertexBuffer)
         device.destroyBuffer(buffer);
     device.destroyBuffer(m_indexBuffer);
