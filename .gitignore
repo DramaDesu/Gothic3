@@ -19,3 +19,4 @@ mcp/fresh*.py
 mcp/arena_log.*
 mcp/arena2.csv
 mcp/*.log
+runtime/build/
