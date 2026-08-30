@@ -7,6 +7,7 @@ layout(push_constant) uniform Push
 {
     mat4 viewProjection;
     vec4 lightDirection;
+    uint boneBase;
 }
 push;
 

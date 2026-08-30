@@ -130,9 +130,17 @@ point.
 ## The viewer
 
 `g3view` opens a window and draws the character: Vulkan 1.3 with dynamic
-rendering, so there are no render pass or framebuffer objects. Skinning runs on
-the CPU into a per-frame vertex buffer - a few thousand vertices is nothing, and
-it keeps the GPU side to one pipeline until there is a reason to move it.
+rendering, so there are no render pass or framebuffer objects.
+
+Skinning runs on the GPU. Vertices are uploaded once in bind pose carrying four
+bone indices and weights each, and the only thing written per frame is a storage
+buffer of bone matrices - 182 of them for a body plus a head. Every piece of the
+character gets a slice of that buffer, and a push constant tells the shader
+where its slice starts, so one pipeline draws all of them.
+
+The data allows up to twenty influences per vertex and does not sort them, so
+the heaviest four are kept and renormalised at load time; the shader can then
+blend blindly.
 Arrow keys orbit, W/S zoom, Space pauses, Escape quits. Passing no motion draws
 the bind pose, because a clip with no parts leaves every bone at its rest
 transform.
