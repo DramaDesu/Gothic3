@@ -12,6 +12,7 @@ add_library(genome STATIC
   src/genome/pak.cpp
   src/genome/property_set.cpp
   src/genome/mesh.cpp
+  src/genome/material.cpp
   src/genome/image.cpp
   src/genome/actor.cpp
   src/genome/motion.cpp)
@@ -23,6 +24,9 @@ target_link_libraries(g3pak PRIVATE genome)
 
 add_executable(g3mesh tools/g3mesh.cpp)
 target_link_libraries(g3mesh PRIVATE genome)
+
+add_executable(g3mat tools/g3mat.cpp)
+target_link_libraries(g3mat PRIVATE genome)
 
 add_executable(g3img tools/g3img.cpp)
 target_link_libraries(g3img PRIVATE genome)
