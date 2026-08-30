@@ -11,7 +11,8 @@ target_include_directories(miniz PUBLIC third_party)
 add_library(genome STATIC
   src/genome/pak.cpp
   src/genome/property_set.cpp
-  src/genome/mesh.cpp)
+  src/genome/mesh.cpp
+  src/genome/actor.cpp)
 target_include_directories(genome PUBLIC src)
 target_link_libraries(genome PRIVATE miniz)
 
@@ -20,3 +21,6 @@ target_link_libraries(g3pak PRIVATE genome)
 
 add_executable(g3mesh tools/g3mesh.cpp)
 target_link_libraries(g3mesh PRIVATE genome)
+
+add_executable(g3actor tools/g3actor.cpp)
+target_link_libraries(g3actor PRIVATE genome)
