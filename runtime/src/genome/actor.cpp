@@ -59,33 +59,51 @@ Matrix4 compose(const std::array<float, 3> &position, const std::array<float, 4>
     return m;
 }
 
-// Affine inverse: transpose the rotation part (scale is uniform throughout the
-// shipping data) and rotate the translation back.
-Matrix4 inverseAffine(const Matrix4 &m)
+// Full 4x4 inverse. The transforms are affine and mostly rigid, but a handful of
+// nodes carry mirror scales, so the general form avoids special cases.
+Matrix4 inverse(const Matrix4 &m)
 {
-    Matrix4 out = identity();
-    float scaleSquared[3];
-    for (int axis = 0; axis < 3; ++axis)
-        scaleSquared[axis] =
-            m[axis * 4 + 0] * m[axis * 4 + 0] + m[axis * 4 + 1] * m[axis * 4 + 1] + m[axis * 4 + 2] * m[axis * 4 + 2];
+    Matrix4 inv{};
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] +
+             m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] -
+             m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] +
+             m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] -
+              m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] -
+             m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] +
+             m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] -
+             m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] +
+              m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] +
+             m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] -
+             m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] +
+              m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] -
+              m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] -
+             m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] +
+             m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] -
+              m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] +
+              m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
 
-    for (int column = 0; column < 3; ++column)
-    {
-        for (int row = 0; row < 3; ++row)
-        {
-            const float value = m[row * 4 + column];
-            out[column * 4 + row] = scaleSquared[row] > 0.0f ? value / scaleSquared[row] : 0.0f;
-        }
-    }
-
-    for (int row = 0; row < 3; ++row)
-    {
-        float sum = 0.0f;
-        for (int k = 0; k < 3; ++k)
-            sum += out[k * 4 + row] * m[12 + k];
-        out[12 + row] = -sum;
-    }
-    return out;
+    const float determinant = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (determinant == 0.0f)
+        return identity();
+    const float scale = 1.0f / determinant;
+    for (float &value : inv)
+        value *= scale;
+    return inv;
 }
 
 // Strings inside chunks are length-prefixed with a 32-bit count and, unlike the
@@ -374,7 +392,7 @@ bool loadActor(const std::vector<std::uint8_t> &bytes, Actor &actor, std::string
             self(self, static_cast<std::size_t>(node.parent));
             node.globalBind = multiply(actor.nodes[node.parent].globalBind, node.local);
         }
-        node.inverseBind = inverseAffine(node.globalBind);
+        node.inverseBind = inverse(node.globalBind);
         resolved[index] = true;
     };
     for (std::size_t index = 0; index < actor.nodes.size(); ++index)

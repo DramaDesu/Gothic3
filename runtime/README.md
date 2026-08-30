@@ -4,8 +4,8 @@ Our own 64-bit renderer for Gothic 3 assets. It does not touch the game process:
 it reads the archives directly, so it is free of the original engine's 32-bit
 address space, DirectX 9 pipeline and single-threaded tick.
 
-It reads the archives, the compiled static meshes and the animated actors -
-skeleton, skinned mesh and weights. Next comes motion playback, then a window.
+It reads the archives, the compiled static meshes, the animated actors and their
+motions, and skins a character on the CPU. Next comes a window.
 
 ## Build
 
@@ -20,6 +20,7 @@ skeleton, skinned mesh and weights. Next comes motion playback, then a window.
     g3mesh  "…/Gothic 3/Data/_compiledMesh.pak"      # parse every mesh, the real test
     g3actor "…/Gothic 3/Data/_compiledAnimation.pak" G3_Orc_Body_Warrior.xact
     g3actor "…/Gothic 3/Data/_compiledAnimation.pak" # parse every actor
+    g3anim  "…/Gothic 3/Data/_compiledAnimation.pak" G3_Orc_Body_Warrior.xact             "Orc_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_400.xmot"
 
 ## What the data looks like
 
@@ -93,11 +94,34 @@ Two head actors declare a scene-info chunk smaller than its contents. A strict
 size-driven walk desyncs there and then reads a garbage chunk id, so that chunk
 is parsed and the later of the two ends is used.
 
-## Next: motions
+## Motions
 
-`.xmot` files address a *cleaned* skeleton: the engine folds away helper nodes
-whose names carry more than two underscore-separated parts (`*_ROOT`, `*_END`)
-before animating. Driving the raw hierarchy with motion values double-counts
-those transforms - measured elsewhere as 10-91 cm of error per bone. The cleanup
-has to happen first, keeping a map back to the original indices so skinning
-still resolves.
+A clip does not animate the actor's raw node tree. The engine first folds away
+helper nodes - those whose name ends in `_ROOT`/`_END` and carries more than two
+underscore-separated parts, so `Orc_ROOT` survives but `Orc_Left_Arm_Arm_ROOT`
+does not - and the clip's transforms are written against that cleaned hierarchy.
+For the orc that is 123 nodes folded down to 69 bones, and 60 of the clip's 64
+parts bind to them by name.
+
+Keys are raw float32 with no compression: linear in time, shortest-path for
+quaternions, hold before the first key and after the last.
+
+The silhouette is how we tell a correct pose from a plausible wrong one, since
+the numbers move the way a body does:
+
+| clip | height | arm spread (x) | stride (z) |
+| --- | --- | --- | --- |
+| bind pose | 203.7 cm | ±86.5 | -25..33 |
+| idle | 194.9 cm | -46..58 | -44..52 |
+| walk | 188-193 cm | -51..60 | -74..64 |
+| run | 179-183 cm | -55..59 | **-84..96** |
+
+The T-pose arms come down, the body crouches as the gait speeds up, and the
+stride grows with it. Run is 25 cm shorter than the bind pose and reaches nearly
+two metres of stride.
+
+Two ordering traps cost a debugging round each, and both come from the same
+fact - the node array is not topologically sorted. Bind matrices already
+composed depth-first; the pose sampler did not, so every bone whose parent came
+later in the file collapsed to the origin and the whole character folded into a
+point.
