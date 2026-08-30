@@ -40,6 +40,9 @@ target_link_libraries(g3probe PRIVATE genome)
 add_executable(g3anim tools/g3anim.cpp)
 target_link_libraries(g3anim PRIVATE genome)
 
+add_executable(g3pose tools/g3pose.cpp)
+target_link_libraries(g3pose PRIVATE genome)
+
 # --- viewer ---------------------------------------------------------------
 find_package(Vulkan REQUIRED)
 

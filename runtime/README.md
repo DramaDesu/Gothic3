@@ -174,6 +174,25 @@ mip 0 correlates at 0.995. And the decode itself was checked against a foreign
 decoder - the same blocks rebuilt as a .dds and read by Pillow come out
 bit-identical, 1048576 of 1048576 pixels.
 
+## The pose is right, checked against another decoder
+
+The torso looked twisted in the run cycle, so the sampled pose was compared
+against g3blend, georgeto's Blender importer, driven headless over the same
+actor and clip. Both produce 69 bones after folding, and at frame 5 the global
+bone positions agree to **0.18 mm at worst, 0.024 mm median**. The animation
+maths is correct; what reads as a twisted torso is a headless body whose
+shoulder armour sits where a head would be.
+
+`runtime/tests/orc-run-pose-blender.json` keeps that reference dump, so the
+sampler can be re-checked against it after any change:
+
+    g3pose "…/_compiledAnimation.pak" G3_Orc_Body_Warrior.xact            "Orc_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_400.xmot" 0.2
+
+Three cheaper explanations were ruled out first and cost nothing to keep:
+duplicate part names (none), a rest pose disagreeing with the clip (only the
+pelvis, which legitimately owns the clip's single position track), and vertices
+weighted to bones the clip never drives (zero).
+
 ## Characters are assembled, not single meshes
 
 The body actor is a torso with arms and legs and no head: `G3_Orc_Body_Warrior`
