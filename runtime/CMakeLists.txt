@@ -34,6 +34,9 @@ target_link_libraries(g3img PRIVATE genome)
 add_executable(g3actor tools/g3actor.cpp)
 target_link_libraries(g3actor PRIVATE genome)
 
+add_executable(g3probe tools/g3probe.cpp)
+target_link_libraries(g3probe PRIVATE genome)
+
 add_executable(g3anim tools/g3anim.cpp)
 target_link_libraries(g3anim PRIVATE genome)
 
