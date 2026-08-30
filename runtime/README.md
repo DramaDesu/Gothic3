@@ -5,7 +5,7 @@ it reads the archives directly, so it is free of the original engine's 32-bit
 address space, DirectX 9 pipeline and single-threaded tick.
 
 It reads the archives, the compiled static meshes, the animated actors and their
-motions, and skins a character on the CPU. Next comes a window.
+motions, skins a character and draws it in a Vulkan window.
 
 ## Build
 
@@ -21,6 +21,7 @@ motions, and skins a character on the CPU. Next comes a window.
     g3actor "…/Gothic 3/Data/_compiledAnimation.pak" G3_Orc_Body_Warrior.xact
     g3actor "…/Gothic 3/Data/_compiledAnimation.pak" # parse every actor
     g3anim  "…/Gothic 3/Data/_compiledAnimation.pak" G3_Orc_Body_Warrior.xact             "Orc_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_400.xmot"
+    g3view  "…/Gothic 3/Data/_compiledAnimation.pak" G3_Orc_Body_Warrior.xact             "Orc_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_400.xmot"
 
 ## What the data looks like
 
@@ -125,3 +126,23 @@ fact - the node array is not topologically sorted. Bind matrices already
 composed depth-first; the pose sampler did not, so every bone whose parent came
 later in the file collapsed to the origin and the whole character folded into a
 point.
+
+## The viewer
+
+`g3view` opens a window and draws the character: Vulkan 1.3 with dynamic
+rendering, so there are no render pass or framebuffer objects. Skinning runs on
+the CPU into a per-frame vertex buffer - a few thousand vertices is nothing, and
+it keeps the GPU side to one pipeline until there is a reason to move it.
+Arrow keys orbit, W/S zoom, Space pauses, Escape quits. Passing no motion draws
+the bind pose, because a clip with no parts leaves every bone at its rest
+transform.
+
+![The orc in bind pose](../docs/orc-bind-pose.png)
+
+## Characters are assembled, not single meshes
+
+The body actor is a torso with arms and legs and no head: `G3_Orc_Body_Warrior`
+carries 11 attachment points (`Slot_Head`, `Slot_RightHand_Weapon`, `Slot_Bow`,
+`Slot_AxeBack`, …) and the head is its own actor - `G3_Orc_Head_Head01.xact`,
+plus `_animated` and `_lipsync` variants for speech. A finished character is the
+body, a head, and whatever the slots carry, all sharing one skeleton.
