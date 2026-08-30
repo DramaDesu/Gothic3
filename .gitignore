@@ -20,3 +20,12 @@ mcp/arena_log.*
 mcp/arena2.csv
 mcp/*.log
 runtime/build/
+# read-only reference clones of community tools, not our code
+/g3blend/
+/rmtools/
+/gothic3sdk/
+/gothic3sdk-examples/
+/gothic3sdk-jackydima/
+/g3dit/
+/G3Archive/
+/Script_G3Fixes/
