@@ -139,6 +139,28 @@ transform.
 
 ![The orc in bind pose](../docs/orc-bind-pose.png)
 
+## Textures
+
+`.ximg` is a fixed 87-byte header and then a mip chain stored **smallest first**.
+All 1897 shipped textures parse: 1125 DXT1, 418 DXT5, 353 DXT3, one A8R8G8B8,
+plus two cube maps, together 1.09 billion texels. Blocks are handed over
+compressed - BC1/2/3 upload to a modern GPU as they are - with a CPU decode kept
+only for tooling.
+
+Two things the format notes did not have, both measured rather than assumed:
+
+- **Normal maps are DXT5nm-swizzled.** In the orc's normal map red and blue are
+  exactly zero across all 262144 pixels: Y lives in green, X in alpha, and a
+  shader has to rebuild Z as `sqrt(1 - x^2 - y^2)` and never read red.
+- **Cube maps are face-major** - one whole mip chain per face. Slicing both
+  shipping cube maps that way decodes six coherent images each; a mip-major
+  reading produces scrambled blocks.
+
+The mip order was proven, not assumed: decoded mip 1 against a box-downsample of
+mip 0 correlates at 0.995. And the decode itself was checked against a foreign
+decoder - the same blocks rebuilt as a .dds and read by Pillow come out
+bit-identical, 1048576 of 1048576 pixels.
+
 ## Characters are assembled, not single meshes
 
 The body actor is a torso with arms and legs and no head: `G3_Orc_Body_Warrior`
