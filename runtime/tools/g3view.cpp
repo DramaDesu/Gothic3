@@ -96,11 +96,13 @@ int main(int argc, char **argv)
     if (argc < 3)
     {
         std::puts("usage: g3view <archive.pak> <actor.xact> [motion.xmot] [--data <Data dir>] [--switch n]\n"
-                  "  --data points at the game's Data folder so materials and textures load too");
+                  "  --data points at the game Data folder so materials and textures load too\n"
+                  "  --head adds a head actor, posed by the same skeleton");
         return 2;
     }
 
     std::string dataDirectory;
+    std::string headName;
     int materialSwitch = 0;
     for (int index = 3; index + 1 < argc; ++index)
     {
@@ -108,6 +110,8 @@ int main(int argc, char **argv)
             dataDirectory = argv[index + 1];
         else if (std::string(argv[index]) == "--switch")
             materialSwitch = std::atoi(argv[index + 1]);
+        else if (std::string(argv[index]) == "--head")
+            headName = argv[index + 1];
     }
 
     std::string error;
@@ -159,11 +163,33 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    // A character is assembled: the body actor has no head, so the head is a
+    // second actor posed by the same skeleton.
+    std::vector<genome::Actor> extraActors;
+    if (!headName.empty())
+    {
+        genome::Actor head;
+        std::string headError;
+        if (genome::loadActor(archive->read(headName, &headError), head, &headError))
+        {
+            std::printf("head %s: %zu nodes, %zu vertices\n", headName.c_str(), head.nodes.size(), head.vertexCount());
+            extraActors.push_back(std::move(head));
+        }
+        else
+            std::printf("head %s: %s\n", headName.c_str(), headError.c_str());
+    }
+
+    std::vector<const genome::Actor *> actors{&actor};
+    for (const genome::Actor &extra : extraActors)
+        actors.push_back(&extra);
+
     // Each submesh names a material, the material names source textures, and the
     // skin variant picks which of them actually shipped.
-    std::vector<render::CharacterRenderer::SubmeshTextures> textures(actor.submeshes.size());
+    std::vector<std::vector<render::CharacterRenderer::SubmeshTextures>> textures;
+    for (const genome::Actor *piece : actors)
+        textures.emplace_back(piece->submeshes.size());
     std::vector<genome::Image> images;
-    images.reserve(actor.submeshes.size() * 2);
+    images.reserve(64);
 
     if (materials && images_)
     {
@@ -200,28 +226,36 @@ int main(int argc, char **argv)
             return &images.back();
         };
 
-        for (std::size_t index = 0; index < actor.submeshes.size(); ++index)
+        for (std::size_t piece = 0; piece < actors.size(); ++piece)
         {
-            const std::uint8_t materialIndex = actor.submeshes[index].materialIndex;
-            if (materialIndex >= actor.materials.size() || actor.materials[materialIndex].empty())
+            const genome::Actor &source = *actors[piece];
+            for (std::size_t index = 0; index < source.submeshes.size(); ++index)
+            {
+            const std::uint8_t materialIndex = source.submeshes[index].materialIndex;
+            if (materialIndex >= source.materials.size() || source.materials[materialIndex].empty())
                 continue;
 
             genome::Material material;
             std::string materialError;
-            if (!genome::loadMaterial(materials->read(actor.materials[materialIndex], &materialError), material,
+            if (!genome::loadMaterial(materials->read(source.materials[materialIndex], &materialError), material,
                                       &materialError))
             {
-                std::printf("  %s: %s\n", actor.materials[materialIndex].c_str(), materialError.c_str());
+                std::printf("  %s: %s\n", source.materials[materialIndex].c_str(), materialError.c_str());
                 continue;
             }
-            std::printf("submesh %zu uses %s\n", index, actor.materials[materialIndex].c_str());
-            textures[index].diffuse = loadSlot(material, genome::Slot::Diffuse);
-            textures[index].normal = loadSlot(material, genome::Slot::Normal);
+            std::printf("piece %zu submesh %zu uses %s\n", piece, index, source.materials[materialIndex].c_str());
+            textures[piece][index].diffuse = loadSlot(material, genome::Slot::Diffuse);
+            textures[piece][index].normal = loadSlot(material, genome::Slot::Normal);
+            }
         }
     }
 
+    std::vector<render::CharacterRenderer::Piece> pieces;
+    for (std::size_t index = 0; index < actors.size(); ++index)
+        pieces.push_back({actors[index], textures[index]});
+
     render::CharacterRenderer renderer;
-    if (!renderer.create(device, actor, textures, &error))
+    if (!renderer.create(device, pieces, &error))
     {
         std::cerr << "renderer: " << error << "\n";
         return 1;
@@ -270,7 +304,7 @@ int main(int argc, char **argv)
 
         // With no clip the sampler falls back to each bone's rest transform,
         // which is exactly the bind pose.
-        renderer.update(device, actor, skeleton, motion, time);
+        renderer.update(device, pieces, skeleton, motion, time);
 
         VkCommandBuffer command = device.commandBuffer();
 

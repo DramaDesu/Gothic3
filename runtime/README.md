@@ -198,5 +198,16 @@ weighted to bones the clip never drives (zero).
 The body actor is a torso with arms and legs and no head: `G3_Orc_Body_Warrior`
 carries 11 attachment points (`Slot_Head`, `Slot_RightHand_Weapon`, `Slot_Bow`,
 `Slot_AxeBack`, …) and the head is its own actor - `G3_Orc_Head_Head01.xact`,
-plus `_animated` and `_lipsync` variants for speech. A finished character is the
-body, a head, and whatever the slots carry, all sharing one skeleton.
+plus `_animated` and `_lipsync` variants for speech.
+
+The viewer assembles them: `--head` adds a second actor drawn from the same
+pose. Nothing is merged. The head keeps its own 113 nodes, its own bind pose and
+its own materials (`Orc_Face`, `Orc_beard`); only the bone NAMES are shared, so
+skinning matches each actor's nodes to the skeleton by name. That name match is
+the whole join - it is what lets one pose drive a body of 69 bones and a head of
+113 without either knowing about the other.
+
+![The assembled orc](../docs/orc-assembled.png)
+
+And it settles the earlier suspicion: with a head on it, the run cycle reads
+perfectly normally. The twist was a missing head all along.

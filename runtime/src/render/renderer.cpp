@@ -62,23 +62,28 @@ genome::Image solidImage(std::uint8_t r, std::uint8_t g, std::uint8_t b, std::ui
 
 } // namespace
 
-bool CharacterRenderer::create(Device &device, const genome::Actor &actor,
-                               const std::vector<SubmeshTextures> &textures, std::string *error)
+bool CharacterRenderer::create(Device &device, const std::vector<Piece> &pieces, std::string *error)
 {
-    // Submesh indices are local, so they are rebased while the submeshes are
-    // concatenated into one buffer; each keeps its slice for drawing.
+    // Every piece contributes its submeshes to one vertex and index buffer.
+    // Submesh indices are local, so they are rebased as they are concatenated,
+    // and each submesh keeps its slice for drawing.
     std::vector<std::uint32_t> indices;
     std::uint32_t base = 0;
-    for (const genome::ActorSubmesh &submesh : actor.submeshes)
+    for (const Piece &piece : pieces)
     {
-        Part part;
-        part.firstIndex = static_cast<std::uint32_t>(indices.size());
-        part.indexCount = static_cast<std::uint32_t>(submesh.indices.size());
-        m_parts.push_back(part);
+        if (!piece.actor)
+            continue;
+        for (const genome::ActorSubmesh &submesh : piece.actor->submeshes)
+        {
+            Part part;
+            part.firstIndex = static_cast<std::uint32_t>(indices.size());
+            part.indexCount = static_cast<std::uint32_t>(submesh.indices.size());
+            m_parts.push_back(part);
 
-        for (std::uint32_t index : submesh.indices)
-            indices.push_back(index + base);
-        base += static_cast<std::uint32_t>(submesh.vertices.size());
+            for (std::uint32_t index : submesh.indices)
+                indices.push_back(index + base);
+            base += static_cast<std::uint32_t>(submesh.vertices.size());
+        }
     }
     m_indexCount = indices.size();
     m_vertices.resize(base);
@@ -102,13 +107,20 @@ bool CharacterRenderer::create(Device &device, const genome::Actor &actor,
     if (!createTexture(device, white, true, m_white, error) || !createTexture(device, flat, false, m_flat, error))
         return false;
 
-    for (std::size_t index = 0; index < m_parts.size(); ++index)
+    std::size_t partIndex = 0;
+    for (const Piece &piece : pieces)
     {
-        const SubmeshTextures wanted = index < textures.size() ? textures[index] : SubmeshTextures{};
-        if (wanted.diffuse && !createTexture(device, *wanted.diffuse, true, m_parts[index].diffuse, error))
-            return false;
-        if (wanted.normal && !createTexture(device, *wanted.normal, false, m_parts[index].normal, error))
-            return false;
+        if (!piece.actor)
+            continue;
+        for (std::size_t submesh = 0; submesh < piece.actor->submeshes.size(); ++submesh, ++partIndex)
+        {
+            const SubmeshTextures wanted =
+                submesh < piece.textures.size() ? piece.textures[submesh] : SubmeshTextures{};
+            if (wanted.diffuse && !createTexture(device, *wanted.diffuse, true, m_parts[partIndex].diffuse, error))
+                return false;
+            if (wanted.normal && !createTexture(device, *wanted.normal, false, m_parts[partIndex].normal, error))
+                return false;
+        }
     }
 
     VkDescriptorSetLayoutBinding bindings[2]{};
@@ -272,22 +284,32 @@ bool CharacterRenderer::createPipeline(Device &device, std::string *error)
     return result == VK_SUCCESS;
 }
 
-void CharacterRenderer::update(Device &device, const genome::Actor &actor, const genome::Skeleton &skeleton,
+void CharacterRenderer::update(Device &device, const std::vector<Piece> &pieces, const genome::Skeleton &skeleton,
                                const genome::Motion &motion, float time)
 {
     const std::vector<genome::Matrix4> pose = genome::samplePose(skeleton, motion, time);
-    const std::vector<genome::Matrix4> skinning = genome::skinningMatrices(actor, skeleton, pose);
-    genome::skinVertices(actor, skinning, m_skinned);
 
     // Normals are skinned with the same matrices; the rotations are rigid, so
     // the rotation part alone is enough.
     std::size_t writeIndex = 0;
-    for (const genome::ActorSubmesh &submesh : actor.submeshes)
+    for (const Piece &piece : pieces)
     {
-        for (const genome::ActorVertex &vertex : submesh.vertices)
+        if (!piece.actor)
+            continue;
+
+        // Each piece resolves the shared pose against its own node order and
+        // bind pose, which is what lets a head follow the body's skeleton.
+        const genome::Actor &actor = *piece.actor;
+        const std::vector<genome::Matrix4> skinning = genome::skinningMatrices(actor, skeleton, pose);
+        genome::skinVertices(actor, skinning, m_skinned);
+
+        std::size_t local = 0;
+        for (const genome::ActorSubmesh &submesh : actor.submeshes)
         {
+            for (const genome::ActorVertex &vertex : submesh.vertices)
+            {
             Vertex &out = m_vertices[writeIndex];
-            out.position = m_skinned[writeIndex];
+            out.position = m_skinned[local];
             out.texCoord = vertex.texCoord;
 
             std::array<float, 3> normal{};
@@ -319,6 +341,8 @@ void CharacterRenderer::update(Device &device, const genome::Actor &actor, const
             out.normal = normal;
 
             ++writeIndex;
+            ++local;
+            }
         }
     }
 

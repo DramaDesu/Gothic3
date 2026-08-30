@@ -345,11 +345,29 @@ std::vector<Matrix4> skinningMatrices(const Actor &actor, const Skeleton &skelet
     for (Matrix4 &matrix : matrices)
         matrix = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
+    // Bones are matched to this actor's nodes by name, so a head actor with its
+    // own node order and bind pose can be posed by the body's skeleton.
     for (std::size_t index = 0; index < skeleton.bones.size() && index < pose.size(); ++index)
     {
-        const int original = skeleton.bones[index].originalNode;
-        if (original >= 0 && static_cast<std::size_t>(original) < matrices.size())
-            matrices[original] = multiply(pose[index], actor.nodes[original].inverseBind);
+        const std::string &name = skeleton.bones[index].name;
+
+        int node = skeleton.bones[index].originalNode;
+        if (node < 0 || static_cast<std::size_t>(node) >= actor.nodes.size() || actor.nodes[node].name != name)
+        {
+            node = -1;
+            for (std::size_t candidate = 0; candidate < actor.nodes.size(); ++candidate)
+            {
+                if (actor.nodes[candidate].name == name)
+                {
+                    node = static_cast<int>(candidate);
+                    break;
+                }
+            }
+        }
+        if (node < 0)
+            continue;
+
+        matrices[node] = multiply(pose[index], actor.nodes[node].inverseBind);
     }
     return matrices;
 }

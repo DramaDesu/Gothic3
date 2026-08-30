@@ -36,20 +36,26 @@ struct Part
 class CharacterRenderer
 {
   public:
-    // `textures` supplies a diffuse and normal image per submesh; either may be
-    // absent, in which case a neutral stand-in is used.
+    // Either image may be absent, in which case a neutral stand-in is used.
     struct SubmeshTextures
     {
         const genome::Image *diffuse = nullptr;
         const genome::Image *normal = nullptr;
     };
 
-    bool create(Device &device, const genome::Actor &actor, const std::vector<SubmeshTextures> &textures,
-                std::string *error);
+    // A character is assembled from several actors sharing one skeleton: a body,
+    // a head, and whatever the slots carry.
+    struct Piece
+    {
+        const genome::Actor *actor = nullptr;
+        std::vector<SubmeshTextures> textures; // one per submesh
+    };
+
+    bool create(Device &device, const std::vector<Piece> &pieces, std::string *error);
     void destroy(Device &device);
 
-    // Poses the character and refreshes the vertex buffer for this frame.
-    void update(Device &device, const genome::Actor &actor, const genome::Skeleton &skeleton,
+    // Poses every piece from the same skeleton and refreshes this frame's buffer.
+    void update(Device &device, const std::vector<Piece> &pieces, const genome::Skeleton &skeleton,
                 const genome::Motion &motion, float time);
 
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);

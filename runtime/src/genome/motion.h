@@ -72,6 +72,11 @@ std::vector<Matrix4> samplePose(const Skeleton &skeleton, const Motion &motion, 
 
 // Skinning matrices ready for the GPU: global pose times inverse bind, indexed
 // by the actor's own node numbering so vertex influences resolve directly.
+//
+// `actor` need not be the actor the skeleton came from. A character is
+// assembled from several actors - a body, a head, whatever the slots carry -
+// that share a skeleton only by bone NAME, each with its own node order and its
+// own bind pose. Matching by name is what lets one pose drive all of them.
 std::vector<Matrix4> skinningMatrices(const Actor &actor, const Skeleton &skeleton,
                                       const std::vector<Matrix4> &pose);
 
