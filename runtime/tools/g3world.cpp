@@ -1,4 +1,4 @@
-// Draws the landscape. The low-poly tiles already carry world coordinates, so
+﻿// Draws the landscape. The low-poly tiles already carry world coordinates, so
 // this needs no placement data: load them all and fly around.
 //
 //   g3world <_compiledMesh.pak> [name filter]
@@ -201,6 +201,7 @@ int main(int argc, char **argv)
 
                 render::MeshInstances batch;
                 batch.mesh = mesh.get();
+                batch.occludes = false;
                 genome::WorldMatrix world{};
                 world[0] = world[5] = world[10] = world[15] = 1.0f;
                 world[12] = float(index) * (mesh->boundsMax[0] - mesh->boundsMin[0] + 200.0f);
@@ -324,6 +325,7 @@ int main(int argc, char **argv)
                             {
                                 render::MeshInstances batch;
                                 batch.mesh = mesh.get();
+                                batch.occludes = false;
                                 slot = batches.size();
                                 batches.push_back(std::move(batch));
                                 ownedMeshes.push_back(std::move(mesh));
@@ -361,6 +363,7 @@ int main(int argc, char **argv)
 
                     render::MeshInstances batch;
                     batch.mesh = mesh.get();
+                    batch.occludes = false;
                     batches.push_back(std::move(batch));
                     ownedMeshes.push_back(std::move(mesh));
                 }
@@ -694,6 +697,10 @@ int main(int argc, char **argv)
         if (shotPath && ++frames == 5)
         {
             std::string shotError;
+            // The per-second report has not had a chance to fire this early, and
+            // a capture is worth nothing without the numbers behind it.
+            std::printf("visible %zu of %zu (%zu too small, %zu occluded)\n", renderer.visibleInstances(),
+                        renderer.instanceCount(), renderer.tooSmallInstances(), renderer.occludedInstances());
             if (device.capture(shotPath, &shotError))
                 std::printf("wrote %s\n", shotPath);
             else

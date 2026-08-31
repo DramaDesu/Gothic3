@@ -160,6 +160,22 @@ has already taken most of what walls would have hidden.
 
 Press O to toggle it and compare.
 
+### A tree is not a wall
+
+![The same view with foliage occluding, and not](world-occlusion-foliage.png)
+
+Planting the trees broke this, and the numbers say why. The occluder rule was
+"anything spanning more than ten metres", which a tree passes easily - and a
+tree's bounding box is mostly air. In the fortress sector that made **43 of the
+61 occluders trees**, and the depth buffer they wrote hid 1424 of 4049 instances
+where the honest answer is 244. Whole rows of objects vanished behind trunks
+they were nowhere near, which is the top half of the picture.
+
+So foliage is now drawn but never rasterised as an occluder: a bounding box is a
+fair stand-in for a house and a poor one for a tree. Grass is marked the same
+way. That leaves 18 occluders in the sector, and 3.7 per cent of the frame comes
+back.
+
 ## Grass is scattered, not placed
 
 ![Grass in the fortress sector](world-vegetation.png)

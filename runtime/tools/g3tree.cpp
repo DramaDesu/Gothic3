@@ -136,6 +136,9 @@ int main(int argc, char **argv)
             ++grown_ok;
             triangles += grown.triangleCount();
             heights += grown.boundsMax[1] - grown.boundsMin[1];
+            std::printf("  %-46s size %5.1f  grown %6.0f tall %6.0f wide\n", entry.path.c_str(), tree.size,
+                        grown.boundsMax[1] - grown.boundsMin[1],
+                        std::max(grown.boundsMax[0] - grown.boundsMin[0], grown.boundsMax[2] - grown.boundsMin[2]));
         }
     }
 

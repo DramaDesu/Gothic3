@@ -35,6 +35,11 @@ struct MeshInstances
     // batch is always drawn.
     std::vector<std::array<float, 6>> bounds;
     std::vector<const genome::Image *> textures; // one per mesh element, may be null
+
+    // Whether these instances may hide what is behind them. A bounding box is a
+    // fair stand-in for a house and a poor one for a tree, whose box is mostly
+    // air - so foliage is drawn but never rasterised as an occluder.
+    bool occludes = true;
 };
 
 class WorldRenderer
@@ -96,6 +101,7 @@ class WorldRenderer
         std::vector<genome::WorldMatrix> transforms;
         std::vector<std::array<float, 6>> bounds;
         std::vector<std::size_t> ranges; // indices into m_ranges
+        bool occludes = true;
     };
     std::vector<Batch> m_batches;
     std::vector<genome::WorldMatrix> m_visible; // scratch, refilled each frame

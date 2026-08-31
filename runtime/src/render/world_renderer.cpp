@@ -1,5 +1,7 @@
 #include "world_renderer.h"
 
+#include <cstdio>
+
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -84,6 +86,7 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
         Batch kept;
         kept.transforms = batch.transforms;
         kept.bounds = batch.bounds;
+        kept.occludes = batch.occludes;
 
         std::size_t elementIndex = 0;
         for (const genome::MeshElement &element : batch.mesh->elements)
@@ -159,6 +162,7 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
 
     // Anything spanning more than about ten metres is worth rasterising as an
     // occluder: houses, cliffs and the landscape itself, not barrels.
+    std::size_t foliageSkipped = 0;
     for (std::size_t batch = 0; batch < m_batches.size(); ++batch)
     {
         const Batch &current = m_batches[batch];
@@ -166,10 +170,15 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
         {
             const std::array<float, 6> &box = current.bounds[instance];
             const float extent = std::max({box[3] - box[0], box[4] - box[1], box[5] - box[2]});
-            if (extent >= 1000.0f)
+            if (extent < 1000.0f)
+                continue;
+            if (current.occludes)
                 m_occluders.push_back({batch, instance});
+            else
+                ++foliageSkipped;
         }
     }
+    std::printf("%zu occluders, %zu large enough but foliage\n", m_occluders.size(), foliageSkipped);
 
     if (vertices.empty() || instances.empty())
     {
