@@ -53,14 +53,18 @@ struct BranchLevel
     std::uint8_t flags[2]{};          // ids 6015, 6016
 };
 
-// A leaf kind: its texture and the sizes it is drawn at. Some trees have two.
+// A leaf kind. The texture it names - "RedOakLeaves_RT_1.tga" - is not in the
+// game archives: leaves are drawn from a shared composite atlas instead, and the
+// corners below say which tile of it this kind uses.
 struct LeafKind
 {
     std::string texture;
-    std::array<float, 3> size{};      // id 4004
-    std::array<float, 3> sizeVariance{};
-    std::array<float, 3> counts{};
-    float scale = 0.0f;
+    std::array<float, 3> pivot{};     // id 4004
+    std::array<float, 3> variance{};  // id 4005
+    std::array<float, 3> size{};      // id 4006, in the same units as the tree size
+    float scale = 0.0f;               // id 4002
+    std::array<float, 8> corners{};   // four (u, v) pairs into the composite atlas
+    bool hasCorners = false;
 };
 
 // Ambient, diffuse, specular and emissive colour plus a shininess - the shape of

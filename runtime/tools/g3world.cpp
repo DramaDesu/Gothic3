@@ -10,6 +10,8 @@
 #include "genome/material.h"
 #include "genome/mesh.h"
 #include "genome/pak.h"
+#include "genome/spt.h"
+#include "genome/tree.h"
 #include "genome/world.h"
 #include "render/window.h"
 #include "render/world_renderer.h"
@@ -164,6 +166,7 @@ int main(int argc, char **argv)
     int sectorArgument = 0;
     const char *shotPath = nullptr;
     int cameraArgument = 0;
+    int treeArgument = 0;
     for (int index = 2; index + 1 < argc; ++index)
     {
         if (std::string(argv[index]) == "--sectors")
@@ -172,6 +175,37 @@ int main(int argc, char **argv)
             shotPath = argv[index + 1];
         if (std::string(argv[index]) == "--camera" && index + 5 < argc)
             cameraArgument = index + 1;
+        if (std::string(argv[index]) == "--tree" && index + 2 < argc)
+            treeArgument = index + 1;
+    }
+
+    if (treeArgument != 0)
+    {
+        const auto trees = genome::PakArchive::open(argv[treeArgument], nullptr);
+        genome::SpeedTree definition;
+        if (!trees || !genome::loadSpeedTree(trees->read(argv[treeArgument + 1], &error), definition, &error))
+            std::printf("warning: could not read %s: %s\n", argv[treeArgument + 1], error.c_str());
+        else
+        {
+            // A row of them, so the variance between instances is visible rather
+            // than asserted.
+            for (std::uint32_t index = 0; index < 5; ++index)
+            {
+                auto mesh = std::make_unique<genome::Mesh>();
+                if (!genome::growTree(definition, definition.seed + index * 7919u, genome::TreeGrowth{}, *mesh))
+                    continue;
+
+                render::MeshInstances batch;
+                batch.mesh = mesh.get();
+                genome::WorldMatrix world{};
+                world[0] = world[5] = world[10] = world[15] = 1.0f;
+                world[12] = float(index) * (mesh->boundsMax[0] - mesh->boundsMin[0] + 200.0f);
+                batch.transforms.push_back(world);
+                batches.push_back(std::move(batch));
+                ownedMeshes.push_back(std::move(mesh));
+            }
+            std::printf("grew %zu trees from %s\n", batches.size(), argv[treeArgument + 1]);
+        }
     }
 
     if (sectorArgument != 0)
@@ -329,9 +363,11 @@ int main(int argc, char **argv)
                 if (cached != cache.end())
                     loaded = cached->second;
                 else if (imageArchive && element.materialName.size() > 4 &&
-                         element.materialName.compare(element.materialName.size() - 4, 4, ".dds") == 0)
+                         (element.materialName.compare(element.materialName.size() - 4, 4, ".dds") == 0 ||
+                          element.materialName.compare(element.materialName.size() - 4, 4, ".tga") == 0))
                 {
-                    // Grass names its texture outright, in its authored form.
+                    // Grass and trees name their textures outright, in the form
+                    // they were authored under rather than through a material.
                     std::string base = element.materialName.substr(0, element.materialName.size() - 4);
                     for (char &c : base)
                         c = char(std::tolower(static_cast<unsigned char>(c)));

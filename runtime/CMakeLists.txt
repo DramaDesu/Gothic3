@@ -17,7 +17,8 @@ add_library(genome STATIC
   src/genome/image.cpp
   src/genome/actor.cpp
   src/genome/motion.cpp
-  src/genome/spt.cpp)
+  src/genome/spt.cpp
+  src/genome/tree.cpp)
 target_include_directories(genome PUBLIC src)
 target_link_libraries(genome PRIVATE miniz)
 

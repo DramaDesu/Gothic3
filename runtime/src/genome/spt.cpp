@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <unordered_map>
 
 namespace genome
@@ -276,13 +277,13 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
             out.sizeVariance = token.floats[0];
             break;
         case 4004:
-            leaf.size = asFloats3();
+            leaf.pivot = asFloats3();
             break;
         case 4005:
-            leaf.sizeVariance = asFloats3();
+            leaf.variance = asFloats3();
             break;
         case 4006:
-            leaf.counts = asFloats3();
+            leaf.size = asFloats3();
             break;
         case 4002:
             leaf.scale = token.floats.empty() ? 0.0f : token.floats[0];
@@ -321,7 +322,20 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
                     return fail("bad spline in .spt");
             }
             if (id >= 6008 && id <= 6014)
-                level.numbers[id - 6008] = token.floats.empty() ? 0.0f : token.floats[0];
+            {
+                float value = token.floats.empty() ? 0.0f : token.floats[0];
+                // 6008 and 6009 are counts, so the four bytes are an integer.
+                // Read as a float a count of 8 becomes 1.1e-44, which rounds to
+                // nothing and grows a one-segment, three-sided spike instead of
+                // a trunk - which is exactly what the first attempt drew.
+                if (id == 6008 || id == 6009)
+                {
+                    std::uint32_t raw = 0;
+                    std::memcpy(&raw, &value, sizeof(raw));
+                    value = float(raw);
+                }
+                level.numbers[id - 6008] = value;
+            }
             if (id == 6015 || id == 6016)
                 level.flags[id - 6015] = std::uint8_t(token.floats.empty() ? 0.0f : token.floats[0]);
         }
@@ -333,6 +347,22 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
         out.levels.push_back(level);
     if (leafStarted)
         out.leaves.push_back(leaf);
+
+    // Ids 10002 to 10004 carry one quad each - four (u, v) corners of the tile a
+    // leaf kind takes from the composite atlas. They come after the kinds, in
+    // the same order, and a kind with no quad is one the atlas does not serve.
+    std::size_t kind = 0;
+    for (const SpeedTreeToken &token : out.tokens)
+    {
+        if (token.id < 10002 || token.id > 10004 || token.floats.size() < 8)
+            continue;
+        if (kind >= out.leaves.size())
+            break;
+        for (std::size_t corner = 0; corner < 8; ++corner)
+            out.leaves[kind].corners[corner] = token.floats[corner];
+        out.leaves[kind].hasCorners = true;
+        ++kind;
+    }
 
     return reader.ok() ? true : fail("truncated .spt");
 }

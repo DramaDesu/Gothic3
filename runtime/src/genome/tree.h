@@ -1,0 +1,34 @@
+#pragma once
+
+// Grows a mesh from a SpeedTree definition. The shipping game did this at load
+// time with a library we do not have, so this is our own reading of the same
+// parameters: the definition says how a tree of that species is put together,
+// and a seed decides which particular tree comes out.
+
+#include "mesh.h"
+#include "spt.h"
+
+#include <cstdint>
+
+namespace genome
+{
+
+struct TreeGrowth
+{
+    // A definition carries a size and a variance; the runtime picks per instance
+    // inside that range, which is why two trees from one file differ. Pass the
+    // size you want, or leave it at zero to take the definition's own.
+    float size = 0.0f;
+
+    // How many children a level may spawn, whatever the definition asks for.
+    // Shipping definitions ask for up to a thousand at the leaf level, and this
+    // keeps a first draw honest about what it is drawing.
+    std::uint32_t branchLimit = 400;
+    std::uint32_t leafLimit = 6000;
+};
+
+// The mesh comes out with two elements: bark, then leaves. Leaves are crossed
+// cards, so they need the alpha test the grass already uses.
+bool growTree(const SpeedTree &definition, std::uint32_t seed, const TreeGrowth &growth, Mesh &out);
+
+} // namespace genome
