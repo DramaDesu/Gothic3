@@ -136,7 +136,7 @@ Overlooking the map that takes the frame from 12749 instances to **6204 of
 105233**, with 98915 dropped as too small - because most of the world is cutlery,
 bowls and pebbles inside houses, and from a hilltop none of them cover a pixel.
 
-Each entity also carries  and , the engine's
+Each entity also carries `VisualLoDFactor` and `ObjectCullFactor`, the engine's
 own per-object hints, which are read but not yet used to bias the threshold.
 
 ## Not yet established
