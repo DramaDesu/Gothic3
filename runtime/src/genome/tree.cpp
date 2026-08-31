@@ -168,6 +168,31 @@ void addLeafCard(MeshElement &element, const Vec &at, const Vec &facing, float w
     }
 }
 
+// A frond is drawn as flat blades running along a branch rather than a tube:
+// one quad per segment, each mapped to the whole tile, and the blades crossed
+// about the branch axis so the spray reads from any direction. Conifer needles
+// and palm leaves are this, not leaf cards.
+void addFrondSegment(MeshElement &element, const Frame &from, const Frame &to, float width,
+                     std::uint32_t blades, const std::array<float, 8> &corners)
+{
+    for (std::uint32_t blade = 0; blade < blades; ++blade)
+    {
+        const float turn = 3.14159265f * float(blade) / float(std::max(1u, blades));
+        const Vec acrossFrom = from.right * std::cos(turn) + from.up() * std::sin(turn);
+        const Vec acrossTo = to.right * std::cos(turn) + to.up() * std::sin(turn);
+        const Vec normal = normalise(cross(acrossFrom, to.at - from.at));
+
+        const std::uint32_t start = std::uint32_t(element.positions.size());
+        addVertex(element, from.at - acrossFrom * (width * 0.5f), normal, corners[2], corners[3]);
+        addVertex(element, from.at + acrossFrom * (width * 0.5f), normal, corners[0], corners[1]);
+        addVertex(element, to.at + acrossTo * (width * 0.5f), normal, corners[6], corners[7]);
+        addVertex(element, to.at - acrossTo * (width * 0.5f), normal, corners[4], corners[5]);
+
+        element.indices.insert(element.indices.end(),
+                               {start, start + 1, start + 2, start, start + 2, start + 3});
+    }
+}
+
 struct Grower
 {
     const SpeedTree &definition;
@@ -184,6 +209,12 @@ struct Grower
     std::size_t branchLevels() const
     {
         return definition.levels.empty() ? 0 : definition.levels.size() - 1;
+    }
+
+    // Zero when the definition has no frond tile to draw one with.
+    std::uint32_t frondLevel() const
+    {
+        return definition.frond.hasCorners ? definition.frond.level : 0;
     }
 
     float curve(std::size_t level, Curve which, float t) const
@@ -208,13 +239,23 @@ struct Grower
         std::vector<float> radii;
         along.reserve(segments + 1);
 
+        // The last branch level of a conifer or a palm is a needle spray, and a
+        // tube there draws the bare sticks the first fir came out as.
+        const bool asFrond = frondLevel() != 0 && level + 1 == branchLevels();
+        const float frondWidth = std::max(20.0f, definition.frond.width * c_UnitsPerSize * 2.0f);
+
         const float lean = curve(level, Curvature, 0.0f) - curve(level, Curvature, 1.0f);
         for (std::uint32_t step = 0; step <= segments; ++step)
         {
             const float t = float(step) / float(segments);
             const float ringRadius = std::max(0.5f, radius * (1.0f - curve(level, Taper, t)) * (1.0f - t * 0.85f));
 
-            addRing(bark, frame, ringRadius, t * 4.0f, slices, step == 0);
+            if (!asFrond)
+                addRing(bark, frame, ringRadius, t * 4.0f, slices, step == 0);
+            else if (step != 0)
+                addFrondSegment(foliage, along.back(), frame, frondWidth, definition.frond.blades,
+                                definition.frond.hasCorners ? definition.frond.corners
+                                                            : std::array<float, 8>{1, 1, 0, 1, 0, 0, 1, 0});
             along.push_back(frame);
             radii.push_back(ringRadius);
 

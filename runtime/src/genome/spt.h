@@ -67,6 +67,23 @@ struct LeafKind
     bool hasCorners = false;
 };
 
+// Fronds: flat blades that stand in for finely divided foliage. Conifers and
+// palms carry their needles this way, where a leaf card would be wrong. Like the
+// leaves, the texture named here is not in the archives - a frond is a tile of
+// the same composite atlas.
+struct Frond
+{
+    std::string texture;             // id 14002
+    float scale = 0.0f;              // id 14003
+    float width = 0.0f;              // id 14004
+    float firstAngle = 0.0f;         // id 14005, degrees
+    float secondAngle = 0.0f;        // id 14006, degrees
+    std::uint32_t blades = 1;        // id 14007, one to five
+    std::uint32_t level = 1;         // id 14008
+    std::array<float, 8> corners{};
+    bool hasCorners = false;
+};
+
 // Ambient, diffuse, specular and emissive colour plus a shininess - the shape of
 // the three 52-byte records the format carries.
 struct SpeedTreeMaterial
@@ -104,6 +121,7 @@ struct SpeedTree
 
     std::vector<BranchLevel> levels;
     std::vector<LeafKind> leaves;
+    Frond frond;
     std::vector<SpeedTreeMaterial> materials;
 
     std::string billboardTexture;    // id 20002

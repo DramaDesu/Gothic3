@@ -91,14 +91,29 @@ the shapes should look like.
 Two constants are not in the definitions and come from those billboards: a
 trunk is bare for its lower third, and a child spans at most 0.45 of its parent.
 
+## Fronds
+
+![Douglas firs](trees-fir.png)
+
+Conifers first came out as bare cones, and correctly so: their needles are not
+leaf cards but **fronds** - flat blades that run along a branch. Every one of the
+98 definitions names a frond texture in the 14000 band, and like the leaf
+textures none of those names exist in the archives: a frond is another tile of
+the composite atlas. The tiles are handed out in file order, one per leaf kind
+and then one for the frond.
+
+So the last branch level of a definition that has a frond tile is drawn as
+blades rather than as a tube: one quad per segment, each mapped to the whole
+tile, and `14007` of them crossed about the branch axis so the spray reads from
+any direction.
+
+![Coconut palms](trees-palm.png)
+
+A palm is the honest test of that, because it is almost nothing but fronds on a
+bare trunk.
+
 ## What is not done
 
-![Douglas firs, still bare](trees-fir.png)
-
-Conifers come out as bare cones, and correctly so: their needles are **fronds**,
-the 14000 band, which the generator does not read yet. The oaks look right
-because broadleaves carry their foliage as leaf cards, which it does.
-
-Also outstanding: wind (the game animates it in the vertex shader, driven by
+Outstanding: wind (the game animates it in the vertex shader, driven by
 matrix arrays the SDK computes), billboards at distance, and the level of detail
 the definitions carry in the 9000 band.

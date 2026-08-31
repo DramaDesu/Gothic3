@@ -288,6 +288,30 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
         case 4002:
             leaf.scale = token.floats.empty() ? 0.0f : token.floats[0];
             break;
+        case 14002:
+            out.frond.texture = token.text;
+            break;
+        case 14003:
+            out.frond.scale = token.floats.empty() ? 0.0f : token.floats[0];
+            break;
+        case 14004:
+            out.frond.width = token.floats.empty() ? 0.0f : token.floats[0];
+            break;
+        case 14005:
+            out.frond.firstAngle = token.floats.empty() ? 0.0f : token.floats[0];
+            break;
+        case 14006:
+            out.frond.secondAngle = token.floats.empty() ? 0.0f : token.floats[0];
+            break;
+        case 14007:
+        case 14008: {
+            // Counts, so the four bytes are an integer.
+            std::uint32_t raw = 0;
+            if (!token.floats.empty())
+                std::memcpy(&raw, &token.floats[0], sizeof(raw));
+            (id == 14007 ? out.frond.blades : out.frond.level) = raw;
+            break;
+        }
         case 18005:
             out.shadowTexture = token.text;
             break;
@@ -356,11 +380,24 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
     {
         if (token.id < 10002 || token.id > 10004 || token.floats.size() < 8)
             continue;
-        if (kind >= out.leaves.size())
+
+        // The quads are handed out in order: one per leaf kind, then the frond.
+        std::array<float, 8> *corners = nullptr;
+        if (kind < out.leaves.size())
+        {
+            corners = &out.leaves[kind].corners;
+            out.leaves[kind].hasCorners = true;
+        }
+        else if (!out.frond.hasCorners)
+        {
+            corners = &out.frond.corners;
+            out.frond.hasCorners = true;
+        }
+        else
             break;
+
         for (std::size_t corner = 0; corner < 8; ++corner)
-            out.leaves[kind].corners[corner] = token.floats[corner];
-        out.leaves[kind].hasCorners = true;
+            (*corners)[corner] = token.floats[corner];
         ++kind;
     }
 
