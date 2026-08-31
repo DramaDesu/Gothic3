@@ -112,6 +112,26 @@ any direction.
 A palm is the honest test of that, because it is almost nothing but fronds on a
 bare trunk.
 
+## Planted
+
+![A wooded valley, with the trees the sectors ask for](trees-planted.png)
+
+    g3world "…/Data/_compiledMesh.pak" g3_world_lowpoly_landscape_01/         --sectors "…/Data/Projects_compiled.pak" _cstat.node         --tree "…/Data/Speedtrees.pak"
+
+A sector places a tree with an `eCSpeedTree_PS` record, which is thinner than
+expected: a path to the definition, a wind flag, an ambient-occlusion flag, and
+an ambient environment. No seed and no scale - the runtime applies the
+definition's own size variance per instance, which is why two entities sharing
+one definition have bounds of different heights.
+
+Growing a mesh per instance is not on: 57315 trees at seven thousand triangles
+each is 400 million. So each definition is grown a few times with different
+seeds and those meshes are instanced, which is what the game did too - its
+renderer batched every tree of a species out of one buffer. Three variants per
+definition gives **57315 trees from 268 grown meshes**, and the whole map then
+loads 1222158 instances of 9.6M triangles. The sector's own bounds decide
+visibility, so the existing frustum, size and occlusion tests apply unchanged.
+
 ## What is not done
 
 Outstanding: wind (the game animates it in the vertex shader, driven by

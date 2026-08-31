@@ -167,6 +167,8 @@ int main(int argc, char **argv)
     const char *shotPath = nullptr;
     int cameraArgument = 0;
     int treeArgument = 0;
+    // How many different trees are grown per definition before they repeat.
+    constexpr std::uint32_t c_TreeVariants = 3;
     for (int index = 2; index + 1 < argc; ++index)
     {
         if (std::string(argv[index]) == "--sectors")
@@ -175,11 +177,13 @@ int main(int argc, char **argv)
             shotPath = argv[index + 1];
         if (std::string(argv[index]) == "--camera" && index + 5 < argc)
             cameraArgument = index + 1;
-        if (std::string(argv[index]) == "--tree" && index + 2 < argc)
+        if (std::string(argv[index]) == "--tree" && index + 1 < argc)
             treeArgument = index + 1;
     }
 
-    if (treeArgument != 0)
+    const bool showOneTree = treeArgument != 0 && treeArgument + 1 < argc &&
+                             std::string(argv[treeArgument + 1]).find(".spt") != std::string::npos;
+    if (showOneTree)
     {
         const auto trees = genome::PakArchive::open(argv[treeArgument], nullptr);
         genome::SpeedTree definition;
@@ -208,6 +212,25 @@ int main(int argc, char **argv)
         }
     }
 
+    // Sectors name their trees by definition; growing one mesh per definition
+    // and instancing it is the only way 57315 of them fit, and it is what the
+    // game itself did - it batched every tree of a species from one buffer.
+    std::unique_ptr<genome::PakArchive> treeArchive;
+    std::map<std::string, std::string> treePathOf;
+    if (treeArgument != 0)
+    {
+        treeArchive = genome::PakArchive::open(argv[treeArgument], nullptr);
+        if (treeArchive)
+            for (const genome::PakEntry &entry : treeArchive->entries())
+            {
+                if (entry.deleted)
+                    continue;
+                const std::size_t slash = entry.path.find_last_of('/');
+                std::string name = slash == std::string::npos ? entry.path : entry.path.substr(slash + 1);
+                treePathOf.emplace(name, entry.path);
+            }
+    }
+
     if (sectorArgument != 0)
     {
         const auto world = genome::PakArchive::open(argv[sectorArgument], nullptr);
@@ -217,7 +240,8 @@ int main(int argc, char **argv)
         {
             const std::string sectorFilter =
                 sectorArgument + 1 < argc ? argv[sectorArgument + 1] : "_cstat.node";
-            std::size_t placed = 0, sectors = 0, missing = 0, grass = 0;
+            std::size_t placed = 0, sectors = 0, missing = 0, grass = 0, planted = 0, missingTrees = 0;
+            std::map<std::string, std::size_t> treeBatchOf;
 
             for (const genome::PakEntry &entry : world->entries())
             {
@@ -267,6 +291,60 @@ int main(int argc, char **argv)
                     ownedMeshes.push_back(std::move(mesh));
                     ++placed;
                 }
+                for (const genome::TreePlacement &tree : layer.trees)
+                {
+                    if (!treeArchive)
+                        break;
+
+                    // A handful of seeds per definition, so a wood is not one
+                    // tree repeated, and the mesh for each is grown once.
+                    const std::uint32_t variant = std::uint32_t(planted) % c_TreeVariants;
+                    std::string key = tree.resource;
+                    for (char &c : key)
+                        c = char(std::tolower(static_cast<unsigned char>(c)));
+                    key += char('0' + variant);
+
+                    auto known = treeBatchOf.find(key);
+                    if (known == treeBatchOf.end())
+                    {
+                        std::string path;
+                        const auto found = treePathOf.find(key.substr(0, key.size() - 1));
+                        if (found != treePathOf.end())
+                            path = found->second;
+
+                        std::size_t slot = std::size_t(-1);
+                        genome::SpeedTree definition;
+                        std::string why;
+                        if (!path.empty() &&
+                            genome::loadSpeedTree(treeArchive->read(path, &why), definition, &why))
+                        {
+                            auto mesh = std::make_unique<genome::Mesh>();
+                            if (genome::growTree(definition, definition.seed + variant * 7919u,
+                                                 genome::TreeGrowth{}, *mesh))
+                            {
+                                render::MeshInstances batch;
+                                batch.mesh = mesh.get();
+                                slot = batches.size();
+                                batches.push_back(std::move(batch));
+                                ownedMeshes.push_back(std::move(mesh));
+                            }
+                        }
+                        else
+                            ++missingTrees;
+                        known = treeBatchOf.emplace(key, slot).first;
+                    }
+
+                    if (known->second == std::size_t(-1))
+                        continue;
+
+                    // The sector already knows how big the tree ends up, so its
+                    // own bounds decide visibility rather than the grown mesh.
+                    batches[known->second].transforms.push_back(tree.world);
+                    batches[known->second].bounds.push_back({tree.boundsMin[0], tree.boundsMin[1], tree.boundsMin[2],
+                                                             tree.boundsMax[0], tree.boundsMax[1], tree.boundsMax[2]});
+                    ++planted;
+                }
+
                 // Grass is scattered rather than placed: the sector holds one mesh
                 // per plant kind, and a grid of instances referring to them.
                 const std::size_t firstPlantBatch = batches.size();
@@ -300,6 +378,9 @@ int main(int argc, char **argv)
             }
             std::printf("%zu sectors, %zu objects placed, %zu meshes missing, %zu plants\n", sectors, placed,
                         missing, grass);
+            if (planted != 0 || missingTrees != 0)
+                std::printf("%zu trees planted from %zu grown meshes, %zu definitions missing\n", planted,
+                            treeBatchOf.size(), missingTrees);
         }
     }
 
