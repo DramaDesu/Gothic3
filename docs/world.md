@@ -96,8 +96,19 @@ local to their mesh and `vertexOffset` rebases them at draw time. Placing the
 same objects by transforming vertices on the CPU cost four times the memory for
 a single sector and would not have scaled to the map.
 
-White patches are objects whose material did not resolve to a texture yet; they
-fall back to plain white rather than disappearing.
+The white patches turned out to be **water**. Its material uses a dedicated
+shader with no diffuse slot at all, so there was nothing to resolve and the
+fallback took over - rivers and lakes rendered as white sheets. Naming the
+failures rather than counting them is what made that obvious in one run: every
+unresolved element was `G3_Myrtana_Water_River_01_A` or a river depth mesh. With
+a blue stand-in the sector reports zero untextured elements.
+
+![Flying through a sector](world-spectator.png)
+
+The viewer flies: hold the right mouse button to look, WASD to move, Q and E to
+drop and rise, Shift to sprint and Ctrl to creep. Speed scales with the loaded
+extent, so the same controls suit one hut and the whole map, and the camera
+starts aimed at whatever was loaded instead of at a fixed heading.
 
 ## Not yet established
 

@@ -3,7 +3,8 @@
 //
 //   g3world <_compiledMesh.pak> [name filter]
 //
-// Arrow keys orbit, W/S zoom, Q/E change height, Space pauses the slow spin.
+// Hold the right mouse button to look, WASD to move, Q/E to drop and rise,
+// Shift to go faster and Ctrl to creep.
 
 #include "genome/image.h"
 #include "genome/material.h"
@@ -258,6 +259,19 @@ int main(int argc, char **argv)
         }
         const auto exists = [&](const std::string &name) { return imageNames.count(name) != 0; };
 
+        // Water has no diffuse slot at all - its look comes from a dedicated
+        // shader - so without a stand-in every river renders as white.
+        auto water = std::make_unique<genome::Image>();
+        water->width = 1;
+        water->height = 1;
+        water->faceCount = 1;
+        water->format = genome::ImageFormat::A8R8G8B8;
+        water->data = {150, 105, 45, 255}; // BGRA
+        water->levels.push_back({1, 1, 0, 4});
+        water->faceStride = 4;
+        const genome::Image *waterImage = water.get();
+        images.push_back(std::move(water));
+
         std::map<std::string, const genome::Image *> cache;
         for (render::MeshInstances &batch : batches)
         {
@@ -273,7 +287,9 @@ int main(int argc, char **argv)
                     std::string ignored;
                     if (genome::loadMaterial(materials->read(element.materialName, &ignored), material, &ignored))
                     {
-                        if (const genome::Sampler *sampler = material.texture(genome::Slot::Diffuse))
+                        if (material.kind == genome::ShaderKind::Water)
+                            loaded = waterImage;
+                        else if (const genome::Sampler *sampler = material.texture(genome::Slot::Diffuse))
                         {
                             const genome::TextureResolution resolved = genome::resolveTexture(*sampler, 0, exists);
                             if (!resolved.fileName.empty())
@@ -293,7 +309,30 @@ int main(int argc, char **argv)
                 batch.textures.push_back(loaded);
             }
         }
-        std::printf("%zu distinct textures\n", images.size());
+        std::size_t untextured = 0;
+        for (const render::MeshInstances &batch : batches)
+            for (const genome::Image *texture : batch.textures)
+                untextured += texture == nullptr ? 1 : 0;
+
+        std::printf("%zu distinct textures, %zu mesh elements left untextured\n", images.size(), untextured);
+        if (untextured != 0)
+        {
+            // Name a few so the gap is diagnosable rather than just white.
+            std::size_t named = 0;
+            for (const render::MeshInstances &batch : batches)
+            {
+                for (std::size_t element = 0; element < batch.textures.size() && named < 6; ++element)
+                {
+                    if (batch.textures[element] != nullptr)
+                        continue;
+                    const std::string &material = batch.mesh->elements[element].materialName;
+                    std::printf("    no texture for %s\n", material.empty() ? "(no material named)" : material.c_str());
+                    ++named;
+                }
+                if (named >= 6)
+                    break;
+            }
+        }
     }
 
     render::Window window("Genome runtime - world", 1280, 720);
@@ -319,44 +358,69 @@ int main(int argc, char **argv)
                 max[1] - min[1], max[2] - min[2], (max[0] - min[0]) / 100000.0f,
                 (max[2] - min[2]) / 100000.0f, renderer.drawCount());
 
-    float azimuth = 0.6f;
-    float elevation = 0.55f;
-    float distance = span * 0.9f;
-    bool spinning = true;
+    // Spectator camera: look with the right mouse button held, move with WASD,
+    // rise and fall with E and Q. Shift accelerates, and the speed scales with
+    // the world so the same controls work on a hut and on the whole map.
+    std::array<float, 3> eye{centre[0], centre[1] + span * 0.25f, centre[2] + span * 0.6f};
+    // Start looking at what was loaded, whatever its size, rather than at a
+    // fixed heading that only suits one scale.
+    const std::array<float, 3> toCentre{centre[0] - eye[0], centre[1] - eye[1], centre[2] - eye[2]};
+    float yaw = std::atan2(toCentre[0], toCentre[2]);
+    float pitch = std::atan2(toCentre[1], std::sqrt(toCentre[0] * toCentre[0] + toCentre[2] * toCentre[2]));
+    bool looking = false;
+    POINT lastCursor{};
 
     auto previous = std::chrono::steady_clock::now();
     while (window.pump())
     {
-
         const auto now = std::chrono::steady_clock::now();
-        const float delta = std::chrono::duration<float>(now - previous).count();
+        const float delta = std::min(std::chrono::duration<float>(now - previous).count(), 0.1f);
         previous = now;
 
-        if (window.keyPressed(VK_SPACE))
-            spinning = !spinning;
-        if (spinning)
-            azimuth += delta * 0.08f;
-        if (window.keyDown(VK_LEFT))
-            azimuth -= delta * 0.9f;
-        if (window.keyDown(VK_RIGHT))
-            azimuth += delta * 0.9f;
-        if (window.keyDown(VK_UP))
-            elevation = std::min(elevation + delta * 0.6f, 1.45f);
-        if (window.keyDown(VK_DOWN))
-            elevation = std::max(elevation - delta * 0.6f, 0.05f);
-        if (window.keyDown('W'))
-            distance = std::max(distance * (1.0f - delta), span * 0.05f);
-        if (window.keyDown('S'))
-            distance = std::min(distance * (1.0f + delta), span * 3.0f);
+        const bool wantsLook = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        if (wantsLook && looking)
+        {
+            yaw -= float(cursor.x - lastCursor.x) * 0.005f;
+            pitch = std::clamp(pitch - float(cursor.y - lastCursor.y) * 0.005f, -1.5f, 1.5f);
+        }
+        looking = wantsLook;
+        lastCursor = cursor;
 
-        const std::array<float, 3> eye{centre[0] + distance * std::cos(elevation) * std::sin(azimuth),
-                                       centre[1] + distance * std::sin(elevation),
-                                       centre[2] + distance * std::cos(elevation) * std::cos(azimuth)};
+        const std::array<float, 3> forward{std::cos(pitch) * std::sin(yaw), std::sin(pitch),
+                                           std::cos(pitch) * std::cos(yaw)};
+        const std::array<float, 3> right{std::sin(yaw - 1.5708f), 0.0f, std::cos(yaw - 1.5708f)};
+
+        float speed = span * 0.12f * delta;
+        if (GetAsyncKeyState(VK_SHIFT) & 0x8000)
+            speed *= 6.0f;
+        if (GetAsyncKeyState(VK_CONTROL) & 0x8000)
+            speed *= 0.15f;
+
+        const auto move = [&](const std::array<float, 3> &direction, float scale) {
+            for (int axis = 0; axis < 3; ++axis)
+                eye[axis] += direction[axis] * scale;
+        };
+        if (window.keyDown('W'))
+            move(forward, speed);
+        if (window.keyDown('S'))
+            move(forward, -speed);
+        if (window.keyDown('D'))
+            move(right, speed);
+        if (window.keyDown('A'))
+            move(right, -speed);
+        if (window.keyDown('E'))
+            eye[1] += speed;
+        if (window.keyDown('Q'))
+            eye[1] -= speed;
+
+        const std::array<float, 3> target{eye[0] + forward[0], eye[1] + forward[1], eye[2] + forward[2]};
 
         const VkExtent2D extent = device.extent();
         const float aspect = float(extent.width) / float(extent.height);
         const std::array<float, 16> viewProjection =
-            multiply(perspective(1.0f, aspect, span * 0.002f, span * 4.0f), lookAt(eye, centre));
+            multiply(perspective(1.0f, aspect, 50.0f, span * 4.0f), lookAt(eye, target));
 
         if (!device.beginFrame())
             continue;
