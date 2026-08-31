@@ -16,7 +16,8 @@ add_library(genome STATIC
   src/genome/world.cpp
   src/genome/image.cpp
   src/genome/actor.cpp
-  src/genome/motion.cpp)
+  src/genome/motion.cpp
+  src/genome/spt.cpp)
 target_include_directories(genome PUBLIC src)
 target_link_libraries(genome PRIVATE miniz)
 
@@ -43,6 +44,9 @@ target_link_libraries(g3anim PRIVATE genome)
 
 add_executable(g3pose tools/g3pose.cpp)
 target_link_libraries(g3pose PRIVATE genome)
+
+add_executable(g3tree tools/g3tree.cpp)
+target_link_libraries(g3tree PRIVATE genome)
 
 # --- viewer ---------------------------------------------------------------
 find_package(Vulkan REQUIRED)
