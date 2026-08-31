@@ -196,6 +196,9 @@ int main(int argc, char **argv)
                         if (known->second != std::size_t(-1))
                         {
                             batches[known->second].transforms.push_back(placement.world);
+                            batches[known->second].bounds.push_back(
+                                {placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
+                                 placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
                             ++placed;
                         }
                         continue;
@@ -212,6 +215,8 @@ int main(int argc, char **argv)
                     render::MeshInstances batch;
                     batch.mesh = mesh.get();
                     batch.transforms.push_back(placement.world);
+                    batch.bounds.push_back({placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
+                                            placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
                     batchOf.emplace(placement.meshName, batches.size());
                     batches.push_back(std::move(batch));
                     ownedMeshes.push_back(std::move(mesh));
@@ -464,6 +469,15 @@ int main(int argc, char **argv)
         vkCmdSetViewport(command, 0, 1, &viewport);
         vkCmdSetScissor(command, 0, 1, &scissor);
 
+        renderer.cull(device, viewProjection);
+
+        static float reportAt = 0.0f;
+        reportAt += delta;
+        if (reportAt > 1.0f)
+        {
+            reportAt = 0.0f;
+            std::printf("visible %zu of %zu instances\n", renderer.visibleInstances(), renderer.instanceCount());
+        }
         renderer.draw(device, viewProjection, {0.45f, 0.75f, 0.35f, 0.0f});
 
         vkCmdEndRendering(command);

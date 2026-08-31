@@ -110,6 +110,23 @@ drop and rise, Shift to sprint and Ctrl to creep. Speed scales with the loaded
 extent, so the same controls suit one hut and the whole map, and the camera
 starts aimed at whatever was loaded instead of at a fixed heading.
 
+## Only drawing what is in front of you
+
+![Flying over the coast](world-culled.png)
+
+Every placement carries world-space bounds the engine already computed, sitting
+at offset +219 in the entity body - so visibility testing needs no work at load
+time, only reading a field we were skipping. Each frame the instance buffer is
+rebuilt from the boxes that survive the six frustum planes.
+
+Flying over the coast that leaves **12749 of 105233 instances** drawn: seven
+eighths of the world is behind the camera or off to the sides at any moment.
+
+The remaining waste is different in kind and needs different answers: cutlery
+inside houses five kilometres away still passes the frustum test, which is what
+LOD and occlusion are for. The game ships LOD chains as .xlmsh files that we do
+not read yet.
+
 ## Not yet established
 
 Whether the terrain proper is meshes or a height field, what `.lrgeodat` holds,

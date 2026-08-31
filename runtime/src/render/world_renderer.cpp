@@ -80,6 +80,10 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
         const std::uint32_t firstInstance = static_cast<std::uint32_t>(instances.size());
         instances.insert(instances.end(), batch.transforms.begin(), batch.transforms.end());
 
+        Batch kept;
+        kept.transforms = batch.transforms;
+        kept.bounds = batch.bounds;
+
         std::size_t elementIndex = 0;
         for (const genome::MeshElement &element : batch.mesh->elements)
         {
@@ -95,6 +99,7 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
             range.vertexOffset = static_cast<std::int32_t>(vertices.size());
             range.firstInstance = firstInstance;
             range.instanceCount = static_cast<std::uint32_t>(batch.transforms.size());
+            kept.ranges.push_back(m_ranges.size());
             m_ranges.push_back(range);
 
             const genome::Image *image =
@@ -148,6 +153,7 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
             }
             ++elementIndex;
         }
+        m_batches.push_back(std::move(kept));
     }
 
     if (vertices.empty() || instances.empty())
@@ -173,11 +179,16 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
         return false;
     std::memcpy(m_indexBuffer.mapped, indices.data(), sizeof(std::uint32_t) * indices.size());
 
-    m_instanceBuffer = device.createBuffer(sizeof(genome::WorldMatrix) * instances.size(),
-                                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true, error);
-    if (!m_instanceBuffer.handle)
-        return false;
-    std::memcpy(m_instanceBuffer.mapped, instances.data(), sizeof(genome::WorldMatrix) * instances.size());
+    // One buffer per frame in flight: culling rewrites it every frame.
+    for (Buffer &buffer : m_instanceBuffer)
+    {
+        buffer = device.createBuffer(sizeof(genome::WorldMatrix) * instances.size(),
+                                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true, error);
+        if (!buffer.handle)
+            return false;
+        std::memcpy(buffer.mapped, instances.data(), sizeof(genome::WorldMatrix) * instances.size());
+    }
+    m_visible.reserve(instances.size());
 
     const genome::Image white = solidImage(255, 255, 255, 255);
     if (!createTexture(device, white, true, m_white, error))
@@ -351,6 +362,68 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
     return true;
 }
 
+void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjection)
+{
+    // Frustum planes straight out of the view-projection matrix: each is a
+    // combination of two of its rows, in the same column-major layout the
+    // shader receives.
+    const auto plane = [&](int index) {
+        std::array<float, 4> p{};
+        const int row = index / 2;
+        const float sign = (index % 2) == 0 ? 1.0f : -1.0f;
+        for (int component = 0; component < 4; ++component)
+            p[component] = viewProjection[component * 4 + 3] + sign * viewProjection[component * 4 + row];
+        return p;
+    };
+
+    std::array<std::array<float, 4>, 6> planes{plane(0), plane(1), plane(2), plane(3), plane(4), plane(5)};
+
+    m_visible.clear();
+    for (Batch &batch : m_batches)
+    {
+        const std::uint32_t firstInstance = static_cast<std::uint32_t>(m_visible.size());
+        std::uint32_t visible = 0;
+
+        for (std::size_t instance = 0; instance < batch.transforms.size(); ++instance)
+        {
+            bool inside = true;
+            if (instance < batch.bounds.size())
+            {
+                const std::array<float, 6> &box = batch.bounds[instance];
+                for (const std::array<float, 4> &p : planes)
+                {
+                    // The corner furthest along the plane normal decides: if even
+                    // that one is behind, the whole box is.
+                    const float x = p[0] >= 0.0f ? box[3] : box[0];
+                    const float y = p[1] >= 0.0f ? box[4] : box[1];
+                    const float z = p[2] >= 0.0f ? box[5] : box[2];
+                    if (p[0] * x + p[1] * y + p[2] * z + p[3] < 0.0f)
+                    {
+                        inside = false;
+                        break;
+                    }
+                }
+            }
+            if (!inside)
+                continue;
+
+            m_visible.push_back(batch.transforms[instance]);
+            ++visible;
+        }
+
+        for (std::size_t range : batch.ranges)
+        {
+            m_ranges[range].firstInstance = firstInstance;
+            m_ranges[range].instanceCount = visible;
+        }
+    }
+
+    m_visibleInstances = m_visible.size();
+    if (!m_visible.empty())
+        std::memcpy(m_instanceBuffer[device.frameIndex()].mapped, m_visible.data(),
+                    sizeof(genome::WorldMatrix) * m_visible.size());
+}
+
 void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjection,
                          const std::array<float, 4> &light)
 {
@@ -362,7 +435,7 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
                        &push);
 
     const VkDeviceSize offsets[2] = {0, 0};
-    const VkBuffer buffers[2] = {m_vertexBuffer.handle, m_instanceBuffer.handle};
+    const VkBuffer buffers[2] = {m_vertexBuffer.handle, m_instanceBuffer[device.frameIndex()].handle};
     vkCmdBindVertexBuffers(command, 0, 2, buffers, offsets);
     vkCmdBindIndexBuffer(command, m_indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
 
@@ -371,6 +444,8 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
     VkDescriptorSet bound = VK_NULL_HANDLE;
     for (const Range &range : m_ranges)
     {
+        if (range.instanceCount == 0)
+            continue;
         if (range.descriptor != bound)
         {
             vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &range.descriptor, 0,
@@ -394,7 +469,8 @@ void WorldRenderer::destroy(Device &device)
 
     device.destroyBuffer(m_vertexBuffer);
     device.destroyBuffer(m_indexBuffer);
-    device.destroyBuffer(m_instanceBuffer);
+    for (Buffer &buffer : m_instanceBuffer)
+        device.destroyBuffer(buffer);
     if (m_pipeline)
         vkDestroyPipeline(device.device(), m_pipeline, nullptr);
     if (m_layout)

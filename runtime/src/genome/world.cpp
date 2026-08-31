@@ -13,6 +13,7 @@ constexpr std::uint32_t c_RecordMarker = 0xDEADC0DE;
 // the member order in the engine headers, so these are taken from the data.
 constexpr std::size_t c_NameOffset = 41;
 constexpr std::size_t c_WorldMatrixOffset = 43;
+constexpr std::size_t c_WorldBoundsOffset = 219;
 constexpr std::size_t c_PropertySetCountOffset = 294;
 
 // A property set inside an entity is written in a slightly different shape from
@@ -125,6 +126,10 @@ bool loadWorldNode(const std::vector<std::uint8_t> &bytes, WorldLayer &layer, st
 
         reader.seek(bodyStart + c_WorldMatrixOffset);
         reader.array(placement.world.data(), 16);
+
+        reader.seek(bodyStart + c_WorldBoundsOffset);
+        reader.array(placement.boundsMin.data(), 3);
+        reader.array(placement.boundsMax.data(), 3);
 
         reader.seek(bodyStart + c_PropertySetCountOffset);
         const std::uint32_t propertySetCount = reader.u32();

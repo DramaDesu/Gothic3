@@ -30,6 +30,9 @@ struct MeshInstances
 {
     const genome::Mesh *mesh = nullptr;
     std::vector<genome::WorldMatrix> transforms;
+    // World bounds per transform, used to decide visibility. Empty means the
+    // batch is always drawn.
+    std::vector<std::array<float, 6>> bounds;
     std::vector<const genome::Image *> textures; // one per mesh element, may be null
 };
 
@@ -39,7 +42,12 @@ class WorldRenderer
     bool create(Device &device, const std::vector<MeshInstances> &batches, std::string *error);
     void destroy(Device &device);
 
+    // Rebuilds this frame's instance buffer from what the camera can see.
+    void cull(Device &device, const std::array<float, 16> &viewProjection);
+
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);
+
+    std::size_t visibleInstances() const { return m_visibleInstances; }
 
     std::size_t vertexCount() const { return m_vertexCount; }
     std::size_t triangleCount() const { return m_indexCount / 3; }
@@ -68,11 +76,23 @@ class WorldRenderer
 
     Buffer m_vertexBuffer{};
     Buffer m_indexBuffer{};
-    Buffer m_instanceBuffer{};
+    Buffer m_instanceBuffer[Device::c_FramesInFlight]{};
     std::size_t m_vertexCount = 0;
     std::size_t m_indexCount = 0;
     std::size_t m_instanceCount = 0;
     std::vector<Range> m_ranges;
+
+    // Per batch: the transforms and their bounds, kept so each frame can pick
+    // the visible subset.
+    struct Batch
+    {
+        std::vector<genome::WorldMatrix> transforms;
+        std::vector<std::array<float, 6>> bounds;
+        std::vector<std::size_t> ranges; // indices into m_ranges
+    };
+    std::vector<Batch> m_batches;
+    std::vector<genome::WorldMatrix> m_visible; // scratch, refilled each frame
+    std::size_t m_visibleInstances = 0;
 
     VkDescriptorSetLayout m_descriptorLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;

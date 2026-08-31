@@ -25,6 +25,11 @@ struct Placement
     WorldMatrix world{};   // absolute, no parent to resolve
     std::string meshName;  // from eCVisualMeshStatic_PS, empty when not a mesh
 
+    // World-space bounds the engine already computed for this placement, which
+    // is exactly what visibility tests want.
+    std::array<float, 3> boundsMin{};
+    std::array<float, 3> boundsMax{};
+
     std::array<float, 3> translation() const { return {world[12], world[13], world[14]}; }
 };
 
