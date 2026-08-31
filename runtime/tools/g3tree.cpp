@@ -16,8 +16,8 @@ namespace
 void printTree(const genome::SpeedTree &tree)
 {
     std::printf("bark      %s\n", tree.barkTexture.c_str());
-    std::printf("height    %.1f\n", tree.height);
-    std::printf("radius    %.2f\n", tree.radius);
+    std::printf("size      %.1f +/- %.1f\n", tree.size, tree.sizeVariance);
+    std::printf("2001/2003 %.1f %.2f\n", tree.parameter2001, tree.parameter2003);
     std::printf("seed      %u\n", tree.seed);
     std::printf("billboard %s\n", tree.billboardTexture.c_str());
     std::printf("shadow    %s\n", tree.shadowTexture.c_str());

@@ -88,11 +88,15 @@ struct SpeedTreeToken
 struct SpeedTree
 {
     std::string barkTexture;
-    float height = 0.0f;             // id 2001, 50..1100 across the corpus
-    float radius = 0.0f;             // id 2003
+    // Id 2001 is constant within a species - a red oak and its variants all
+    // carry 1100 - so it is not the size. Id 2006 is: it reads 5, 10 and 20 for
+    // the xs, s and m variants of one species, and 2007 is the variance the
+    // runtime applies per instance.
+    float parameter2001 = 0.0f;
+    float parameter2003 = 0.0f;
     std::uint32_t seed = 0;          // id 2005
-    float parameter2006 = 0.0f;
-    float parameter2007 = 0.0f;
+    float size = 0.0f;               // id 2006
+    float sizeVariance = 0.0f;       // id 2007
 
     std::vector<BranchLevel> levels;
     std::vector<LeafKind> leaves;

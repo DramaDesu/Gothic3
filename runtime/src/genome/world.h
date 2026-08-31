@@ -62,9 +62,26 @@ struct VegetationInstance
     std::array<float, 3> boundsMax{};
 };
 
+// A SpeedTree instance. The sector only names a definition and gives the
+// transform - the tree itself is grown from the .spt, and its size variance is
+// applied per instance, which is why two entities sharing one definition have
+// bounds of different heights.
+struct TreePlacement
+{
+    std::string name;
+    WorldMatrix world{};
+    std::string resource; // e.g. "G3_Tree_XS_CarolinaBuckthorn_03.spt"
+    std::array<float, 3> boundsMin{};
+    std::array<float, 3> boundsMax{};
+    bool wind = false;
+
+    float boundsHeight() const { return boundsMax[1] - boundsMin[1]; }
+};
+
 struct WorldLayer
 {
     std::vector<Placement> placements;
+    std::vector<TreePlacement> trees;
     std::vector<VegetationMesh> vegetationMeshes;
     std::vector<VegetationInstance> vegetation;
 

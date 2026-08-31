@@ -370,8 +370,28 @@ bool loadWorldNode(const std::vector<std::uint8_t> &bytes, WorldLayer &layer, st
                 const int stage = readVegetation(reader, strings, vegetationEnd, layer.vegetationMeshes,
                                                  layer.vegetation);
                 if (stage != 0)
-                    return fail(stage == 4 ? "bad vegetation, stage 4" : stage == 5 ? "bad vegetation, stage 5" : stage == 6 ? "bad vegetation, stage 6" : stage == 7 ? "bad vegetation, stage 7" : stage == 8 ? "bad vegetation, stage 8" : stage == 1 ? "bad vegetation, stage 1" : stage == 2 ? "bad vegetation, stage 2" : "bad vegetation, stage 3");
+                    return fail("bad vegetation");
                 reader.seek(resume);
+                continue;
+            }
+
+            if (className == "eCSpeedTree_PS")
+            {
+                TreePlacement tree;
+                tree.name = placement.name;
+                tree.world = placement.world;
+                tree.boundsMin = placement.boundsMin;
+                tree.boundsMax = placement.boundsMax;
+                for (const Property &property : properties)
+                {
+                    Reader value(property.value);
+                    if (property.name == "ResourceFilePath" && property.value.size() >= 2)
+                        tree.resource = strings.entry(value);
+                    else if (property.name == "EnableWind" && !property.value.empty())
+                        tree.wind = property.value[0] != 0;
+                }
+                if (!tree.resource.empty())
+                    layer.trees.push_back(std::move(tree));
                 continue;
             }
 

@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <iostream>
+#include <algorithm>
 #include <map>
 
 int main(int argc, char **argv)
@@ -47,8 +48,16 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    std::size_t parsed = 0, failed = 0, entities = 0, meshes = 0, vegetation = 0, plantMeshes = 0;
+    std::size_t parsed = 0, failed = 0, entities = 0, meshes = 0, vegetation = 0, plantMeshes = 0, trees = 0;
     std::map<std::string, std::size_t> reasons;
+    // Per definition: how many stand in the world and how tall they grew, which
+    // is the yardstick a generator has to hit.
+    struct TreeStats
+    {
+        std::size_t count = 0;
+        float lowest = 1e9f, tallest = 0.0f, total = 0.0f;
+    };
+    std::map<std::string, TreeStats> byResource;
     for (const genome::PakEntry &entry : archive->entries())
     {
         if (entry.deleted || entry.path.find("_cstat.node") == std::string::npos)
@@ -65,6 +74,16 @@ int main(int argc, char **argv)
         ++parsed;
         entities += layer.placements.size();
         vegetation += layer.vegetation.size();
+        trees += layer.trees.size();
+        for (const genome::TreePlacement &tree : layer.trees)
+        {
+            TreeStats &stats = byResource[tree.resource];
+            const float height = tree.boundsHeight();
+            ++stats.count;
+            stats.total += height;
+            stats.lowest = std::min(stats.lowest, height);
+            stats.tallest = std::max(stats.tallest, height);
+        }
         plantMeshes += layer.vegetationMeshes.size();
         meshes += layer.meshCount();
     }
@@ -72,7 +91,12 @@ int main(int argc, char **argv)
     std::printf("parsed %zu static sectors, %zu failed\n", parsed, failed);
     std::printf("%zu entities, %zu placing a static mesh, %zu plants from %zu plant meshes\n", entities, meshes,
                 vegetation, plantMeshes);
+    std::printf("%zu trees from %zu definitions\n", trees, byResource.size());
     for (const auto &[reason, count] : reasons)
         std::printf("  %5zu  %s\n", count, reason.c_str());
+
+    for (const auto &[resource, stats] : byResource)
+        std::printf("  %-46s %6zu  height %6.0f .. %-6.0f mean %6.0f\n", resource.c_str(), stats.count, stats.lowest,
+                    stats.tallest, stats.total / float(stats.count));
     return failed == 0 ? 0 : 1;
 }

@@ -260,20 +260,20 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
             out.barkTexture = token.text;
             break;
         case 2001:
-            out.height = token.floats.empty() ? 0.0f : token.floats[0];
+            out.parameter2001 = token.floats.empty() ? 0.0f : token.floats[0];
             break;
         case 2003:
-            out.radius = token.floats.empty() ? 0.0f : token.floats[0];
+            out.parameter2003 = token.floats.empty() ? 0.0f : token.floats[0];
             break;
         case 2005:
             // A seed, so the integer reading is the meaningful one.
             std::memcpy(&out.seed, &token.floats[0], sizeof(out.seed));
             break;
         case 2006:
-            out.parameter2006 = token.floats[0];
+            out.size = token.floats[0];
             break;
         case 2007:
-            out.parameter2007 = token.floats[0];
+            out.sizeVariance = token.floats[0];
             break;
         case 4004:
             leaf.size = asFloats3();
