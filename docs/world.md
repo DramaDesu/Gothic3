@@ -70,6 +70,24 @@ Two things cost time and are worth stating plainly:
   sets at all, so a parser that assumes every entity carries a visual gives up
   immediately.
 
+## It draws
+
+![One sector of static objects](sector-static.png)
+
+    g3world "…/Data/_compiledMesh.pak" none --sectors "…/Data/Projects_compiled.pak" x55000y0z55000_cstat.node
+
+One sector, 1344 objects placed from 1361 references: a keep with its gate and
+battlements, a red banner, and the shrubs, trees and rocks around it. Nine mesh
+names do not resolve in `_compiledMesh.pak` and are skipped.
+
+Meshes are stored around their own origin, so each instance is transformed into
+world space on the CPU before it joins the buffer. That is fine for a viewer and
+obviously wrong for a world of 105879 objects - instancing is the next step, and
+the placement data is already in the right shape for it.
+
+White patches are objects whose material did not resolve to a texture yet; they
+fall back to plain white rather than disappearing.
+
 ## Not yet established
 
 Whether the terrain proper is meshes or a height field, what `.lrgeodat` holds,

@@ -9,6 +9,7 @@
 #include "genome/material.h"
 #include "genome/mesh.h"
 #include "genome/pak.h"
+#include "genome/world.h"
 #include "render/window.h"
 #include "render/world_renderer.h"
 
@@ -100,11 +101,12 @@ int main(int argc, char **argv)
 
     if (argc < 2)
     {
-        std::puts("usage: g3world <_compiledMesh.pak> [name filter]");
+        std::puts("usage: g3world <_compiledMesh.pak> [mesh filter] [--sectors <Projects_compiled.pak> [sector filter]]");
         return 2;
     }
 
-    const std::string filter = argc > 2 ? argv[2] : "g3_world_lowpoly_landscape_01/";
+    const bool hasFilter = argc > 2 && argv[2][0] != 45;
+    const std::string filter = hasFilter ? argv[2] : "g3_world_lowpoly_landscape_01/";
 
     // The mesh archive sits in the game's Data folder, so its siblings are found
     // beside it rather than asked for separately.
@@ -122,8 +124,13 @@ int main(int argc, char **argv)
 
     std::vector<genome::Mesh> meshes;
     std::size_t failed = 0;
+    // "none" leaves the landscape out, which is how a single sector can be
+    // looked at closely instead of as a speck on a five-kilometre map.
+    const bool wantLandscape = filter != "none";
     for (const genome::PakEntry &entry : archive->entries())
     {
+        if (!wantLandscape)
+            break;
         if (entry.deleted || entry.path.find(filter) == std::string::npos)
             continue;
         if (entry.path.size() < 6 || entry.path.compare(entry.path.size() - 6, 6, ".xcmsh") != 0)
@@ -138,9 +145,98 @@ int main(int argc, char **argv)
         meshes.push_back(std::move(mesh));
     }
 
-    if (meshes.empty())
+    if (wantLandscape && meshes.empty())
     {
         std::printf("nothing matched %s\n", filter.c_str());
+        return 1;
+    }
+
+    // Static objects: each sector names meshes and gives each one a world
+    // matrix. The meshes are stored around their own origin, so they are
+    // transformed into world space here - the renderer only knows world space.
+    int sectorArgument = 0;
+    for (int index = 2; index + 1 < argc; ++index)
+        if (std::string(argv[index]) == "--sectors")
+            sectorArgument = index + 1;
+
+    if (sectorArgument != 0)
+    {
+        const auto world = genome::PakArchive::open(argv[sectorArgument], nullptr);
+        if (!world)
+            std::puts("warning: could not open the world archive");
+        else
+        {
+            const std::string sectorFilter =
+                sectorArgument + 1 < argc ? argv[sectorArgument + 1] : "_cstat.node";
+            std::map<std::string, const genome::Mesh *> meshCache;
+            std::vector<std::unique_ptr<genome::Mesh>> sourceMeshes;
+            std::size_t placed = 0, sectors = 0, missing = 0;
+
+            for (const genome::PakEntry &entry : world->entries())
+            {
+                if (entry.deleted || entry.path.find(sectorFilter) == std::string::npos)
+                    continue;
+
+                genome::WorldLayer layer;
+                std::string ignored;
+                if (!genome::loadWorldNode(world->read(entry, &ignored), layer, &ignored))
+                    continue;
+                ++sectors;
+
+                for (const genome::Placement &placement : layer.placements)
+                {
+                    if (placement.meshName.empty())
+                        continue;
+
+                    const genome::Mesh *source = nullptr;
+                    const auto cached = meshCache.find(placement.meshName);
+                    if (cached != meshCache.end())
+                        source = cached->second;
+                    else
+                    {
+                        auto loaded = std::make_unique<genome::Mesh>();
+                        if (genome::loadMesh(archive->read(placement.meshName, &ignored), *loaded, &ignored))
+                        {
+                            source = loaded.get();
+                            sourceMeshes.push_back(std::move(loaded));
+                        }
+                        else
+                            ++missing;
+                        meshCache.emplace(placement.meshName, source);
+                    }
+                    if (!source)
+                        continue;
+
+                    genome::Mesh instance = *source;
+                    const genome::WorldMatrix &m = placement.world;
+                    for (genome::MeshElement &element : instance.elements)
+                    {
+                        for (std::array<float, 3> &position : element.positions)
+                        {
+                            const std::array<float, 3> v = position;
+                            position = {v[0] * m[0] + v[1] * m[4] + v[2] * m[8] + m[12],
+                                        v[0] * m[1] + v[1] * m[5] + v[2] * m[9] + m[13],
+                                        v[0] * m[2] + v[1] * m[6] + v[2] * m[10] + m[14]};
+                        }
+                        for (std::array<float, 3> &normal : element.normals)
+                        {
+                            const std::array<float, 3> v = normal;
+                            normal = {v[0] * m[0] + v[1] * m[4] + v[2] * m[8],
+                                      v[0] * m[1] + v[1] * m[5] + v[2] * m[9],
+                                      v[0] * m[2] + v[1] * m[6] + v[2] * m[10]};
+                        }
+                    }
+                    meshes.push_back(std::move(instance));
+                    ++placed;
+                }
+            }
+            std::printf("%zu sectors, %zu objects placed, %zu meshes missing\n", sectors, placed, missing);
+        }
+    }
+
+    if (meshes.empty())
+    {
+        std::puts("nothing to draw");
         return 1;
     }
 
