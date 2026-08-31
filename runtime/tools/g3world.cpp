@@ -469,14 +469,17 @@ int main(int argc, char **argv)
         vkCmdSetViewport(command, 0, 1, &viewport);
         vkCmdSetScissor(command, 0, 1, &scissor);
 
-        renderer.cull(device, viewProjection);
+        // A pixel and a half: below that an object is a speck, whatever it is.
+        const float pixelsPerRadian = float(extent.height) * 0.5f / std::tan(0.5f);
+        renderer.cull(device, viewProjection, eye, pixelsPerRadian, 1.5f);
 
         static float reportAt = 0.0f;
         reportAt += delta;
         if (reportAt > 1.0f)
         {
             reportAt = 0.0f;
-            std::printf("visible %zu of %zu instances\n", renderer.visibleInstances(), renderer.instanceCount());
+            std::printf("visible %zu of %zu instances (%zu dropped as too small)\n",
+                        renderer.visibleInstances(), renderer.instanceCount(), renderer.tooSmallInstances());
         }
         renderer.draw(device, viewProjection, {0.45f, 0.75f, 0.35f, 0.0f});
 

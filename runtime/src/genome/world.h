@@ -30,6 +30,10 @@ struct Placement
     std::array<float, 3> boundsMin{};
     std::array<float, 3> boundsMax{};
 
+    // The engine's own hints for when this object stops being worth drawing.
+    float visualLodFactor = 1.0f;
+    float objectCullFactor = 1.0f;
+
     std::array<float, 3> translation() const { return {world[12], world[13], world[14]}; }
 };
 

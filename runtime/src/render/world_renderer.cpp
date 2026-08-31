@@ -362,7 +362,8 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
     return true;
 }
 
-void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjection)
+void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjection,
+                         const std::array<float, 3> &eye, float pixelsPerRadian, float minimumPixels)
 {
     // Frustum planes straight out of the view-projection matrix: each is a
     // combination of two of its rows, in the same column-major layout the
@@ -379,6 +380,7 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     std::array<std::array<float, 4>, 6> planes{plane(0), plane(1), plane(2), plane(3), plane(4), plane(5)};
 
     m_visible.clear();
+    m_tooSmall = 0;
     for (Batch &batch : m_batches)
     {
         const std::uint32_t firstInstance = static_cast<std::uint32_t>(m_visible.size());
@@ -406,6 +408,27 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
             }
             if (!inside)
                 continue;
+
+            if (minimumPixels > 0.0f && instance < batch.bounds.size())
+            {
+                // Screen size of the bounding sphere: radius over distance is
+                // the angle it subtends, and that times the focal length in
+                // pixels is how big it lands.
+                const std::array<float, 6> &box = batch.bounds[instance];
+                const float radius = 0.5f * std::sqrt((box[3] - box[0]) * (box[3] - box[0]) +
+                                                      (box[4] - box[1]) * (box[4] - box[1]) +
+                                                      (box[5] - box[2]) * (box[5] - box[2]));
+                const float centre[3] = {0.5f * (box[0] + box[3]), 0.5f * (box[1] + box[4]),
+                                         0.5f * (box[2] + box[5])};
+                const float distance = std::sqrt((centre[0] - eye[0]) * (centre[0] - eye[0]) +
+                                                 (centre[1] - eye[1]) * (centre[1] - eye[1]) +
+                                                 (centre[2] - eye[2]) * (centre[2] - eye[2]));
+                if (distance > radius && radius / distance * pixelsPerRadian < minimumPixels)
+                {
+                    ++m_tooSmall;
+                    continue;
+                }
+            }
 
             m_visible.push_back(batch.transforms[instance]);
             ++visible;

@@ -122,10 +122,22 @@ rebuilt from the boxes that survive the six frustum planes.
 Flying over the coast that leaves **12749 of 105233 instances** drawn: seven
 eighths of the world is behind the camera or off to the sides at any moment.
 
-The remaining waste is different in kind and needs different answers: cutlery
-inside houses five kilometres away still passes the frustum test, which is what
-LOD and occlusion are for. The game ships LOD chains as .xlmsh files that we do
-not read yet.
+## Dropping what covers no pixels
+
+![The whole map, drawing 6204 objects](world-lod.png)
+
+.xlmsh LOD chains exist but are a footnote: 109 files, all houses, and they store
+no switch distances at all - just an ordered list of meshes. The useful lever is
+size on screen. Each entity carries its own bounds, so the angle it subtends is
+radius over distance, and that times the focal length in pixels says how big it
+lands. Below about a pixel and a half it is dropped.
+
+Overlooking the map that takes the frame from 12749 instances to **6204 of
+105233**, with 98915 dropped as too small - because most of the world is cutlery,
+bowls and pebbles inside houses, and from a hilltop none of them cover a pixel.
+
+Each entity also carries  and , the engine's
+own per-object hints, which are read but not yet used to bias the threshold.
 
 ## Not yet established
 
