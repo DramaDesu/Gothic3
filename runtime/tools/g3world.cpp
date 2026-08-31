@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <iostream>
 #include <map>
@@ -172,7 +173,7 @@ int main(int argc, char **argv)
         {
             const std::string sectorFilter =
                 sectorArgument + 1 < argc ? argv[sectorArgument + 1] : "_cstat.node";
-            std::size_t placed = 0, sectors = 0, missing = 0;
+            std::size_t placed = 0, sectors = 0, missing = 0, grass = 0;
 
             for (const genome::PakEntry &entry : world->entries())
             {
@@ -222,8 +223,39 @@ int main(int argc, char **argv)
                     ownedMeshes.push_back(std::move(mesh));
                     ++placed;
                 }
+                // Grass is scattered rather than placed: the sector holds one mesh
+                // per plant kind, and a grid of instances referring to them.
+                const std::size_t firstPlantBatch = batches.size();
+                for (const genome::VegetationMesh &plant : layer.vegetationMeshes)
+                {
+                    auto mesh = std::make_unique<genome::Mesh>();
+                    genome::MeshElement element;
+                    element.positions = plant.positions;
+                    element.normals = plant.normals;
+                    element.texCoords = plant.texCoords;
+                    element.indices = plant.indices;
+                    element.materialName = plant.texture;
+                    mesh->elements.push_back(std::move(element));
+
+                    render::MeshInstances batch;
+                    batch.mesh = mesh.get();
+                    batches.push_back(std::move(batch));
+                    ownedMeshes.push_back(std::move(mesh));
+                }
+
+                for (const genome::VegetationInstance &plant : layer.vegetation)
+                {
+                    if (plant.mesh >= layer.vegetationMeshes.size())
+                        continue;
+                    render::MeshInstances &batch = batches[firstPlantBatch + plant.mesh];
+                    batch.transforms.push_back(plant.world);
+                    batch.bounds.push_back({plant.boundsMin[0], plant.boundsMin[1], plant.boundsMin[2],
+                                            plant.boundsMax[0], plant.boundsMax[1], plant.boundsMax[2]});
+                    ++grass;
+                }
             }
-            std::printf("%zu sectors, %zu objects placed, %zu meshes missing\n", sectors, placed, missing);
+            std::printf("%zu sectors, %zu objects placed, %zu meshes missing, %zu plants\n", sectors, placed,
+                        missing, grass);
         }
     }
 
@@ -286,6 +318,24 @@ int main(int argc, char **argv)
                 const auto cached = cache.find(element.materialName);
                 if (cached != cache.end())
                     loaded = cached->second;
+                else if (imageArchive && element.materialName.size() > 4 &&
+                         element.materialName.compare(element.materialName.size() - 4, 4, ".dds") == 0)
+                {
+                    // Grass names its texture outright, in its authored form.
+                    std::string base = element.materialName.substr(0, element.materialName.size() - 4);
+                    for (char &c : base)
+                        c = char(std::tolower(static_cast<unsigned char>(c)));
+
+                    std::string ignored;
+                    auto image = std::make_unique<genome::Image>();
+                    if (exists(base) && genome::loadImage(imageArchive->read(base + ".ximg", &ignored), *image,
+                                                          &ignored))
+                    {
+                        loaded = image.get();
+                        images.push_back(std::move(image));
+                    }
+                    cache.emplace(element.materialName, loaded);
+                }
                 else if (materials && imageArchive && !element.materialName.empty())
                 {
                     genome::Material material;

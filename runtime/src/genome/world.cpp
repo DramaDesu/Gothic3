@@ -1,5 +1,8 @@
 #include "world.h"
 
+#include <cmath>
+#include <unordered_map>
+
 namespace genome
 {
 namespace
@@ -22,7 +25,8 @@ constexpr std::size_t c_PropertySetCountOffset = 294;
 // a standalone resource, so it is read here rather than through
 // readPropertySetHeader.
 bool readEntityPropertySet(Reader &reader, const StringTable &strings, std::string &className,
-                           std::vector<Property> &properties)
+                           std::vector<Property> &properties, std::size_t *bodyStart = nullptr,
+                           std::size_t *bodyEnd = nullptr)
 {
     reader.skip(2); // property-set version, signed and sometimes -1
     reader.skip(6); // subclass identifier
@@ -44,6 +48,9 @@ bool readEntityPropertySet(Reader &reader, const StringTable &strings, std::stri
     if (!reader.ok() || propertyCount > 4096)
         return false;
 
+    if (bodyEnd)
+        *bodyEnd = declaredEnd;
+
     properties.clear();
     properties.reserve(propertyCount);
     for (std::uint32_t index = 0; index < propertyCount && reader.ok(); ++index)
@@ -60,6 +67,9 @@ bool readEntityPropertySet(Reader &reader, const StringTable &strings, std::stri
         properties.push_back(std::move(property));
     }
 
+    if (bodyStart)
+        *bodyStart = reader.tell();
+
     // The class body past the properties varies per class; the declared end is
     // what makes it skippable without knowing any of them. Each record is then
     // closed by a marker, and forgetting it lands the next read inside the tail
@@ -68,6 +78,206 @@ bool readEntityPropertySet(Reader &reader, const StringTable &strings, std::stri
     if (reader.u32() != c_RecordMarker)
         return false;
     return reader.ok();
+}
+
+constexpr std::size_t c_PlantEntrySize = 44;
+
+// A plant is stored as position, rotation and two scales - width across, height
+// up - which the same row-vector convention as the entity matrices turns into
+// the transform the renderer wants.
+WorldMatrix plantMatrix(const std::array<float, 3> &at, const std::array<float, 4> &q, float width, float height)
+{
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    WorldMatrix m{};
+    m[0] = (1.0f - 2.0f * (y * y + z * z)) * width;
+    m[1] = (2.0f * (x * y + w * z)) * width;
+    m[2] = (2.0f * (x * z - w * y)) * width;
+    m[4] = (2.0f * (x * y - w * z)) * height;
+    m[5] = (1.0f - 2.0f * (x * x + z * z)) * height;
+    m[6] = (2.0f * (y * z + w * x)) * height;
+    m[8] = (2.0f * (x * z + w * y)) * width;
+    m[9] = (2.0f * (y * z - w * x)) * width;
+    m[10] = (1.0f - 2.0f * (x * x + y * y)) * width;
+    m[12] = at[0];
+    m[13] = at[1];
+    m[14] = at[2];
+    m[15] = 1.0f;
+    return m;
+}
+
+// A rotated box is bounded by summing the absolute contribution of each axis.
+void transformBounds(const std::array<float, 3> &boxMin, const std::array<float, 3> &boxMax, const WorldMatrix &m,
+                     std::array<float, 3> &outMin, std::array<float, 3> &outMax)
+{
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        float centre = m[12 + axis];
+        float extent = 0.0f;
+        for (int source = 0; source < 3; ++source)
+        {
+            const float c = (boxMin[source] + boxMax[source]) * 0.5f;
+            const float e = (boxMax[source] - boxMin[source]) * 0.5f;
+            centre += c * m[source * 4 + axis];
+            extent += e * std::fabs(m[source * 4 + axis]);
+        }
+        outMin[axis] = centre - extent;
+        outMax[axis] = centre + extent;
+    }
+}
+
+// A nested subclass omits the leading version field a top-level record carries,
+// so it starts straight at the identifier.
+bool readSubClassHeader(Reader &reader, const StringTable &strings, std::string &className, std::size_t &declaredEnd)
+{
+    reader.skip(6);
+    className = strings.entry(reader);
+    reader.skip(5);
+    reader.skip(2); // version
+    const std::uint32_t bodySize = reader.u32();
+    declaredEnd = reader.tell() + bodySize;
+    return reader.ok() && declaredEnd <= reader.size();
+}
+
+template <typename T> void readPrefixedList(Reader &reader, std::vector<T> &out, std::size_t components)
+{
+    reader.skip(1); // list prefix
+    const std::uint32_t count = reader.u32();
+    if (!reader.ok() || count > reader.remaining() / (components * 4))
+    {
+        reader.fail();
+        return;
+    }
+    out.resize(count);
+    reader.array(reinterpret_cast<float *>(out.data()), count * components);
+}
+
+// eCVegetation_PS: a table of plant meshes, then a grid that scatters them.
+// The meshes are templates - a single clump of blades in local space - and the
+// grid entries place them, so a sector of grass costs 59 meshes rather than
+// thousands.
+int readVegetation(Reader &reader, const StringTable &strings, std::size_t declaredEnd,
+                   std::vector<VegetationMesh> &meshes, std::vector<VegetationInstance> &instances)
+{
+    reader.skip(2); // class version, which the caller stops just short of
+
+    if (reader.u8() != 0)
+    {
+        const std::uint32_t typeCount = reader.u32();
+        for (std::uint32_t index = 0; index < typeCount && reader.ok(); ++index)
+        {
+            reader.skip(2);
+            strings.entry(reader);
+        }
+    }
+
+    reader.u32(); // highest mesh id, equal to the count in shipping data
+    const std::uint32_t meshCount = reader.u32();
+    if (!reader.ok() || meshCount > 4096)
+        return 1;
+
+    // Grid entries name a mesh by its id, which need not be its position in
+    // this table, so keep the mapping while reading.
+    std::unordered_map<std::uint16_t, std::uint32_t> meshOfId;
+
+    for (std::uint32_t index = 0; index < meshCount && reader.ok(); ++index)
+    {
+        std::string className;
+        std::size_t meshEnd = 0;
+        if (!readSubClassHeader(reader, strings, className, meshEnd))
+            return 2;
+
+        if (className != "eCVegetation_Mesh")
+        {
+            reader.seek(meshEnd);
+            continue;
+        }
+
+        // Skip the declared properties; the geometry lives in the class body.
+        reader.skip(2);
+        const std::uint32_t propertyCount = reader.u32();
+        for (std::uint32_t property = 0; property < propertyCount && reader.ok(); ++property)
+        {
+            reader.skip(6);
+            const std::uint32_t valueSize = reader.u32();
+            reader.skip(valueSize);
+        }
+        reader.skip(2); // class version
+
+        VegetationMesh plant;
+        reader.u16(); // mesh type
+        const std::uint16_t meshId = reader.u16();
+        reader.skip(8); // timestamp
+        plant.texture = strings.entry(reader);
+        reader.array(plant.boundsMin.data(), 3);
+        reader.array(plant.boundsMax.data(), 3);
+
+        readPrefixedList(reader, plant.positions, 3);
+        readPrefixedList(reader, plant.normals, 3);
+        readPrefixedList(reader, plant.texCoords, 2);
+
+        reader.skip(1);
+        const std::uint32_t indexCount = reader.u32();
+        if (!reader.ok() || indexCount > reader.remaining() / 4)
+            return 3;
+        plant.indices.resize(indexCount);
+        reader.array(plant.indices.data(), indexCount);
+
+        if (!plant.positions.empty() && !plant.indices.empty())
+        {
+            meshOfId.emplace(meshId, std::uint32_t(meshes.size()));
+            meshes.push_back(std::move(plant));
+        }
+
+        reader.seek(meshEnd);
+    }
+
+    if (reader.u16() != 2) // grid version
+        return 4;
+    reader.f32();    // node dimension, 1000 units in shipping data
+    reader.skip(16); // grid rectangle, in nodes
+
+    const std::uint32_t nodeCount = reader.u32();
+    if (!reader.ok() || nodeCount > reader.remaining() / 34)
+        return 5;
+
+    for (std::uint32_t node = 0; node < nodeCount && reader.ok(); ++node)
+    {
+        reader.u32(); // node index within the grid rectangle
+        if (reader.u16() != 1)
+            return 6;
+        reader.skip(24); // node bounds, which the entry positions already imply
+
+        const std::uint32_t entryCount = reader.u32();
+        if (!reader.ok() || entryCount > reader.remaining() / c_PlantEntrySize)
+            return 7;
+
+        for (std::uint32_t entry = 0; entry < entryCount && reader.ok(); ++entry)
+        {
+            reader.u16(); // plant type
+            const std::uint16_t meshId = reader.u16();
+            std::array<float, 3> at{};
+            std::array<float, 4> rotation{};
+            reader.array(at.data(), 3);
+            reader.array(rotation.data(), 4);
+            const float scaleWidth = reader.f32();
+            const float scaleHeight = reader.f32();
+            reader.u32(); // tint, unused so far
+
+            const auto found = meshOfId.find(meshId);
+            if (found == meshOfId.end())
+                continue;
+
+            VegetationInstance plant;
+            plant.mesh = found->second;
+            plant.world = plantMatrix(at, rotation, scaleWidth, scaleHeight);
+            transformBounds(meshes[plant.mesh].boundsMin, meshes[plant.mesh].boundsMax, plant.world, plant.boundsMin,
+                            plant.boundsMax);
+            instances.push_back(plant);
+        }
+    }
+
+    reader.seek(declaredEnd);
+    return reader.ok() ? 0 : 8;
 }
 
 } // namespace
@@ -147,8 +357,23 @@ bool loadWorldNode(const std::vector<std::uint8_t> &bytes, WorldLayer &layer, st
         for (std::uint32_t set = 0; set < propertySetCount; ++set)
         {
             std::string className;
-            if (!readEntityPropertySet(reader, strings, className, properties))
+            std::size_t vegetationBody = 0, vegetationEnd = 0;
+            if (!readEntityPropertySet(reader, strings, className, properties, &vegetationBody, &vegetationEnd))
                 return fail("bad entity property set");
+
+            if (className == "eCVegetation_PS")
+            {
+                // readEntityPropertySet has already stepped past this record, so
+                // rewind to its body and read the geometry, then carry on.
+                const std::size_t resume = reader.tell();
+                reader.seek(vegetationBody);
+                const int stage = readVegetation(reader, strings, vegetationEnd, layer.vegetationMeshes,
+                                                 layer.vegetation);
+                if (stage != 0)
+                    return fail(stage == 4 ? "bad vegetation, stage 4" : stage == 5 ? "bad vegetation, stage 5" : stage == 6 ? "bad vegetation, stage 6" : stage == 7 ? "bad vegetation, stage 7" : stage == 8 ? "bad vegetation, stage 8" : stage == 1 ? "bad vegetation, stage 1" : stage == 2 ? "bad vegetation, stage 2" : "bad vegetation, stage 3");
+                reader.seek(resume);
+                continue;
+            }
 
             if (className != "eCVisualMeshStatic_PS")
                 continue;

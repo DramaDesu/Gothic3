@@ -47,7 +47,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    std::size_t parsed = 0, failed = 0, entities = 0, meshes = 0;
+    std::size_t parsed = 0, failed = 0, entities = 0, meshes = 0, vegetation = 0, plantMeshes = 0;
     std::map<std::string, std::size_t> reasons;
     for (const genome::PakEntry &entry : archive->entries())
     {
@@ -64,11 +64,14 @@ int main(int argc, char **argv)
         }
         ++parsed;
         entities += layer.placements.size();
+        vegetation += layer.vegetation.size();
+        plantMeshes += layer.vegetationMeshes.size();
         meshes += layer.meshCount();
     }
 
     std::printf("parsed %zu static sectors, %zu failed\n", parsed, failed);
-    std::printf("%zu entities, %zu of them placing a static mesh\n", entities, meshes);
+    std::printf("%zu entities, %zu placing a static mesh, %zu plants from %zu plant meshes\n", entities, meshes,
+                vegetation, plantMeshes);
     for (const auto &[reason, count] : reasons)
         std::printf("  %5zu  %s\n", count, reason.c_str());
     return failed == 0 ? 0 : 1;

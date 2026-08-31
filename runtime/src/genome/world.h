@@ -9,6 +9,7 @@
 #include "property_set.h"
 
 #include <array>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -37,9 +38,35 @@ struct Placement
     std::array<float, 3> translation() const { return {world[12], world[13], world[14]}; }
 };
 
+// Grass and undergrowth. A sector stores one mesh per plant kind and a grid
+// that scatters them, so the geometry here is a template and the instances
+// come from VegetationInstance below.
+struct VegetationMesh
+{
+    std::string texture; // authored name, e.g. "..._Diffuse_S1.dds"
+    std::vector<std::array<float, 3>> positions;
+    std::vector<std::array<float, 3>> normals;
+    std::vector<std::array<float, 2>> texCoords;
+    std::vector<std::uint32_t> indices;
+    std::array<float, 3> boundsMin{};
+    std::array<float, 3> boundsMax{};
+};
+
+// One plant: which mesh, and where it stands. Positions are already in world
+// space, so the placing entity contributes nothing.
+struct VegetationInstance
+{
+    std::uint32_t mesh = 0;
+    WorldMatrix world{};
+    std::array<float, 3> boundsMin{};
+    std::array<float, 3> boundsMax{};
+};
+
 struct WorldLayer
 {
     std::vector<Placement> placements;
+    std::vector<VegetationMesh> vegetationMeshes;
+    std::vector<VegetationInstance> vegetation;
 
     std::size_t meshCount() const;
 };

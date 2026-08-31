@@ -21,7 +21,12 @@ layout(location = 0) out vec4 outColor;
 void main()
 {
     vec3 normal = normalize(inNormal);
-    vec3 ground = texture(diffuseMap, inTexCoord).rgb;
+    vec4 sampled = texture(diffuseMap, inTexCoord);
+    // Grass is drawn as crossed quads whose texture is mostly empty, so the
+    // transparent parts have to be thrown away rather than blended.
+    if (sampled.a < 0.5)
+        discard;
+    vec3 ground = sampled.rgb;
 
     // The diffuse maps already carry baked shading, so the lighting here only
     // has to give the relief some direction without crushing the forests.
