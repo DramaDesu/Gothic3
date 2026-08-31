@@ -4,6 +4,7 @@
 // vertices are already in world space, so they are uploaded once and only the
 // camera moves.
 
+#include "genome/image.h"
 #include "genome/mesh.h"
 #include "texture.h"
 #include "vulkan.h"
@@ -25,9 +26,10 @@ struct WorldVertex
 class WorldRenderer
 {
   public:
-    // Each mesh keeps its own draw range so materials can be attached later;
-    // for now they all share one pipeline.
-    bool create(Device &device, const std::vector<genome::Mesh> &meshes, std::string *error);
+    // One entry per mesh element, in traversal order; a null image draws
+    // untextured. The same image pointer reused across tiles is uploaded once.
+    bool create(Device &device, const std::vector<genome::Mesh> &meshes,
+                const std::vector<const genome::Image *> &textures, std::string *error);
     void destroy(Device &device);
 
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);
@@ -46,6 +48,7 @@ class WorldRenderer
     {
         std::uint32_t firstIndex = 0;
         std::uint32_t indexCount = 0;
+        VkDescriptorSet descriptor = VK_NULL_HANDLE;
     };
 
     VkPipelineLayout m_layout = VK_NULL_HANDLE;
@@ -56,6 +59,11 @@ class WorldRenderer
     std::size_t m_vertexCount = 0;
     std::size_t m_indexCount = 0;
     std::vector<Range> m_ranges;
+
+    VkDescriptorSetLayout m_descriptorLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
+    std::vector<Texture> m_textures; // deduplicated by source image
+    Texture m_white;
 
     std::array<float, 3> m_boundsMin{};
     std::array<float, 3> m_boundsMax{};

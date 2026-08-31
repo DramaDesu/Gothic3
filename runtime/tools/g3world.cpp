@@ -5,6 +5,8 @@
 //
 // Arrow keys orbit, W/S zoom, Q/E change height, Space pauses the slow spin.
 
+#include "genome/image.h"
+#include "genome/material.h"
 #include "genome/mesh.h"
 #include "genome/pak.h"
 #include "render/window.h"
@@ -20,6 +22,9 @@
 #include <cmath>
 #include <cstdio>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <set>
 
 namespace
 {
@@ -101,6 +106,12 @@ int main(int argc, char **argv)
 
     const std::string filter = argc > 2 ? argv[2] : "g3_world_lowpoly_landscape_01/";
 
+    // The mesh archive sits in the game's Data folder, so its siblings are found
+    // beside it rather than asked for separately.
+    std::string dataDirectory = argv[1];
+    const std::size_t lastSlash = dataDirectory.find_last_of("/\\");
+    dataDirectory = lastSlash == std::string::npos ? std::string(".") : dataDirectory.substr(0, lastSlash);
+
     std::string error;
     const auto archive = genome::PakArchive::open(argv[1], &error);
     if (!archive)
@@ -141,6 +152,70 @@ int main(int argc, char **argv)
     }
     std::printf("%zu meshes (%zu failed), %zu vertices, %zu triangles\n", meshes.size(), failed, vertices, triangles);
 
+    // Every tile names a regional material; those name textures, which are
+    // loaded once each and shared by all the tiles that use them.
+    std::vector<const genome::Image *> rangeTextures;
+    std::vector<std::unique_ptr<genome::Image>> images;
+    {
+        const auto materials = genome::PakArchive::open(dataDirectory + "/_compiledMaterial.pak", nullptr);
+        const auto imageArchive = genome::PakArchive::open(dataDirectory + "/_compiledImage.pak", nullptr);
+
+        std::set<std::string> imageNames;
+        if (imageArchive)
+        {
+            for (const genome::PakEntry &entry : imageArchive->entries())
+            {
+                if (entry.deleted || entry.path.size() < 6 ||
+                    entry.path.compare(entry.path.size() - 5, 5, ".ximg") != 0)
+                    continue;
+                const std::size_t slash = entry.path.find_last_of('/');
+                const std::string leaf = slash == std::string::npos ? entry.path : entry.path.substr(slash + 1);
+                imageNames.insert(leaf.substr(0, leaf.size() - 5));
+            }
+        }
+        const auto exists = [&](const std::string &name) { return imageNames.count(name) != 0; };
+
+        std::map<std::string, const genome::Image *> cache;
+        for (const genome::Mesh &mesh : meshes)
+        {
+            for (const genome::MeshElement &element : mesh.elements)
+            {
+                if (element.positions.empty() || element.indices.empty())
+                    continue;
+
+                const genome::Image *loaded = nullptr;
+                const auto cached = cache.find(element.materialName);
+                if (cached != cache.end())
+                    loaded = cached->second;
+                else if (materials && imageArchive && !element.materialName.empty())
+                {
+                    genome::Material material;
+                    std::string ignored;
+                    if (genome::loadMaterial(materials->read(element.materialName, &ignored), material, &ignored))
+                    {
+                        if (const genome::Sampler *sampler = material.texture(genome::Slot::Diffuse))
+                        {
+                            const genome::TextureResolution resolved = genome::resolveTexture(*sampler, 0, exists);
+                            if (!resolved.fileName.empty())
+                            {
+                                auto image = std::make_unique<genome::Image>();
+                                if (genome::loadImage(imageArchive->read(resolved.fileName, &ignored), *image,
+                                                      &ignored))
+                                {
+                                    loaded = image.get();
+                                    images.push_back(std::move(image));
+                                }
+                            }
+                        }
+                    }
+                    cache.emplace(element.materialName, loaded);
+                }
+                rangeTextures.push_back(loaded);
+            }
+        }
+        std::printf("%zu distinct landscape textures\n", images.size());
+    }
+
     render::Window window("Genome runtime - world", 1280, 720);
     render::Device device;
     if (!device.create(window, &error))
@@ -150,7 +225,7 @@ int main(int argc, char **argv)
     }
 
     render::WorldRenderer renderer;
-    if (!renderer.create(device, meshes, &error))
+    if (!renderer.create(device, meshes, rangeTextures, &error))
     {
         std::cerr << "renderer: " << error << "\n";
         return 1;

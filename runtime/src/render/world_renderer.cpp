@@ -3,6 +3,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <map>
 
 namespace render
 {
@@ -41,9 +42,24 @@ VkShaderModule loadShader(VkDevice device, const std::string &path)
     return module;
 }
 
+// A one-pixel stand-in so an untextured range still has something to sample.
+genome::Image solidImage(std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a)
+{
+    genome::Image image;
+    image.width = 1;
+    image.height = 1;
+    image.faceCount = 1;
+    image.format = genome::ImageFormat::A8R8G8B8;
+    image.data = {b, g, r, a};
+    image.levels.push_back({1, 1, 0, 4});
+    image.faceStride = 4;
+    return image;
+}
+
 } // namespace
 
-bool WorldRenderer::create(Device &device, const std::vector<genome::Mesh> &meshes, std::string *error)
+bool WorldRenderer::create(Device &device, const std::vector<genome::Mesh> &meshes,
+                           const std::vector<const genome::Image *> &textures, std::string *error)
 {
     std::vector<WorldVertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -112,6 +128,81 @@ bool WorldRenderer::create(Device &device, const std::vector<genome::Mesh> &mesh
         return false;
     std::memcpy(m_indexBuffer.mapped, indices.data(), sizeof(std::uint32_t) * indices.size());
 
+    // Landscape tiles share a handful of regional materials, so textures are
+    // uploaded once per distinct image and the ranges point at the same set.
+    const genome::Image white = solidImage(255, 255, 255, 255);
+    if (!createTexture(device, white, true, m_white, error))
+        return false;
+
+    std::map<const genome::Image *, std::size_t> uploaded;
+    std::vector<std::size_t> textureForRange(m_ranges.size(), std::size_t(-1));
+    for (std::size_t range = 0; range < m_ranges.size(); ++range)
+    {
+        const genome::Image *image = range < textures.size() ? textures[range] : nullptr;
+        if (!image)
+            continue;
+
+        const auto existing = uploaded.find(image);
+        if (existing != uploaded.end())
+        {
+            textureForRange[range] = existing->second;
+            continue;
+        }
+
+        Texture texture;
+        if (!createTexture(device, *image, true, texture, error))
+            return false;
+        textureForRange[range] = m_textures.size();
+        uploaded.emplace(image, m_textures.size());
+        m_textures.push_back(texture);
+    }
+
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &binding;
+    vkCreateDescriptorSetLayout(device.device(), &layoutInfo, nullptr, &m_descriptorLayout);
+
+    // One set per distinct texture plus one for the untextured fallback.
+    const std::uint32_t setCount = static_cast<std::uint32_t>(m_textures.size() + 1);
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, setCount};
+    VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = setCount;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    vkCreateDescriptorPool(device.device(), &poolInfo, nullptr, &m_descriptorPool);
+
+    std::vector<VkDescriptorSet> sets(setCount, VK_NULL_HANDLE);
+    for (std::uint32_t index = 0; index < setCount; ++index)
+    {
+        VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocate.descriptorPool = m_descriptorPool;
+        allocate.descriptorSetCount = 1;
+        allocate.pSetLayouts = &m_descriptorLayout;
+        vkAllocateDescriptorSets(device.device(), &allocate, &sets[index]);
+
+        const Texture &texture = index < m_textures.size() ? m_textures[index] : m_white;
+        VkDescriptorImageInfo imageInfo{texture.sampler, texture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = sets[index];
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &imageInfo;
+        vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
+    }
+
+    for (std::size_t range = 0; range < m_ranges.size(); ++range)
+    {
+        const std::size_t texture = textureForRange[range];
+        m_ranges[range].descriptor = sets[texture == std::size_t(-1) ? m_textures.size() : texture];
+    }
+
     return createPipeline(device, error);
 }
 
@@ -131,6 +222,8 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
     pushRange.size = sizeof(PushConstants);
 
     VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &m_descriptorLayout;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushRange;
     vkCreatePipelineLayout(device.device(), &layoutInfo, nullptr, &m_layout);
@@ -238,13 +331,31 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
     vkCmdBindVertexBuffers(command, 0, 1, &m_vertexBuffer.handle, &offset);
     vkCmdBindIndexBuffer(command, m_indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
 
-    // One draw for the lot while every tile shares a pipeline; the ranges are
-    // kept so per-material draws can be split out once materials arrive.
-    vkCmdDrawIndexed(command, static_cast<std::uint32_t>(m_indexCount), 1, 0, 0, 0);
+    // One draw per range: tiles sharing a regional material share a descriptor,
+    // so this is a handful of texture binds rather than one per tile.
+    VkDescriptorSet bound = VK_NULL_HANDLE;
+    for (const Range &range : m_ranges)
+    {
+        if (range.descriptor != bound)
+        {
+            vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &range.descriptor, 0,
+                                    nullptr);
+            bound = range.descriptor;
+        }
+        vkCmdDrawIndexed(command, range.indexCount, 1, range.firstIndex, 0, 0);
+    }
 }
 
 void WorldRenderer::destroy(Device &device)
 {
+    for (Texture &texture : m_textures)
+        destroyTexture(device, texture);
+    destroyTexture(device, m_white);
+    if (m_descriptorPool)
+        vkDestroyDescriptorPool(device.device(), m_descriptorPool, nullptr);
+    if (m_descriptorLayout)
+        vkDestroyDescriptorSetLayout(device.device(), m_descriptorLayout, nullptr);
+
     device.destroyBuffer(m_vertexBuffer);
     device.destroyBuffer(m_indexBuffer);
     if (m_pipeline)

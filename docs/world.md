@@ -29,14 +29,18 @@ that covers everything, it is the obvious first thing for our runtime to render.
 
 ## The landscape draws already
 
-![Myrtana, Varant and Nordmar](world-landscape.png)
+![Myrtana, Varant and Nordmar](world-textured.png)
 
 The low-poly landscape turned out to need no placement data at all: those tiles
 are ordinary `.xcmsh` meshes whose vertices are already in world space, tiled on
 a 30000-unit grid that lines up with the sector names. So the whole map is just
 349 meshes loaded and concatenated - 397k vertices, 389k triangles, spanning
-4.9 x 5.0 km. Height and slope stand in for terrain materials for now, which is
-enough to recognise Nordmar's snow, Varant's desert and the Myrtanan meadows.
+4.9 x 5.0 km. Each tile names a regional material, and those resolve to just **17 distinct
+textures** for the whole map - Myrtana, Varant and Nordmar in a few variants
+each - so they are uploaded once and shared, and the map draws as a handful of
+texture binds rather than one per tile. The diffuse maps already carry baked
+shading, which is why the lighting here stays gentle: at the strength a
+character wants, the forests turn black.
 
     g3world "…/Gothic 3/Data/_compiledMesh.pak"
 
