@@ -54,7 +54,7 @@ if (NOT GLSLC)
 endif()
 
 set(SHADER_OUTPUTS)
-foreach(shader mesh.vert mesh.frag)
+foreach(shader mesh.vert mesh.frag world.vert world.frag)
   set(output ${CMAKE_BINARY_DIR}/shaders/${shader}.spv)
   add_custom_command(
     OUTPUT ${output}
@@ -70,9 +70,14 @@ add_library(render STATIC
   src/render/window.cpp
   src/render/vulkan.cpp
   src/render/renderer.cpp
+  src/render/world_renderer.cpp
   src/render/texture.cpp)
 target_include_directories(render PUBLIC src)
 target_link_libraries(render PUBLIC genome Vulkan::Vulkan)
+
+add_executable(g3world tools/g3world.cpp)
+target_link_libraries(g3world PRIVATE genome render)
+add_dependencies(g3world shaders)
 
 add_executable(g3view tools/g3view.cpp)
 target_link_libraries(g3view PRIVATE render)

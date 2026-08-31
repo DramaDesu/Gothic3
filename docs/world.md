@@ -27,6 +27,19 @@ Top level is `myrtana`, `varant`, `nordmar`, plus `world`, `maps`,
 the distant backdrop the engine draws past the normal far plane. Being one file
 that covers everything, it is the obvious first thing for our runtime to render.
 
+## The landscape draws already
+
+![Myrtana, Varant and Nordmar](world-landscape.png)
+
+The low-poly landscape turned out to need no placement data at all: those tiles
+are ordinary `.xcmsh` meshes whose vertices are already in world space, tiled on
+a 30000-unit grid that lines up with the sector names. So the whole map is just
+349 meshes loaded and concatenated - 397k vertices, 389k triangles, spanning
+4.9 x 5.0 km. Height and slope stand in for terrain materials for now, which is
+enough to recognise Nordmar's snow, Varant's desert and the Myrtanan meadows.
+
+    g3world "…/Gothic 3/Data/_compiledMesh.pak"
+
 ## Not yet established
 
 The binary layout of `.node` and `.lrentdat`, how a sector lists its entities,
