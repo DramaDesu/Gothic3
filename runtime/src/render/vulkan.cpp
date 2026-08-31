@@ -1,5 +1,7 @@
 #include "vulkan.h"
 
+#include <cstdio>
+
 #include "window.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -346,6 +348,80 @@ bool Device::allocate(const VkMemoryRequirements &requirements, bool hostVisible
     info.allocationSize = requirements.size;
     info.memoryTypeIndex = findMemoryType(requirements.memoryTypeBits, properties);
     return check(vkAllocateMemory(m_device, &info, nullptr, &memory), error, "vkAllocateMemory");
+}
+
+bool Device::capture(const char *path, std::string *error)
+{
+    const auto fail = [&](const char *reason) {
+        if (error)
+            *error = reason;
+        return false;
+    };
+
+    vkDeviceWaitIdle(m_device);
+
+    const VkDeviceSize size = VkDeviceSize(m_extent.width) * m_extent.height * 4;
+    Buffer staging = createBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, error);
+    if (!staging.handle)
+        return false;
+
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = m_swapchainImages[m_imageIndex];
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    VkCommandBuffer command = beginOneShot();
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &barrier);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {m_extent.width, m_extent.height, 1};
+    vkCmdCopyImageToBuffer(command, m_swapchainImages[m_imageIndex], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           staging.handle, 1, &region);
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = 0;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr,
+                         0, nullptr, 1, &barrier);
+
+    endOneShot(command);
+
+    std::FILE *file = std::fopen(path, "wb");
+    if (!file)
+    {
+        destroyBuffer(staging);
+        return fail("cannot write the capture");
+    }
+
+    std::fprintf(file, "P6\n%u %u\n255\n", m_extent.width, m_extent.height);
+    const bool blue_first = m_surfaceFormat.format == VK_FORMAT_B8G8R8A8_UNORM ||
+                            m_surfaceFormat.format == VK_FORMAT_B8G8R8A8_SRGB;
+    const auto *pixels = static_cast<const std::uint8_t *>(staging.mapped);
+    std::vector<std::uint8_t> row(std::size_t(m_extent.width) * 3);
+    for (std::uint32_t y = 0; y < m_extent.height; ++y)
+    {
+        const std::uint8_t *source = pixels + std::size_t(y) * m_extent.width * 4;
+        for (std::uint32_t x = 0; x < m_extent.width; ++x)
+        {
+            row[x * 3 + 0] = source[x * 4 + (blue_first ? 2 : 0)];
+            row[x * 3 + 1] = source[x * 4 + 1];
+            row[x * 3 + 2] = source[x * 4 + (blue_first ? 0 : 2)];
+        }
+        std::fwrite(row.data(), 1, row.size(), file);
+    }
+    std::fclose(file);
+
+    destroyBuffer(staging);
+    return true;
 }
 
 VkCommandBuffer Device::beginOneShot()

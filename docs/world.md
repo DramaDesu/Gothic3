@@ -160,7 +160,41 @@ has already taken most of what walls would have hidden.
 
 Press O to toggle it and compare.
 
+## Grass is scattered, not placed
+
+![Grass in the fortress sector](world-vegetation.png)
+
+    g3world "…/Data/_compiledMesh.pak" none         --sectors "…/Data/Projects_compiled.pak" x55000y0z55000_cstat.node         --camera 53000 4050 49900 34 -10 --shot grass.ppm
+
+Vegetation is the one thing in a sector that carries its own geometry, and it
+took a wrong turn to understand why that does not mean what it looks like.
+`eCVegetation_PS` holds a handful of `eCVegetation_Mesh` records - one per plant
+kind, a single clump of blades in local space, with its own diffuse texture -
+and then a **grid** that scatters them. Reading only the meshes and drawing each
+at its entity puts 59 clumps at the origin, because the placing entity has an
+identity matrix: the position of a plant is in the grid, not in the entity.
+
+The grid is a flat list of nodes over a 1000-unit cell, each holding entries of
+44 bytes: mesh id (type and index, two shorts), world position, a quaternion,
+separate width and height scales, and a packed colour. So a plant is placed the
+same way a static object is, and the same instancing draws it - one batch per
+plant kind, one transform per plant, with bounds so it takes part in culling.
+
+Two numbers say the layout was read correctly rather than plausibly: the grid
+ends exactly on the record's declared end, and the box that follows it equals
+the world bounds the entity already carries.
+
+Across the map that is **1059610 plants from 48511 plant meshes** - the whole
+world now loads 1164843 instances. Grass earns its keep from the size test: from
+an overview only 5782 instances survive, with 1158525 dropped as too small.
+
+The blades are alpha-tested rather than blended, which is what the crossed-quad
+textures want; sorting for real transparency is not needed and would cost more
+than it buys here.
+
 ## Not yet established
 
 Whether the terrain proper is meshes or a height field, what `.lrgeodat` holds,
-and how vegetation (`eCVegetation_PS`, `eCSpeedTree_PS`) and lights are placed.
+how lights are placed, and what `eCSpeedTree_PS` refers to - it names a `.spt`
+resource and nothing else, so the trees it stands for are generated at runtime
+by a library we do not have.

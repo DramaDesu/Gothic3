@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -103,7 +104,8 @@ int main(int argc, char **argv)
 
     if (argc < 2)
     {
-        std::puts("usage: g3world <_compiledMesh.pak> [mesh filter] [--sectors <Projects_compiled.pak> [sector filter]]");
+        std::puts("usage: g3world <_compiledMesh.pak> [mesh filter] [--sectors <Projects_compiled.pak> [sector "
+              "filter]] [--shot <out.ppm>]");
         return 2;
     }
 
@@ -160,9 +162,17 @@ int main(int argc, char **argv)
     }
 
     int sectorArgument = 0;
+    const char *shotPath = nullptr;
+    int cameraArgument = 0;
     for (int index = 2; index + 1 < argc; ++index)
+    {
         if (std::string(argv[index]) == "--sectors")
             sectorArgument = index + 1;
+        if (std::string(argv[index]) == "--shot")
+            shotPath = argv[index + 1];
+        if (std::string(argv[index]) == "--camera" && index + 5 < argc)
+            cameraArgument = index + 1;
+    }
 
     if (sectorArgument != 0)
     {
@@ -422,11 +432,24 @@ int main(int argc, char **argv)
     const std::array<float, 3> toCentre{centre[0] - eye[0], centre[1] - eye[1], centre[2] - eye[2]};
     float yaw = std::atan2(toCentre[0], toCentre[2]);
     float pitch = std::atan2(toCentre[1], std::sqrt(toCentre[0] * toCentre[0] + toCentre[2] * toCentre[2]));
+
+    // An explicit viewpoint makes a picture repeatable, which the automatic
+    // framing cannot be once the loaded extent changes.
+    if (cameraArgument != 0)
+    {
+        eye = {float(std::atof(argv[cameraArgument])), float(std::atof(argv[cameraArgument + 1])),
+               float(std::atof(argv[cameraArgument + 2]))};
+        yaw = float(std::atof(argv[cameraArgument + 3])) * 3.14159265f / 180.0f;
+        pitch = float(std::atof(argv[cameraArgument + 4])) * 3.14159265f / 180.0f;
+        std::printf("camera at %.0f %.0f %.0f looking %s %s degrees\n", eye[0], eye[1], eye[2],
+                    argv[cameraArgument + 3], argv[cameraArgument + 4]);
+    }
     bool looking = false;
     bool occlusion = true;
     POINT lastCursor{};
 
     auto previous = std::chrono::steady_clock::now();
+    std::size_t frames = 0;
     while (window.pump())
     {
         const auto now = std::chrono::steady_clock::now();
@@ -549,6 +572,17 @@ int main(int argc, char **argv)
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &toPresent);
 
         device.endFrame();
+
+        // Give the view a few frames to settle, then take the picture and go.
+        if (shotPath && ++frames == 5)
+        {
+            std::string shotError;
+            if (device.capture(shotPath, &shotError))
+                std::printf("wrote %s\n", shotPath);
+            else
+                std::printf("capture failed: %s\n", shotError.c_str());
+            break;
+        }
     }
 
     vkDeviceWaitIdle(device.device());

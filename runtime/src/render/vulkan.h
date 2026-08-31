@@ -56,6 +56,11 @@ class Device
                   std::string *error);
 
     // Records and runs a command buffer immediately, for uploads at load time.
+    // Writes the frame that was just presented to a binary PPM. Screen grabs
+    // need the window in front, which is rude and unreliable while the machine
+    // is in use, so the runtime takes its own picture.
+    bool capture(const char *path, std::string *error);
+
     VkCommandBuffer beginOneShot();
     void endOneShot(VkCommandBuffer command);
 
