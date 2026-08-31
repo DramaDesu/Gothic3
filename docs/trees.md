@@ -38,10 +38,20 @@ with nothing left over - 373 branch levels and 127 leaf kinds in all.
     2000-2007   bark texture, size (2006) and its variance (2007), a seed
     3000-3010   the trunk
     4000-4007   leaves: a texture name, card size, and the atlas tile
-    6000-6017   one block per branch level, repeated: nine curves and seven numbers
+    6000-6017   one block per level, repeated: nine curves and seven numbers
     8003/5/9    materials, 52 bytes each - four RGB colours and a shininess
     14000-14008 fronds, for conifers and palms
-    18005/20002 the shadow and composite textures
+    20002       the composite atlas
+
+Id 1014 says how many levels the file carries - 3, 4 or 5, counting the trunk
+and the leaf level - and it equals the number of 6000 blocks exactly, in all 98
+files. So the count is stated as well as implied, which is worth knowing before
+trusting a repeat count.
+
+Id 18005 is **empty in 97 of the 98 files**. The one that carries a value names
+`CompositeShadowMap.tga`, which resolves to nothing in the archives; an earlier
+note here quoted that string as though it were the field's content, which is the
+mistake of reading one sample as a rule.
 
 Id 2001 looks like a height - a red oak carries 1100 - but it is identical for
 the XS and the S variant of a species, so it cannot be the size. **Id 2006 is**:
@@ -83,10 +93,28 @@ height each child attaches. Leaves are crossed cards. The five oaks above come
 from one definition and five seeds.
 
 The leaf texture a definition names - `RedOakLeaves_RT_1.tga` - does not exist in
-the archives. Leaves are tiles of a shared composite atlas, and ids 10002 to
-10004 carry the four (u, v) corners of the tile each leaf kind uses. That atlas
-also holds rendered billboards of every tree, which is a free reference for what
-the shapes should look like.
+the archives, and neither does any of the other 40 leaf names or 31 frond names:
+the whole `speedtree/` folder in `_compiledImage.pak` is 53 files, of which 24
+are bark diffuse, 23 bark normal and 6 composites. Those names are authoring
+paths, not runtime references. Leaves are tiles of a shared composite atlas, and
+ids 10002 to 10004 carry the four (u, v) corners of the tile each kind uses.
+
+The material the game actually draws them with is named after the atlas:
+`g3_speedtree_misc_composite_01_diffuse_01_leafs.xshmat` and `..._fronds.xshmat`
+are in `_compiledMaterial.pak`, and they are `eCShaderLeaf` with subsurface
+scattering enabled - which is what the `Render.LeafSubsurface` settings in
+`ge3.INI` drive. We sample the atlas image directly for now and do not use that
+shader.
+
+The atlas also holds rendered billboards of every tree, which is a free
+reference for what the shapes should look like.
+
+Leaf card size has an algebraic tie rather than a guessed one: **4006 = 4005 x
+2006**, exact in 242 of 254 components across the corpus. The dozen exceptions
+are three files whose size was edited afterwards and whose 4006 was left stale -
+`amurcork_02` is a copy of `amurcork_01` with the size changed from 20 to 15 and
+the leaf size still reading 2.2. So 4005 is the leaf size as a fraction of the
+tree, and 4006 the same in the tree's own units.
 
 Two constants are not in the definitions and come from those billboards: a
 trunk is bare for its lower third, and a child spans at most 0.45 of its parent.
