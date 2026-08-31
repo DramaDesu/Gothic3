@@ -122,38 +122,41 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    std::vector<genome::Mesh> meshes;
-    std::size_t failed = 0;
-    // "none" leaves the landscape out, which is how a single sector can be
-    // looked at closely instead of as a speck on a five-kilometre map.
+    std::vector<std::unique_ptr<genome::Image>> images;
+
+    // A batch is one mesh and every transform it is placed with. Landscape
+    // tiles are already in world space, so they get a single identity instance.
+    std::vector<std::unique_ptr<genome::Mesh>> ownedMeshes;
+    std::map<std::string, std::size_t> batchOf;
+    std::vector<render::MeshInstances> batches;
+    static const genome::WorldMatrix c_Identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
     const bool wantLandscape = filter != "none";
-    for (const genome::PakEntry &entry : archive->entries())
+    std::size_t failed = 0;
+    if (wantLandscape)
     {
-        if (!wantLandscape)
-            break;
-        if (entry.deleted || entry.path.find(filter) == std::string::npos)
-            continue;
-        if (entry.path.size() < 6 || entry.path.compare(entry.path.size() - 6, 6, ".xcmsh") != 0)
-            continue;
-
-        genome::Mesh mesh;
-        if (!genome::loadMesh(archive->read(entry, &error), mesh, &error))
+        for (const genome::PakEntry &entry : archive->entries())
         {
-            ++failed;
-            continue;
+            if (entry.deleted || entry.path.find(filter) == std::string::npos)
+                continue;
+            if (entry.path.size() < 6 || entry.path.compare(entry.path.size() - 6, 6, ".xcmsh") != 0)
+                continue;
+
+            auto mesh = std::make_unique<genome::Mesh>();
+            if (!genome::loadMesh(archive->read(entry, &error), *mesh, &error))
+            {
+                ++failed;
+                continue;
+            }
+
+            render::MeshInstances batch;
+            batch.mesh = mesh.get();
+            batch.transforms.push_back(c_Identity);
+            batches.push_back(std::move(batch));
+            ownedMeshes.push_back(std::move(mesh));
         }
-        meshes.push_back(std::move(mesh));
     }
 
-    if (wantLandscape && meshes.empty())
-    {
-        std::printf("nothing matched %s\n", filter.c_str());
-        return 1;
-    }
-
-    // Static objects: each sector names meshes and gives each one a world
-    // matrix. The meshes are stored around their own origin, so they are
-    // transformed into world space here - the renderer only knows world space.
     int sectorArgument = 0;
     for (int index = 2; index + 1 < argc; ++index)
         if (std::string(argv[index]) == "--sectors")
@@ -168,8 +171,6 @@ int main(int argc, char **argv)
         {
             const std::string sectorFilter =
                 sectorArgument + 1 < argc ? argv[sectorArgument + 1] : "_cstat.node";
-            std::map<std::string, const genome::Mesh *> meshCache;
-            std::vector<std::unique_ptr<genome::Mesh>> sourceMeshes;
             std::size_t placed = 0, sectors = 0, missing = 0;
 
             for (const genome::PakEntry &entry : world->entries())
@@ -188,45 +189,31 @@ int main(int argc, char **argv)
                     if (placement.meshName.empty())
                         continue;
 
-                    const genome::Mesh *source = nullptr;
-                    const auto cached = meshCache.find(placement.meshName);
-                    if (cached != meshCache.end())
-                        source = cached->second;
-                    else
+                    const auto known = batchOf.find(placement.meshName);
+                    if (known != batchOf.end())
                     {
-                        auto loaded = std::make_unique<genome::Mesh>();
-                        if (genome::loadMesh(archive->read(placement.meshName, &ignored), *loaded, &ignored))
+                        if (known->second != std::size_t(-1))
                         {
-                            source = loaded.get();
-                            sourceMeshes.push_back(std::move(loaded));
+                            batches[known->second].transforms.push_back(placement.world);
+                            ++placed;
                         }
-                        else
-                            ++missing;
-                        meshCache.emplace(placement.meshName, source);
-                    }
-                    if (!source)
                         continue;
-
-                    genome::Mesh instance = *source;
-                    const genome::WorldMatrix &m = placement.world;
-                    for (genome::MeshElement &element : instance.elements)
-                    {
-                        for (std::array<float, 3> &position : element.positions)
-                        {
-                            const std::array<float, 3> v = position;
-                            position = {v[0] * m[0] + v[1] * m[4] + v[2] * m[8] + m[12],
-                                        v[0] * m[1] + v[1] * m[5] + v[2] * m[9] + m[13],
-                                        v[0] * m[2] + v[1] * m[6] + v[2] * m[10] + m[14]};
-                        }
-                        for (std::array<float, 3> &normal : element.normals)
-                        {
-                            const std::array<float, 3> v = normal;
-                            normal = {v[0] * m[0] + v[1] * m[4] + v[2] * m[8],
-                                      v[0] * m[1] + v[1] * m[5] + v[2] * m[9],
-                                      v[0] * m[2] + v[1] * m[6] + v[2] * m[10]};
-                        }
                     }
-                    meshes.push_back(std::move(instance));
+
+                    auto mesh = std::make_unique<genome::Mesh>();
+                    if (!genome::loadMesh(archive->read(placement.meshName, &ignored), *mesh, &ignored))
+                    {
+                        ++missing;
+                        batchOf.emplace(placement.meshName, std::size_t(-1));
+                        continue;
+                    }
+
+                    render::MeshInstances batch;
+                    batch.mesh = mesh.get();
+                    batch.transforms.push_back(placement.world);
+                    batchOf.emplace(placement.meshName, batches.size());
+                    batches.push_back(std::move(batch));
+                    ownedMeshes.push_back(std::move(mesh));
                     ++placed;
                 }
             }
@@ -234,24 +221,24 @@ int main(int argc, char **argv)
         }
     }
 
-    if (meshes.empty())
+    if (batches.empty())
     {
         std::puts("nothing to draw");
         return 1;
     }
 
-    std::size_t vertices = 0, triangles = 0;
-    for (const genome::Mesh &mesh : meshes)
+    std::size_t vertices = 0, triangles = 0, instances = 0;
+    for (const render::MeshInstances &batch : batches)
     {
-        vertices += mesh.vertexCount();
-        triangles += mesh.triangleCount();
+        vertices += batch.mesh->vertexCount();
+        triangles += batch.mesh->triangleCount();
+        instances += batch.transforms.size();
     }
-    std::printf("%zu meshes (%zu failed), %zu vertices, %zu triangles\n", meshes.size(), failed, vertices, triangles);
+    std::printf("%zu distinct meshes (%zu failed), %zu instances, %zu unique vertices, %zu unique triangles\n",
+                batches.size(), failed, instances, vertices, triangles);
 
-    // Every tile names a regional material; those name textures, which are
-    // loaded once each and shared by all the tiles that use them.
-    std::vector<const genome::Image *> rangeTextures;
-    std::vector<std::unique_ptr<genome::Image>> images;
+    // Every mesh element names a material, and those resolve to textures that
+    // are shared across the meshes using them.
     {
         const auto materials = genome::PakArchive::open(dataDirectory + "/_compiledMaterial.pak", nullptr);
         const auto imageArchive = genome::PakArchive::open(dataDirectory + "/_compiledImage.pak", nullptr);
@@ -272,13 +259,10 @@ int main(int argc, char **argv)
         const auto exists = [&](const std::string &name) { return imageNames.count(name) != 0; };
 
         std::map<std::string, const genome::Image *> cache;
-        for (const genome::Mesh &mesh : meshes)
+        for (render::MeshInstances &batch : batches)
         {
-            for (const genome::MeshElement &element : mesh.elements)
+            for (const genome::MeshElement &element : batch.mesh->elements)
             {
-                if (element.positions.empty() || element.indices.empty())
-                    continue;
-
                 const genome::Image *loaded = nullptr;
                 const auto cached = cache.find(element.materialName);
                 if (cached != cache.end())
@@ -306,10 +290,10 @@ int main(int argc, char **argv)
                     }
                     cache.emplace(element.materialName, loaded);
                 }
-                rangeTextures.push_back(loaded);
+                batch.textures.push_back(loaded);
             }
         }
-        std::printf("%zu distinct landscape textures\n", images.size());
+        std::printf("%zu distinct textures\n", images.size());
     }
 
     render::Window window("Genome runtime - world", 1280, 720);
@@ -321,7 +305,7 @@ int main(int argc, char **argv)
     }
 
     render::WorldRenderer renderer;
-    if (!renderer.create(device, meshes, rangeTextures, &error))
+    if (!renderer.create(device, batches, &error))
     {
         std::cerr << "renderer: " << error << "\n";
         return 1;
@@ -331,8 +315,9 @@ int main(int argc, char **argv)
     const std::array<float, 3> &max = renderer.boundsMax();
     const std::array<float, 3> centre{(min[0] + max[0]) * 0.5f, (min[1] + max[1]) * 0.5f, (min[2] + max[2]) * 0.5f};
     const float span = std::max(max[0] - min[0], max[2] - min[2]);
-    std::printf("world spans %.0f x %.0f x %.0f units (%.1f x %.1f km)\n", max[0] - min[0], max[1] - min[1],
-                max[2] - min[2], (max[0] - min[0]) / 100000.0f, (max[2] - min[2]) / 100000.0f);
+    std::printf("world spans %.0f x %.0f x %.0f units (%.1f x %.1f km), %zu draws\n", max[0] - min[0],
+                max[1] - min[1], max[2] - min[2], (max[0] - min[0]) / 100000.0f,
+                (max[2] - min[2]) / 100000.0f, renderer.drawCount());
 
     float azimuth = 0.6f;
     float elevation = 0.55f;

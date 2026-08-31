@@ -80,10 +80,21 @@ One sector, 1344 objects placed from 1361 references: a keep with its gate and
 battlements, a red banner, and the shrubs, trees and rocks around it. Nine mesh
 names do not resolve in `_compiledMesh.pak` and are skipped.
 
-Meshes are stored around their own origin, so each instance is transformed into
-world space on the CPU before it joins the buffer. That is fine for a viewer and
-obviously wrong for a world of 105879 objects - instancing is the next step, and
-the placement data is already in the right shape for it.
+## The whole world at once
+
+![Every sector, every static object](world-full.png)
+
+    g3world "…/Data/_compiledMesh.pak" g3_world_lowpoly_landscape_01/             --sectors "…/Data/Projects_compiled.pak" _cstat.node
+
+All 2177 sectors together: **104884 objects drawn from 4079 distinct meshes**,
+8.8M unique vertices, 6.0M triangles, 7282 draws, spanning 6.9 x 6.5 km - the
+size the sector grid predicted.
+
+Instancing is what makes that possible. A mesh is stored once and repeated
+through a per-instance world matrix on its own vertex binding; indices stay
+local to their mesh and `vertexOffset` rebases them at draw time. Placing the
+same objects by transforming vertices on the CPU cost four times the memory for
+a single sector and would not have scaled to the map.
 
 White patches are objects whose material did not resolve to a texture yet; they
 fall back to plain white rather than disappearing.
