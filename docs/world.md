@@ -139,6 +139,27 @@ bowls and pebbles inside houses, and from a hilltop none of them cover a pixel.
 Each entity also carries `VisualLoDFactor` and `ObjectCullFactor`, the engine's
 own per-object hints, which are read but not yet used to bias the threshold.
 
+## Seeing through walls, and stopping
+
+Frustum and size tests cannot tell that a chest is inside a house: it is in
+front of the camera and big enough to matter. So the few objects that actually
+hide things - anything spanning more than ten metres, which is houses, cliffs
+and landscape - are rasterised into a 256x144 depth buffer on the CPU, and the
+rest are tested against it.
+
+The conservatism runs in both directions, which is what keeps visible things
+from vanishing. An occluder is written at the FAR face of its box, so a loose
+box never claims to hide more than its object does; a candidate is tested at its
+NEAR face, so anything uncertain is drawn.
+
+Inside the fortress sector that removes 181 of 1344 objects, and the frame
+differs from the unoccluded one by 164 pixels out of 230400 - not zero, so the
+box approximation does occasionally reject something it should not. Across the
+whole map it removes 1231 instances; less, because from a hilltop the size test
+has already taken most of what walls would have hidden.
+
+Press O to toggle it and compare.
+
 ## Not yet established
 
 Whether the terrain proper is meshes or a height field, what `.lrgeodat` holds,

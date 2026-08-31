@@ -4,7 +4,7 @@
 //   g3world <_compiledMesh.pak> [name filter]
 //
 // Hold the right mouse button to look, WASD to move, Q/E to drop and rise,
-// Shift to go faster and Ctrl to creep.
+// Shift to go faster, Ctrl to creep, O to toggle occlusion culling.
 
 #include "genome/image.h"
 #include "genome/material.h"
@@ -373,6 +373,7 @@ int main(int argc, char **argv)
     float yaw = std::atan2(toCentre[0], toCentre[2]);
     float pitch = std::atan2(toCentre[1], std::sqrt(toCentre[0] * toCentre[0] + toCentre[2] * toCentre[2]));
     bool looking = false;
+    bool occlusion = true;
     POINT lastCursor{};
 
     auto previous = std::chrono::steady_clock::now();
@@ -419,6 +420,8 @@ int main(int argc, char **argv)
             eye[1] += speed;
         if (window.keyDown('Q'))
             eye[1] -= speed;
+        if (window.keyPressed('O'))
+            occlusion = !occlusion;
 
         const std::array<float, 3> target{eye[0] + forward[0], eye[1] + forward[1], eye[2] + forward[2]};
 
@@ -471,15 +474,16 @@ int main(int argc, char **argv)
 
         // A pixel and a half: below that an object is a speck, whatever it is.
         const float pixelsPerRadian = float(extent.height) * 0.5f / std::tan(0.5f);
-        renderer.cull(device, viewProjection, eye, pixelsPerRadian, 1.5f);
+        renderer.cull(device, viewProjection, eye, pixelsPerRadian, 1.5f, occlusion);
 
         static float reportAt = 0.0f;
         reportAt += delta;
         if (reportAt > 1.0f)
         {
             reportAt = 0.0f;
-            std::printf("visible %zu of %zu instances (%zu dropped as too small)\n",
-                        renderer.visibleInstances(), renderer.instanceCount(), renderer.tooSmallInstances());
+            std::printf("visible %zu of %zu (%zu too small, %zu occluded%s)\n", renderer.visibleInstances(),
+                        renderer.instanceCount(), renderer.tooSmallInstances(), renderer.occludedInstances(),
+                        occlusion ? "" : ", occlusion off");
         }
         renderer.draw(device, viewProjection, {0.45f, 0.75f, 0.35f, 0.0f});
 

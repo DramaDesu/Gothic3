@@ -7,6 +7,7 @@
 #include "genome/image.h"
 #include "genome/mesh.h"
 #include "genome/world.h"
+#include "occlusion.h"
 #include "texture.h"
 #include "vulkan.h"
 
@@ -47,12 +48,13 @@ class WorldRenderer
     // inside a house a kilometre away passes a frustum test but covers no
     // pixels, and there are tens of thousands of those.
     void cull(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 3> &eye,
-              float pixelsPerRadian, float minimumPixels);
+              float pixelsPerRadian, float minimumPixels, bool useOcclusion);
 
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);
 
     std::size_t visibleInstances() const { return m_visibleInstances; }
     std::size_t tooSmallInstances() const { return m_tooSmall; }
+    std::size_t occludedInstances() const { return m_occluded; }
 
     std::size_t vertexCount() const { return m_vertexCount; }
     std::size_t triangleCount() const { return m_indexCount / 3; }
@@ -99,6 +101,17 @@ class WorldRenderer
     std::vector<genome::WorldMatrix> m_visible; // scratch, refilled each frame
     std::size_t m_visibleInstances = 0;
     std::size_t m_tooSmall = 0;
+    std::size_t m_occluded = 0;
+    OcclusionBuffer m_occlusion;
+
+    // Instances big enough to hide other things: rasterised first, then used to
+    // reject the rest.
+    struct Occluder
+    {
+        std::size_t batch = 0;
+        std::size_t instance = 0;
+    };
+    std::vector<Occluder> m_occluders;
 
     VkDescriptorSetLayout m_descriptorLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;

@@ -72,6 +72,7 @@ add_library(render STATIC
   src/render/vulkan.cpp
   src/render/renderer.cpp
   src/render/world_renderer.cpp
+  src/render/occlusion.cpp
   src/render/texture.cpp)
 target_include_directories(render PUBLIC src)
 target_link_libraries(render PUBLIC genome Vulkan::Vulkan)

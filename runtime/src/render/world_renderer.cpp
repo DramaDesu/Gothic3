@@ -1,5 +1,6 @@
 #include "world_renderer.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -154,6 +155,20 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
             ++elementIndex;
         }
         m_batches.push_back(std::move(kept));
+    }
+
+    // Anything spanning more than about ten metres is worth rasterising as an
+    // occluder: houses, cliffs and the landscape itself, not barrels.
+    for (std::size_t batch = 0; batch < m_batches.size(); ++batch)
+    {
+        const Batch &current = m_batches[batch];
+        for (std::size_t instance = 0; instance < current.bounds.size(); ++instance)
+        {
+            const std::array<float, 6> &box = current.bounds[instance];
+            const float extent = std::max({box[3] - box[0], box[4] - box[1], box[5] - box[2]});
+            if (extent >= 1000.0f)
+                m_occluders.push_back({batch, instance});
+        }
     }
 
     if (vertices.empty() || instances.empty())
@@ -363,7 +378,8 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
 }
 
 void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjection,
-                         const std::array<float, 3> &eye, float pixelsPerRadian, float minimumPixels)
+                         const std::array<float, 3> &eye, float pixelsPerRadian, float minimumPixels,
+                         bool useOcclusion)
 {
     // Frustum planes straight out of the view-projection matrix: each is a
     // combination of two of its rows, in the same column-major layout the
@@ -378,6 +394,14 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     };
 
     std::array<std::array<float, 4>, 6> planes{plane(0), plane(1), plane(2), plane(3), plane(4), plane(5)};
+
+    m_occluded = 0;
+    if (useOcclusion)
+    {
+        m_occlusion.clear();
+        for (const Occluder &occluder : m_occluders)
+            m_occlusion.addOccluder(m_batches[occluder.batch].bounds[occluder.instance], viewProjection);
+    }
 
     m_visible.clear();
     m_tooSmall = 0;
@@ -426,6 +450,18 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                 if (distance > radius && radius / distance * pixelsPerRadian < minimumPixels)
                 {
                     ++m_tooSmall;
+                    continue;
+                }
+            }
+
+            if (useOcclusion && instance < batch.bounds.size())
+            {
+                const std::array<float, 6> &box = batch.bounds[instance];
+                const float extent = std::max({box[3] - box[0], box[4] - box[1], box[5] - box[2]});
+                // Occluders are not tested against themselves.
+                if (extent < 1000.0f && m_occlusion.isOccluded(box, viewProjection))
+                {
+                    ++m_occluded;
                     continue;
                 }
             }
