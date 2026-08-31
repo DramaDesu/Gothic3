@@ -116,6 +116,13 @@ struct SpeedTree
     float parameter2001 = 0.0f;
     float parameter2003 = 0.0f;
     std::uint32_t seed = 0;          // id 2005
+
+    // Ids 3000-3010 are the leaf group, not the trunk. Two of them are worth
+    // having: a site gets a leaf only if the running scale clears 3000, and then
+    // only with probability 3002 - which is 0.05 for the umbrella thorns, 0.1
+    // for the sparse firs and 1.0 for a red oak, in that order.
+    float leafMinScale = 0.0f;       // id 3000
+    float leafProbability = 1.0f;    // id 3002
     float size = 0.0f;               // id 2006
     float sizeVariance = 0.0f;       // id 2007
 

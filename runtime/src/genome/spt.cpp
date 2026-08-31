@@ -288,6 +288,12 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
         case 4002:
             leaf.scale = token.floats.empty() ? 0.0f : token.floats[0];
             break;
+        case 3000:
+            out.leafMinScale = token.floats.empty() ? 0.0f : token.floats[0];
+            break;
+        case 3002:
+            out.leafProbability = token.floats.empty() ? 1.0f : token.floats[0];
+            break;
         case 14002:
             out.frond.texture = token.text;
             break;

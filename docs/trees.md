@@ -36,7 +36,7 @@ with nothing left over - 373 branch levels and 127 leaf kinds in all.
 ## What a definition holds
 
     2000-2007   bark texture, size (2006) and its variance (2007), a seed
-    3000-3010   the trunk
+    3000-3010   the leaf group: where foliage may sit and how densely
     4000-4007   leaves: a texture name, card size, and the atlas tile
     6000-6017   one block per level, repeated: nine curves and seven numbers
     8003/5/9    materials, 52 bytes each - four RGB colours and a shininess
@@ -118,6 +118,27 @@ tree, and 4006 the same in the tree's own units.
 
 Two constants are not in the definitions and come from those billboards: a
 trunk is bare for its lower third, and a child spans at most 0.45 of its parent.
+
+## How dense the foliage is
+
+![Umbrella thorns, which are meant to be sparse](trees-thorn.png)
+
+The 3000 band is not the trunk, which is what this note used to say. It is the
+header of the leaf group, and the game's own reader settles it: the function
+that parses the block raises *malformed general leaf information* on failure,
+and the writer emits exactly the field order the files carry.
+
+Four of its eleven ids are dead - 3003 and 3006 are written as a literal 0, 3004
+and 3005 as a literal -1.0, and the reader stores none of them. All 98 files
+carry those constants, which is why they looked like defaults nobody touched:
+nobody could.
+
+The one that earns its keep is **3002, the probability that a site carries a
+leaf at all**, and the corpus reads like a plant list: 0.05 for all five umbrella
+thorns, 0.1 for the three sparse douglasfirs, 0.6 for the hollies and the winter
+bushes, 1.0 for the red oak, the sycamore and the pagoda tree. The generator now
+draws against it, which is why the acacias above come out as dry scaffolding
+while the oaks stay dense - a difference that used to need a constant of mine.
 
 ## Fronds
 

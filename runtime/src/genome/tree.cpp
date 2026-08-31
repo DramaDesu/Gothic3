@@ -331,6 +331,11 @@ struct Grower
         const auto asked = std::uint32_t(std::clamp(number(level, ChildCount) * 0.01f, 1.0f, 4.0f));
         for (std::uint32_t index = 0; index < asked && leaves < growth.leafLimit; ++index)
         {
+            // The definition says how likely a site is to carry a leaf at all,
+            // which is what separates an umbrella thorn from an oak.
+            if (rng.unit() > definition.leafProbability)
+                continue;
+
             const float t = rng.between(0.3f, 1.0f);
             const Frame &frame = along[std::min(std::size_t(t * float(along.size() - 1)), along.size() - 1)];
             const Vec jitter{rng.between(-width, width), rng.between(-width, width), rng.between(-width, width)};
