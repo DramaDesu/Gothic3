@@ -13,6 +13,7 @@ add_library(genome STATIC
   src/genome/property_set.cpp
   src/genome/mesh.cpp
   src/genome/material.cpp
+  src/genome/world.cpp
   src/genome/image.cpp
   src/genome/actor.cpp
   src/genome/motion.cpp)
@@ -74,6 +75,9 @@ add_library(render STATIC
   src/render/texture.cpp)
 target_include_directories(render PUBLIC src)
 target_link_libraries(render PUBLIC genome Vulkan::Vulkan)
+
+add_executable(g3sector tools/g3sector.cpp)
+target_link_libraries(g3sector PRIVATE genome)
 
 add_executable(g3world tools/g3world.cpp)
 target_link_libraries(g3world PRIVATE genome render)

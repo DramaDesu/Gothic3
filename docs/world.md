@@ -44,9 +44,33 @@ character wants, the forests turn black.
 
     g3world "…/Gothic 3/Data/_compiledMesh.pak"
 
+## Static objects
+
+Static content is not in `.lrentdat` - that holds NPCs and dynamic props. It is
+in the per-sector `_cstat.node` files, 2177 of them, 347 MB in all. Both file
+kinds share the container we already read and the same entity record; only the
+header differs.
+
+Every one of the 2177 parses: **169091 entities, 105879 placing a static mesh**,
+and the positions land inside the cell their file name announces.
+
+An entity is a fixed 298-byte body preceded by an 89-byte spatial prologue. What
+matters for rendering sits at three offsets: the name at +41, a full 4x4 world
+matrix at +43 (row-major, row-vector, translation in the fourth row, absolute -
+no parent to resolve), and the property-set count at +294. The mesh comes from
+the `eCVisualMeshStatic_PS` set, property `ResourceFileName`.
+
+Two things cost time and are worth stating plainly:
+
+- Each property-set record is closed by a `DEC0ADDE` marker **after** its
+  declared end. Skipping to the declared end alone lands the next read inside
+  the tail of the current record, and the class name then resolves to something
+  plausible-looking - a mesh name - rather than failing outright.
+- The first two entities of a sector are bookkeeping (`Root`) with no property
+  sets at all, so a parser that assumes every entity carries a visual gives up
+  immediately.
+
 ## Not yet established
 
-The binary layout of `.node` and `.lrentdat`, how a sector lists its entities,
-how an entity names its `.xcmsh`, and whether the terrain proper is meshes or a
-height field. Three agents were mapping exactly this when the session ran out;
-the reference is g3dit's Java parsers under `LrentNode/`.
+Whether the terrain proper is meshes or a height field, what `.lrgeodat` holds,
+and how vegetation (`eCVegetation_PS`, `eCSpeedTree_PS`) and lights are placed.
