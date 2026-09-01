@@ -50,6 +50,12 @@ struct MeshInstances
     float lodNear = 0.0f;
     float lodFar = 0.0f;
 
+    // Billboards: the mesh is a unit quad and its transform is rebuilt each
+    // frame to face the camera, sized from the instance's own bounds. The
+    // instance buffer is refilled every frame anyway, so this costs nothing that
+    // was not already being paid.
+    bool faceCamera = false;
+
     // Whether these instances may hide what is behind them. A bounding box is a
     // fair stand-in for a house and a poor one for a tree, whose box is mostly
     // air - so foliage is drawn but never rasterised as an occluder.
@@ -76,6 +82,16 @@ class WorldRenderer
               float pixelsPerRadian, float minimumPixels, bool useOcclusion);
 
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);
+
+    // Baking a billboard needs one batch at a time into its own viewport, with
+    // every instance present rather than the visible subset - so these two step
+    // around cull() instead of through it.
+    void prepareAll(Device &device);
+    void drawBatch(Device &device, std::size_t batch, const std::array<float, 16> &viewProjection,
+                   VkCommandBuffer command);
+
+    std::size_t batchCount() const { return m_batches.size(); }
+    const std::array<float, 6> *batchExtent(std::size_t batch) const;
 
     std::size_t visibleInstances() const { return m_visibleInstances; }
     std::size_t tooSmallInstances() const { return m_tooSmall; }
@@ -139,6 +155,7 @@ class WorldRenderer
         bool hasExtent = false;
         float lodNear = 0.0f;
         float lodFar = 0.0f;
+        bool faceCamera = false;
     };
     std::vector<Batch> m_batches;
     std::vector<genome::WorldMatrix> m_visible; // scratch, refilled each frame

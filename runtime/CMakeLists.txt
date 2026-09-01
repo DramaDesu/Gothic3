@@ -76,6 +76,7 @@ add_library(render STATIC
   src/render/window.cpp
   src/render/vulkan.cpp
   src/render/renderer.cpp
+  src/render/tree_atlas.cpp
   src/render/world_renderer.cpp
   src/render/occlusion.cpp
   src/render/texture.cpp)

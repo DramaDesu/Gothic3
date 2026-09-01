@@ -110,6 +110,7 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
         kept.occludes = batch.occludes;
         kept.lodNear = batch.lodNear;
         kept.lodFar = batch.lodFar;
+        kept.faceCamera = batch.faceCamera;
 
         std::size_t elementIndex = 0;
         for (const genome::MeshElement &element : batch.mesh->elements)
@@ -542,6 +543,52 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                 }
             }
 
+            if (batch.faceCamera && instance < batch.bounds.size())
+            {
+                // A quad standing on the ground where the tree stands, as wide
+                // and as tall as the tree was, turned to face the camera about
+                // the vertical axis only - a billboard that leans looks wrong
+                // the moment the camera rises.
+                const std::array<float, 6> &box = batch.bounds[instance];
+                const float centreX = 0.5f * (box[0] + box[3]);
+                const float centreZ = 0.5f * (box[2] + box[5]);
+                const float width = std::max(box[3] - box[0], box[5] - box[2]);
+                const float height = box[4] - box[1];
+
+                float toEyeX = eye[0] - centreX;
+                float toEyeZ = eye[2] - centreZ;
+                const float length = std::sqrt(toEyeX * toEyeX + toEyeZ * toEyeZ);
+                if (length > 1e-3f)
+                {
+                    toEyeX /= length;
+                    toEyeZ /= length;
+                }
+                else
+                {
+                    toEyeX = 0.0f;
+                    toEyeZ = 1.0f;
+                }
+
+                // Right is the horizontal perpendicular to the view direction.
+                genome::WorldMatrix m{};
+                m[0] = -toEyeZ * width;
+                m[1] = 0.0f;
+                m[2] = toEyeX * width;
+                m[4] = 0.0f;
+                m[5] = height;
+                m[6] = 0.0f;
+                m[8] = toEyeX;
+                m[9] = 0.0f;
+                m[10] = toEyeZ;
+                m[12] = centreX;
+                m[13] = box[1];
+                m[14] = centreZ;
+                m[15] = 1.0f;
+                m_visible.push_back(m);
+                ++visible;
+                continue;
+            }
+
             m_visible.push_back(batch.transforms[instance]);
             ++visible;
         }
@@ -583,6 +630,67 @@ void WorldRenderer::collectProfiling(Device &device)
 void WorldRenderer::stopProfiling()
 {
     gpuContextDestroy(m_gpu);
+}
+
+const std::array<float, 6> *WorldRenderer::batchExtent(std::size_t batch) const
+{
+    if (batch >= m_batches.size() || !m_batches[batch].hasExtent)
+        return nullptr;
+    return &m_batches[batch].extent;
+}
+
+void WorldRenderer::prepareAll(Device &device)
+{
+    m_visible.clear();
+    for (Batch &batch : m_batches)
+    {
+        const std::uint32_t firstInstance = static_cast<std::uint32_t>(m_visible.size());
+        for (const genome::WorldMatrix &transform : batch.transforms)
+            m_visible.push_back(transform);
+        for (std::size_t range : batch.ranges)
+        {
+            m_ranges[range].firstInstance = firstInstance;
+            m_ranges[range].instanceCount = static_cast<std::uint32_t>(batch.transforms.size());
+        }
+    }
+    if (!m_visible.empty())
+        std::memcpy(m_instanceBuffer[device.frameIndex()].mapped, m_visible.data(),
+                    sizeof(genome::WorldMatrix) * m_visible.size());
+    m_visibleInstances = m_visible.size();
+}
+
+void WorldRenderer::drawBatch(Device &device, std::size_t batch, const std::array<float, 16> &viewProjection,
+                              VkCommandBuffer command)
+{
+    if (batch >= m_batches.size())
+        return;
+
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+
+    PushConstants push{viewProjection, {0.0f, 1.0f, 0.0f, 0.0f}};
+    vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
+                       &push);
+
+    const VkDeviceSize offsets[2] = {0, 0};
+    const VkBuffer buffers[2] = {m_vertexBuffer.handle, m_instanceBuffer[device.frameIndex()].handle};
+    vkCmdBindVertexBuffers(command, 0, 2, buffers, offsets);
+    vkCmdBindIndexBuffer(command, m_indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
+
+    for (std::size_t index : m_batches[batch].ranges)
+    {
+        const Range &range = m_ranges[index];
+        if (range.instanceCount == 0)
+            continue;
+
+        const float alphaTest = range.alphaTested ? 1.0f : 0.0f;
+        vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_FRAGMENT_BIT, offsetof(PushConstants, alphaTested),
+                           sizeof(alphaTest), &alphaTest);
+        if (range.descriptor != VK_NULL_HANDLE)
+            vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &range.descriptor, 0,
+                                    nullptr);
+        vkCmdDrawIndexed(command, range.indexCount, range.instanceCount, range.firstIndex, range.vertexOffset,
+                         range.firstInstance);
+    }
 }
 
 void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjection,

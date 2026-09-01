@@ -15,6 +15,7 @@
 #include "genome/world.h"
 #include "render/window.h"
 #include "render/profile.h"
+#include "render/tree_atlas.h"
 #include "render/world_renderer.h"
 
 // windows.h is here only for the virtual-key codes, and its min/max macros
@@ -136,6 +137,9 @@ int main(int argc, char **argv)
     std::vector<std::unique_ptr<genome::Mesh>> ownedMeshes;
     std::map<std::string, std::size_t> batchOf;
     std::vector<render::MeshInstances> batches;
+    // Which batch holds the full-detail mesh of each tree variant, in the order
+    // they were grown - the billboard atlas is baked from exactly these.
+    std::vector<std::size_t> treeFullDetail;
     static const genome::WorldMatrix c_Identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
     const bool wantLandscape = filter != "none";
@@ -175,6 +179,8 @@ int main(int argc, char **argv)
     // Where a tree drops to its thinned form, in world units - a metre is a
     // hundred, so this is sixty metres.
     float treeLodDistance = 6000.0f;
+    // And where it becomes a single quad. Four hundred metres.
+    float treeBillboardDistance = 40000.0f;
     for (int index = 2; index + 1 < argc; ++index)
     {
         if (std::string(argv[index]) == "--sectors")
@@ -183,6 +189,8 @@ int main(int argc, char **argv)
             shotPath = argv[index + 1];
         if (std::string(argv[index]) == "--lod" && index + 1 < argc)
             treeLodDistance = float(std::atof(argv[index + 1]));
+        if (std::string(argv[index]) == "--billboard" && index + 1 < argc)
+            treeBillboardDistance = float(std::atof(argv[index + 1]));
         if (std::string(argv[index]) == "--bench" && index + 1 < argc)
             benchFrames = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--camera" && index + 5 < argc)
@@ -351,7 +359,10 @@ int main(int argc, char **argv)
                                 batch.lodNear = level == 0 ? 0.0f : treeLodDistance;
                                 batch.lodFar = level == 0 ? treeLodDistance : 0.0f;
                                 if (level == 0)
+                                {
                                     slot = batches.size();
+                                    treeFullDetail.push_back(slot);
+                                }
                                 batches.push_back(std::move(batch));
                                 ownedMeshes.push_back(std::move(mesh));
                             }
@@ -571,6 +582,92 @@ int main(int argc, char **argv)
     {
         std::cerr << "vulkan: " << error << "\n";
         return 1;
+    }
+
+    // Third detail level: a billboard. The trees we grew are drawn once each
+    // into an atlas of our own, and past the far distance an instance becomes a
+    // single quad sampling its own cell. The game shipped billboards but left
+    // the field naming each tree's cell unset in 78 of its 98 definitions, so
+    // baking our own is both easier and more correct.
+    render::TreeAtlas treeAtlas;
+    genome::Image treeAtlasImage;
+    if (!treeFullDetail.empty())
+    {
+        std::vector<render::MeshInstances> bakeBatches;
+        std::vector<std::size_t> bakeOrder;
+        for (std::size_t slot : treeFullDetail)
+        {
+            render::MeshInstances one;
+            one.mesh = batches[slot].mesh;
+            one.textures = batches[slot].textures;
+            one.alphaTested = batches[slot].alphaTested;
+            one.transforms.push_back(c_Identity);
+            // The mesh sits at the origin, so its own bounds fit the camera.
+            std::array<float, 6> box{1e9f, 1e9f, 1e9f, -1e9f, -1e9f, -1e9f};
+            for (const genome::MeshElement &element : one.mesh->elements)
+                for (const std::array<float, 3> &position : element.positions)
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        box[axis] = std::min(box[axis], position[axis]);
+                        box[axis + 3] = std::max(box[axis + 3], position[axis]);
+                    }
+            one.bounds.push_back(box);
+            bakeOrder.push_back(bakeBatches.size());
+            bakeBatches.push_back(std::move(one));
+        }
+
+        render::WorldRenderer baker;
+        if (baker.create(device, bakeBatches, &error) &&
+            render::bakeTreeAtlas(device, baker, bakeOrder, 256, treeAtlas, &error) &&
+            render::readTreeAtlas(device, treeAtlas, treeAtlasImage, &error))
+        {
+            std::printf("baked %zu tree billboards into a %ux%u atlas\n", treeAtlas.cells.size(), treeAtlas.size,
+                        treeAtlas.size);
+            std::size_t billboardInstances = 0;
+
+            auto quad = std::make_unique<genome::Mesh>();
+            genome::MeshElement element;
+            element.positions = {{-0.5f, 0.0f, 0.0f}, {0.5f, 0.0f, 0.0f}, {0.5f, 1.0f, 0.0f}, {-0.5f, 1.0f, 0.0f}};
+            element.normals = {{0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}};
+            element.indices = {0, 1, 2, 0, 2, 3};
+            element.materialName = "tree billboard";
+            quad->elements.push_back(std::move(element));
+
+            for (std::size_t index = 0; index < treeFullDetail.size(); ++index)
+            {
+                const std::size_t slot = treeFullDetail[index];
+                const std::array<float, 4> &cell = treeAtlas.cells[index];
+
+                // One quad per definition, with that definition's cell baked
+                // into its texture coordinates.
+                auto mesh = std::make_unique<genome::Mesh>();
+                genome::MeshElement card = quad->elements.front();
+                card.texCoords = {{cell[0], cell[3]}, {cell[2], cell[3]}, {cell[2], cell[1]}, {cell[0], cell[1]}};
+                mesh->elements.push_back(std::move(card));
+
+                render::MeshInstances billboard;
+                billboard.mesh = mesh.get();
+                billboard.textures.push_back(&treeAtlasImage);
+                billboard.alphaTested.push_back(1);
+                billboard.faceCamera = true;
+                billboard.occludes = false;
+                billboard.lodNear = treeBillboardDistance;
+                billboard.transforms = batches[slot].transforms;
+                billboard.bounds = batches[slot].bounds;
+                billboardInstances += billboard.transforms.size();
+                batches.push_back(std::move(billboard));
+                ownedMeshes.push_back(std::move(mesh));
+
+                // The thinned tree now ends where the billboard begins.
+                if (slot + 1 < batches.size())
+                    batches[slot + 1].lodFar = treeBillboardDistance;
+            }
+            std::printf("billboards cover %zu tree instances beyond %.0f units\n", billboardInstances,
+                        treeBillboardDistance);
+        }
+        else
+            std::printf("warning: no tree billboards: %s\n", error.c_str());
+        baker.destroy(device);
     }
 
     render::WorldRenderer renderer;
