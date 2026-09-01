@@ -146,6 +146,7 @@ int main(int argc, char **argv)
     // by the base each instance carries, which is how per-instance lighting
     // survives sharing one vertex buffer between instances.
     std::vector<std::uint32_t> lightmapColours;
+    std::vector<float> lightmapIncident;
     std::unique_ptr<genome::PakArchive> lightmapArchive;
     std::size_t lightmapsFound = 0, lightmapsMissing = 0;
     static const genome::WorldMatrix c_Identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -311,8 +312,16 @@ int main(int argc, char **argv)
                         {
                             lightmapBase = std::int32_t(lightmapColours.size());
                             for (const genome::LightmapElement &element : map.elements)
+                            {
                                 lightmapColours.insert(lightmapColours.end(), element.colours.begin(),
                                                        element.colours.end());
+                                // The two run in step, so a missing direction
+                                // array still has to occupy its place.
+                                lightmapIncident.resize(lightmapColours.size() * 3, 0.0f);
+                                for (std::size_t index = 0; index < element.incident.size(); ++index)
+                                    lightmapIncident[lightmapIncident.size() - element.incident.size() + index] =
+                                        element.incident[index];
+                            }
                             ++lightmapsFound;
                         }
                         else
@@ -722,10 +731,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    std::printf("%zu instances lit by a baked lightmap, %zu without one, %zu colours in all\n", lightmapsFound,
+    std::printf("%zu instances lit by a baked lightmap, %zu without one, %zu colours, %zu direction floats\n",
+                lightmapsFound, lightmapsMissing, lightmapColours.size(), lightmapIncident.size());
+    std::printf("%zu instances lit, %zu without\n", lightmapsFound,
                 lightmapsMissing, lightmapColours.size());
     renderer.setLights(worldLights);
     renderer.setLightmaps(std::move(lightmapColours));
+    renderer.setLightmapDirections(std::move(lightmapIncident));
 
     // Before the loop: setting this up records and submits a command buffer of
     // its own to calibrate the card's clock against ours, which cannot happen

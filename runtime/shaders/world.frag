@@ -30,6 +30,7 @@ layout(location = 2) in float inHeight;
 layout(location = 3) in vec3 inWorld;
 layout(location = 4) in vec3 inBaked;
 layout(location = 5) in float inSky;
+layout(location = 6) in vec3 inIncident;
 
 layout(location = 0) out vec4 outColor;
 
@@ -51,8 +52,13 @@ void main()
     float day = 0.55 + 0.45 * max(dot(normal, normalize(push.lightDirection.xyz)), 0.0);
     vec3 lit = sampled.rgb * day * inSky;
 
-    // Then the light the bake recorded as having reached this vertex.
-    lit += sampled.rgb * inBaked;
+    // Then the light the bake recorded as having reached this vertex, answering
+    // to where it came from: a wall facing the window takes it and the wall
+    // beside it does not. Half of the term is kept unshaped, because the bake
+    // stores one dominant direction and a surface still receives light from the
+    // rest of the room.
+    float facing = dot(inIncident, inIncident) > 0.01 ? max(dot(normal, normalize(inIncident)), 0.0) : 1.0;
+    lit += sampled.rgb * inBaked * (0.5 + 0.5 * facing);
 
     int used = int(lights.count.x);
     for (int index = 0; index < used; ++index)

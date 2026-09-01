@@ -74,6 +74,8 @@ int main(int argc, char **argv)
     }
 
     std::size_t parsed = 0, failed = 0, vertices = 0, mixed = 0, bitmaps = 0;
+    // What the two halves of the colour actually hold across the whole game.
+    std::size_t totalLight = 0, totalSky = 0, litVertices = 0;
     std::map<std::string, std::size_t> reasons;
     for (const genome::PakEntry &entry : archive->entries())
     {
@@ -90,6 +92,13 @@ int main(int argc, char **argv)
         }
         ++parsed;
         vertices += map.vertexCount();
+        for (const genome::LightmapElement &element : map.elements)
+            for (std::uint32_t packed : element.colours)
+            {
+                totalLight += std::max({packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF});
+                totalSky += (packed >> 24) & 0xFF;
+                litVertices += ((packed & 0xFFFFFF) != 0) ? 1 : 0;
+            }
         mixed += map.type == genome::LightmapType::Mixed ? 1 : 0;
         for (const genome::LightmapElement &element : map.elements)
             bitmaps += element.bitmaps.size();
@@ -98,6 +107,10 @@ int main(int argc, char **argv)
     std::printf("parsed %zu lightmaps, %zu failed\n", parsed, failed);
     std::printf("%zu lit vertices, %zu instances lit by bitmaps as well, %zu bitmaps in all\n", vertices, mixed,
                 bitmaps);
+    if (vertices != 0)
+        std::printf("mean baked light %.1f of 255, mean sky %.1f of 255, %.1f%% of vertices carry any light\n",
+                    double(totalLight) / double(vertices), double(totalSky) / double(vertices),
+                    100.0 * double(litVertices) / double(vertices));
     for (const auto &[reason, count] : reasons)
         std::printf("  %5zu  %s\n", count, reason.c_str());
     return failed == 0 ? 0 : 1;

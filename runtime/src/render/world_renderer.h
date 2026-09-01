@@ -96,6 +96,11 @@ class WorldRenderer
 
     // Every instance's baked vertex lighting, concatenated. Call before create.
     void setLightmaps(std::vector<std::uint32_t> colours) { m_lightmapColours = std::move(colours); }
+
+    // The direction the baked light arrived from, three floats a vertex, in the
+    // same order as the colours. Without it the bake can only brighten; with it
+    // a surface answers to where the light was.
+    void setLightmapDirections(std::vector<float> incident) { m_lightmapIncident = std::move(incident); }
     std::size_t litInstances() const { return m_litLights; }
 
     // Baking a billboard needs one batch at a time into its own viewport, with
@@ -151,7 +156,9 @@ class WorldRenderer
 
     std::vector<genome::PointLight> m_lights;
     std::vector<std::uint32_t> m_lightmapColours;
+    std::vector<float> m_lightmapIncident;
     Buffer m_lightmapBuffer{};
+    Buffer m_incidentBuffer{};
     std::size_t m_litLights = 0;
     Buffer m_lightBuffer[Device::c_FramesInFlight]{};
     VkDescriptorSetLayout m_lightLayout = VK_NULL_HANDLE;

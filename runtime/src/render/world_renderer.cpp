@@ -343,6 +343,18 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, m_lightmapBuffer, error))
         return false;
 
+    if (m_lightmapIncident.empty())
+        m_lightmapIncident.assign(3, 0.0f);
+    if (!uploadDeviceLocal(device, m_lightmapIncident.data(), sizeof(float) * m_lightmapIncident.size(),
+                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, m_incidentBuffer, error))
+        return false;
+
+    VkDescriptorSetLayoutBinding incidentBinding{};
+    incidentBinding.binding = 2;
+    incidentBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    incidentBinding.descriptorCount = 1;
+    incidentBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
     VkDescriptorSetLayoutBinding lightmapBinding{};
     lightmapBinding.binding = 1;
     lightmapBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -355,15 +367,15 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
     lightBinding.descriptorCount = 1;
     lightBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    const VkDescriptorSetLayoutBinding lightSetBindings[2] = {lightBinding, lightmapBinding};
+    const VkDescriptorSetLayoutBinding lightSetBindings[3] = {lightBinding, lightmapBinding, incidentBinding};
     VkDescriptorSetLayoutCreateInfo lightLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    lightLayoutInfo.bindingCount = 2;
+    lightLayoutInfo.bindingCount = 3;
     lightLayoutInfo.pBindings = lightSetBindings;
     vkCreateDescriptorSetLayout(device.device(), &lightLayoutInfo, nullptr, &m_lightLayout);
 
     const VkDescriptorPoolSize lightPoolSizes[2] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Device::c_FramesInFlight},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Device::c_FramesInFlight}};
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Device::c_FramesInFlight * 2}};
     VkDescriptorPoolCreateInfo lightPoolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     lightPoolInfo.maxSets = Device::c_FramesInFlight;
     lightPoolInfo.poolSizeCount = 2;
@@ -390,7 +402,8 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
         VkDescriptorBufferInfo bufferInfo{m_lightBuffer[frame].handle, 0, lightBytes};
         VkDescriptorBufferInfo lightmapInfo{m_lightmapBuffer.handle, 0, VK_WHOLE_SIZE};
 
-        VkWriteDescriptorSet writes[2]{};
+        VkDescriptorBufferInfo incidentInfo{m_incidentBuffer.handle, 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet writes[3]{};
         writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         writes[0].dstSet = m_lightSet[frame];
         writes[0].dstBinding = 0;
@@ -405,7 +418,14 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
         writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[1].pBufferInfo = &lightmapInfo;
 
-        vkUpdateDescriptorSets(device.device(), 2, writes, 0, nullptr);
+        writes[2] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[2].dstSet = m_lightSet[frame];
+        writes[2].dstBinding = 2;
+        writes[2].descriptorCount = 1;
+        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[2].pBufferInfo = &incidentInfo;
+
+        vkUpdateDescriptorSets(device.device(), 3, writes, 0, nullptr);
     }
 
     VkPushConstantRange pushRange{};
@@ -1020,6 +1040,7 @@ void WorldRenderer::destroy(Device &device)
     for (std::uint32_t frame = 0; frame < Device::c_FramesInFlight; ++frame)
         device.destroyBuffer(m_lightBuffer[frame]);
     device.destroyBuffer(m_lightmapBuffer);
+    device.destroyBuffer(m_incidentBuffer);
     if (m_lightPool)
         vkDestroyDescriptorPool(device.device(), m_lightPool, nullptr);
     if (m_lightLayout)

@@ -29,6 +29,13 @@ layout(set = 1, binding = 1) readonly buffer Lightmap
 }
 lightmap;
 
+// Three floats a vertex, in step with the colours above.
+layout(set = 1, binding = 2) readonly buffer Incident
+{
+    float values[];
+}
+incident;
+
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec2 outTexCoord;
 layout(location = 2) out float outHeight;
@@ -37,6 +44,7 @@ layout(location = 3) out vec3 outWorld;
 // The baked light that reached this vertex, and how much sky it can see.
 layout(location = 4) out vec3 outBaked;
 layout(location = 5) out float outSky;
+layout(location = 6) out vec3 outIncident;
 
 void main()
 {
@@ -49,6 +57,7 @@ void main()
 
     outBaked = vec3(0.0);
     outSky = 1.0;
+    outIncident = vec3(0.0);
     if (inRow0.w >= 0.0)
     {
         // The low three bytes are the light that reached the vertex; the top
@@ -56,6 +65,9 @@ void main()
         const uint packed = lightmap.colours[uint(inRow0.w) + uint(gl_VertexIndex)];
         outBaked = vec3(float((packed >> 16) & 0xFFu), float((packed >> 8) & 0xFFu), float(packed & 0xFFu)) / 255.0;
         outSky = float((packed >> 24) & 0xFFu) / 255.0;
+
+        const uint at = (uint(inRow0.w) + uint(gl_VertexIndex)) * 3u;
+        outIncident = vec3(incident.values[at], incident.values[at + 1u], incident.values[at + 2u]);
     }
     gl_Position = push.viewProjection * vec4(world, 1.0);
 }

@@ -130,5 +130,41 @@ parser, `eCResourceLightmap_PS::Read` at 0x101CBB70, found through the export
 table rather than by hunting strings - Engine.dll exports 16224 decorated names,
 so the function could simply be looked up.
 
-Still not established: how the instance GUID in the file name binds to the sector
-entity, and whether the colour is light alone or light times albedo.
+## On the geometry
+
+The GUID in the file name is the placing entity's own, at body+4 in its record.
+That was proven before it was used: the guids from the archive's file names
+appear verbatim in the sector that places them.
+
+Instancing made the rest awkward, and the way out is worth recording. Lighting is
+per instance; vertices are shared between instances; so the lighting cannot go in
+the vertex buffer. It goes in a storage buffer, every instance's colours end to
+end, and each instance carries where its run begins - in the first matrix row's
+w, which the transform does not use. The per-frame instance buffer keeps its
+shape and its cost, and the vertex shader reads `colours[base + gl_VertexIndex]`.
+
+The directions are wired the same way, in a second buffer of three floats a
+vertex.
+
+## What a lightmap actually contains
+
+Measured over all 11233 files and 20689339 vertices:
+
+    mean baked light   8.9 of 255
+    mean sky           190.4 of 255
+    vertices with any light at all   18.3%
+
+**These are ambient occlusion maps far more than light maps.** The occlusion byte
+is the signal; the colour is a small addition present on less than a fifth of
+vertices. That is why applying the occlusion changed the picture immediately -
+mean brightness in the fortress room went from 34.7 to 79.4 - and why the
+incident directions, wired end to end and carrying 422577 floats in that sector,
+changed nothing visible: they shape a term that is zero almost everywhere.
+
+They are kept because they are correct and because they will matter twice over:
+on the 18% of vertices that do carry light, and once normal maps are read, where
+a direction is the whole point.
+
+Still not established: whether the colour is light alone or light times albedo,
+and what the 517012 bitmaps hold - those are addressed by the second UV set,
+which 2263 mesh elements carry and nothing yet uses.
