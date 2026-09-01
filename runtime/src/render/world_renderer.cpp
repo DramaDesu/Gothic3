@@ -108,6 +108,8 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
         // unconditionally and the batch cannot be rejected as a whole.
         kept.hasExtent = kept.hasExtent && kept.bounds.size() == kept.transforms.size();
         kept.occludes = batch.occludes;
+        kept.lodNear = batch.lodNear;
+        kept.lodFar = batch.lodFar;
 
         std::size_t elementIndex = 0;
         for (const genome::MeshElement &element : batch.mesh->elements)
@@ -440,6 +442,8 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
 
     m_visible.clear();
     m_tooSmall = 0;
+    m_submittedTriangles = 0;
+    m_submittedDraws = 0;
     // Testing what a batch covers before testing its instances. Most of the map
     // is grass and each patch is one batch of its own, local to a few metres, so
     // a single test throws away every instance in it.
@@ -492,10 +496,33 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
             continue;
         }
 
+        const float nearSquared = batch.lodNear * batch.lodNear;
+        const float farSquared = batch.lodFar * batch.lodFar;
+
         for (std::size_t instance = 0; instance < batch.transforms.size(); ++instance)
         {
             if (instance < batch.bounds.size() && outsideFrustum(batch.bounds[instance]))
                 continue;
+
+            // Which detail level draws this one. Measured to the nearest face of
+            // the box rather than its centre, so a tall tree does not switch
+            // early just because its middle is far away.
+            if ((nearSquared > 0.0f || farSquared > 0.0f) && instance < batch.bounds.size())
+            {
+                const std::array<float, 6> &box = batch.bounds[instance];
+                float distanceSquared = 0.0f;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    const float low = box[axis] - eye[axis];
+                    const float high = eye[axis] - box[axis + 3];
+                    const float outside = std::max(0.0f, std::max(low, high));
+                    distanceSquared += outside * outside;
+                }
+                if (distanceSquared < nearSquared)
+                    continue;
+                if (farSquared > 0.0f && distanceSquared >= farSquared)
+                    continue;
+            }
 
             if (instance < batch.bounds.size() && tooSmallOnScreen(batch.bounds[instance]))
             {
@@ -523,10 +550,16 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
         {
             m_ranges[range].firstInstance = firstInstance;
             m_ranges[range].instanceCount = visible;
+            if (visible != 0)
+            {
+                ++m_submittedDraws;
+                m_submittedTriangles += std::size_t(m_ranges[range].indexCount / 3) * visible;
+            }
         }
     }
 
     m_visibleInstances = m_visible.size();
+
     {
         // Its own scope: a zone names a local, so two in one scope collide.
         G3_ZONE("upload instances");

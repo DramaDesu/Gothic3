@@ -226,7 +226,9 @@ struct Grower
 
     void grow(std::size_t level, Frame frame, float length, float radius)
     {
-        if (level >= branchLevels() || length < 1.0f || branches >= growth.branchLimit)
+        // A coarse tree stops one generation short of a fine one.
+        const std::size_t levels = growth.detail < 0.5f && branchLevels() > 1 ? branchLevels() - 1 : branchLevels();
+        if (level >= levels || length < 1.0f || branches >= growth.branchLimit)
             return;
         ++branches;
 
@@ -328,18 +330,20 @@ struct Grower
         // that is a handful each.
         const std::array<float, 8> corners = leaf.hasCorners ? leaf.corners
                                                              : std::array<float, 8>{1, 1, 0, 1, 0, 0, 1, 0};
+        const float cardScale = growth.detail < 1.0f ? 1.0f / std::sqrt(std::max(0.05f, growth.detail)) : 1.0f;
         const auto asked = std::uint32_t(std::clamp(number(level, ChildCount) * 0.01f, 1.0f, 4.0f));
         for (std::uint32_t index = 0; index < asked && leaves < growth.leafLimit; ++index)
         {
             // The definition says how likely a site is to carry a leaf at all,
             // which is what separates an umbrella thorn from an oak.
-            if (rng.unit() > definition.leafProbability)
+            if (rng.unit() > definition.leafProbability * growth.detail)
                 continue;
 
             const float t = rng.between(0.3f, 1.0f);
             const Frame &frame = along[std::min(std::size_t(t * float(along.size() - 1)), along.size() - 1)];
             const Vec jitter{rng.between(-width, width), rng.between(-width, width), rng.between(-width, width)};
-            addLeafCard(foliage, frame.at + jitter * 0.4f, frame.forward, width, height, corners, rng);
+            addLeafCard(foliage, frame.at + jitter * 0.4f, frame.forward, width * cardScale, height * cardScale,
+                        corners, rng);
             ++leaves;
         }
     }

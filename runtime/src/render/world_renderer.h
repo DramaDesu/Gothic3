@@ -43,6 +43,13 @@ struct MeshInstances
     // comes out riddled with holes. One per mesh element; empty means none.
     std::vector<char> alphaTested;
 
+    // The distance band this batch is drawn in, as a way of switching detail: a
+    // definition is loaded twice, a full mesh for near and a thinned one for
+    // far, and each instance is drawn by whichever band it falls in. Zero far
+    // means no limit.
+    float lodNear = 0.0f;
+    float lodFar = 0.0f;
+
     // Whether these instances may hide what is behind them. A bounding box is a
     // fair stand-in for a house and a poor one for a tree, whose box is mostly
     // air - so foliage is drawn but never rasterised as an occluder.
@@ -78,6 +85,12 @@ class WorldRenderer
     std::size_t triangleCount() const { return m_indexCount / 3; }
     std::size_t instanceCount() const { return m_instanceCount; }
     std::size_t drawCount() const { return m_ranges.size(); }
+
+    // What the last cull actually handed the card: triangles times instances,
+    // which is the number that decides a GPU-bound frame rather than the
+    // instance count.
+    std::size_t submittedTriangles() const { return m_submittedTriangles; }
+    std::size_t submittedDraws() const { return m_submittedDraws; }
 
     const std::array<float, 3> &boundsMin() const { return m_boundsMin; }
     const std::array<float, 3> &boundsMax() const { return m_boundsMax; }
@@ -124,12 +137,16 @@ class WorldRenderer
         // through to the per-instance tests, which is the honest outcome.
         std::array<float, 6> extent{};
         bool hasExtent = false;
+        float lodNear = 0.0f;
+        float lodFar = 0.0f;
     };
     std::vector<Batch> m_batches;
     std::vector<genome::WorldMatrix> m_visible; // scratch, refilled each frame
     std::size_t m_visibleInstances = 0;
     std::size_t m_tooSmall = 0;
     std::size_t m_occluded = 0;
+    std::size_t m_submittedTriangles = 0;
+    std::size_t m_submittedDraws = 0;
     OcclusionBuffer m_occlusion;
 
     // Instances big enough to hide other things: rasterised first, then used to

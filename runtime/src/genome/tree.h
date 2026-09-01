@@ -28,6 +28,11 @@ struct TreeGrowth
     // game's mean height over thousands of instances can be measured against.
     bool applyVariance = true;
 
+    // How much of the tree to build, for drawing it at a distance. Below one it
+    // thins the foliage and stops one level short, which is what the definition's
+    // own detail ladder does: fewer leaves, and bigger ones to cover for them.
+    float detail = 1.0f;
+
     std::uint32_t branchLimit = 400;
     std::uint32_t leafLimit = 6000;
 };

@@ -172,12 +172,17 @@ int main(int argc, char **argv)
     int treeArgument = 0;
     // How many different trees are grown per definition before they repeat.
     constexpr std::uint32_t c_TreeVariants = 3;
+    // Where a tree drops to its thinned form, in world units - a metre is a
+    // hundred, so this is sixty metres.
+    float treeLodDistance = 6000.0f;
     for (int index = 2; index + 1 < argc; ++index)
     {
         if (std::string(argv[index]) == "--sectors")
             sectorArgument = index + 1;
         if (std::string(argv[index]) == "--shot")
             shotPath = argv[index + 1];
+        if (std::string(argv[index]) == "--lod" && index + 1 < argc)
+            treeLodDistance = float(std::atof(argv[index + 1]));
         if (std::string(argv[index]) == "--bench" && index + 1 < argc)
             benchFrames = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--camera" && index + 5 < argc)
@@ -324,14 +329,29 @@ int main(int argc, char **argv)
                         if (!path.empty() &&
                             genome::loadSpeedTree(treeArchive->read(path, &why), definition, &why))
                         {
-                            auto mesh = std::make_unique<genome::Mesh>();
-                            if (genome::growTree(definition, definition.seed + variant * 7919u,
-                                                 genome::TreeGrowth{}, *mesh))
+                            // Two of each: the full tree for close up and a
+                            // thinned one past the switch distance. A tree is
+                            // four thousand triangles and there are 29138 of
+                            // them in view at once, which is where the frame
+                            // goes; a distant one covering a few pixels must not
+                            // cost the same as one filling the screen.
+                            const std::uint32_t seed = definition.seed + variant * 7919u;
+                            for (int level = 0; level < 2; ++level)
                             {
+                                genome::TreeGrowth growth;
+                                growth.detail = level == 0 ? 1.0f : 0.15f;
+
+                                auto mesh = std::make_unique<genome::Mesh>();
+                                if (!genome::growTree(definition, seed, growth, *mesh))
+                                    continue;
+
                                 render::MeshInstances batch;
                                 batch.mesh = mesh.get();
                                 batch.occludes = false;
-                                slot = batches.size();
+                                batch.lodNear = level == 0 ? 0.0f : treeLodDistance;
+                                batch.lodFar = level == 0 ? treeLodDistance : 0.0f;
+                                if (level == 0)
+                                    slot = batches.size();
                                 batches.push_back(std::move(batch));
                                 ownedMeshes.push_back(std::move(mesh));
                             }
@@ -346,9 +366,18 @@ int main(int argc, char **argv)
 
                     // The sector already knows how big the tree ends up, so its
                     // own bounds decide visibility rather than the grown mesh.
-                    batches[known->second].transforms.push_back(tree.world);
-                    batches[known->second].bounds.push_back({tree.boundsMin[0], tree.boundsMin[1], tree.boundsMin[2],
-                                                             tree.boundsMax[0], tree.boundsMax[1], tree.boundsMax[2]});
+                    // Both detail levels hold every instance; the distance band
+                    // decides which one draws it, so nothing is placed twice.
+                    const std::array<float, 6> box{tree.boundsMin[0], tree.boundsMin[1], tree.boundsMin[2],
+                                                   tree.boundsMax[0], tree.boundsMax[1], tree.boundsMax[2]};
+                    for (std::size_t level = 0; level < 2; ++level)
+                    {
+                        const std::size_t at = known->second + level;
+                        if (at >= batches.size())
+                            break;
+                        batches[at].transforms.push_back(tree.world);
+                        batches[at].bounds.push_back(box);
+                    }
                     ++planted;
                 }
 
@@ -750,6 +779,8 @@ int main(int argc, char **argv)
                 };
                 report(frameTimes, "frame");
                 report(cullTimes, "cull");
+                std::printf("%zu draws, %.2fM triangles submitted\n", renderer.submittedDraws(),
+                            double(renderer.submittedTriangles()) / 1e6);
                 std::printf("%zu of %zu instances drawn\n", renderer.visibleInstances(),
                             renderer.instanceCount());
                 break;
