@@ -46,6 +46,9 @@ target_link_libraries(g3anim PRIVATE genome)
 add_executable(g3pose tools/g3pose.cpp)
 target_link_libraries(g3pose PRIVATE genome)
 
+add_executable(g3lightmap tools/g3lightmap.cpp)
+target_link_libraries(g3lightmap PRIVATE genome)
+
 add_executable(g3tree tools/g3tree.cpp)
 target_link_libraries(g3tree PRIVATE genome)
 
