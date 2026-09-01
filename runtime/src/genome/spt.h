@@ -137,7 +137,13 @@ struct SpeedTree
     Frond frond;
     std::vector<SpeedTreeMaterial> materials;
 
-    std::string billboardTexture;    // id 20002
+    std::string billboardTexture;    // id 20002, the composite atlas
+
+    // The billboard quad: four (u, v) corners into that atlas, from id 20005.
+    // Shipping data leaves it at the whole texture in 78 of the 98 files, so it
+    // is read but cannot be trusted as a tile.
+    std::array<float, 8> billboardCorners{};
+    bool billboardCornersAuthored = false;
     std::string shadowTexture;       // id 18005
 
     std::vector<SpeedTreeToken> tokens;   // everything, in file order

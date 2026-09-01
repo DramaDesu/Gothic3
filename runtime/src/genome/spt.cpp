@@ -347,10 +347,22 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
         case 20002:
             out.billboardTexture = token.text;
             break;
+        case 20005: {
+            // Four (u, v) corners for the billboard, then five more floats.
+            // The default is the whole texture, which is what most of the
+            // shipping trees carry, so an authored rectangle is worth marking.
+            if (token.floats.size() >= 8)
+            {
+                for (std::size_t corner = 0; corner < 8; ++corner)
+                    out.billboardCorners[corner] = token.floats[corner];
+                const std::array<float, 8> whole{1, 1, 0, 1, 0, 0, 1, 0};
+                out.billboardCornersAuthored = out.billboardCorners != whole;
+            }
+            break;
+        }
         case 8003:
         case 8005:
-        case 8009:
-        case 20005: {
+        case 8009: {
             SpeedTreeMaterial material;
             const float *value = token.floats.data();
             material.ambient = {value[0], value[1], value[2]};

@@ -234,6 +234,40 @@ What remains is a tail that is consistently too short - tamarind, longleaf pine,
 bulford holly and the bushes all sit near 0.4 - so their recorded extent likely
 means something other than a height.
 
+## Billboards, and why we cannot use the ones in the file
+
+The composite atlas holds rendered silhouettes of whole trees, not only leaf and
+frond tiles: it is a 1024x1024 image on an 8x8 grid of 128-pixel cells, the tiles
+occupy 2x2 cells in the left half, and the right half is one whole tree per cell,
+seen from the side at ground level, with alpha.
+
+The engine's side of it is a single call. `CSpeedTreeRT::GetGeometry` fills a
+288-byte structure the caller owns, with a bit mask choosing which parts to
+write: 1 branches, 2 fronds, 4 leaves, 8 billboards. Each part is a set of
+pointers into the library's own arrays - positions, normals, texture coordinates,
+indices - plus a triangle count and an alpha for cross-fading between detail
+levels. A billboard comes back as one quad: four corner positions and four
+(u, v) pairs. The corners are not camera-facing data recomputed per frame; they
+are a unit quad scaled by a width and a height, built once and cached, and the
+engine turns it into crossed quads at load time.
+
+The library can do more than the game asks of it. It supports several rendered
+views chosen by the angle to the camera, with two neighbouring views cross-faded,
+and an overhead view for looking down on a forest. **All 98 definitions switch
+both off**: id 20004 is 0 everywhere and so is id 20003. One view per tree.
+
+The texture coordinates are in the file, as id 20005 - four (u, v) corners, the
+same shape as the leaf tiles. But they cannot be used as they stand: **78 of the
+98 leave them at the whole texture**, and the twenty that do not point at half
+the atlas, a region holding eight silhouettes rather than one. Cropping the atlas
+at a pawpaw's own rectangle produces a grid of eight trees, not a pawpaw.
+
+So the billboards were rendered and shipped, and the field that should say which
+one belongs to which tree was mostly never filled in. For our runtime the way
+round it is to render our own: we grow the tree already, so drawing it once into
+an atlas of our own at load time gives a correct billboard for all 98 rather than
+for twenty.
+
 ## What is not done
 
 Outstanding: wind (the game animates it in the vertex shader, driven by
