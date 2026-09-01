@@ -82,6 +82,26 @@ add_library(render STATIC
 target_include_directories(render PUBLIC src)
 target_link_libraries(render PUBLIC genome Vulkan::Vulkan)
 
+# Tracy: zones stream to the external viewer when it connects, and nothing is
+# recorded until one does. The client is vendored rather than taken from a
+# registry because the protocol is version-locked to the viewer, and registries
+# lag releases - the same reason it is vendored in the raytracer, where a client
+# two versions behind reported every zone name as ???.
+option(G3_ENABLE_TRACY "Compile in Tracy profiler zones" ON)
+
+if (G3_ENABLE_TRACY)
+  add_library(TracyClient SHARED ThirdParty/tracy/TracyClient.cpp)
+  target_include_directories(TracyClient SYSTEM PUBLIC ThirdParty/tracy)
+  target_compile_definitions(TracyClient PRIVATE TRACY_EXPORTS)
+  target_compile_definitions(TracyClient INTERFACE TRACY_IMPORTS)
+  target_compile_definitions(TracyClient PUBLIC TRACY_ENABLE TRACY_ON_DEMAND)
+  if (WIN32)
+    target_link_libraries(TracyClient PRIVATE ws2_32 dbghelp)
+  endif()
+  target_link_libraries(render PUBLIC TracyClient)
+  message(STATUS "Tracy zones enabled, client 0.14.1 from ThirdParty/tracy (-DG3_ENABLE_TRACY=OFF to disable)")
+endif()
+
 add_executable(g3sector tools/g3sector.cpp)
 target_link_libraries(g3sector PRIVATE genome)
 

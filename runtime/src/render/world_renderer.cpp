@@ -1,5 +1,7 @@
 #include "world_renderer.h"
 
+#include "profile.h"
+
 #include <cstdio>
 
 #include <algorithm>
@@ -410,6 +412,8 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                          const std::array<float, 3> &eye, float pixelsPerRadian, float minimumPixels,
                          bool useOcclusion)
 {
+    G3_ZONE("cull");
+
     // Frustum planes straight out of the view-projection matrix: each is a
     // combination of two of its rows, in the same column-major layout the
     // shader receives.
@@ -427,6 +431,8 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     m_occluded = 0;
     if (useOcclusion)
     {
+        G3_ZONE("occluders");
+
         m_occlusion.clear();
         for (const Occluder &occluder : m_occluders)
             m_occlusion.addOccluder(m_batches[occluder.batch].bounds[occluder.instance], viewProjection);
@@ -521,14 +527,20 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     }
 
     m_visibleInstances = m_visible.size();
-    if (!m_visible.empty())
-        std::memcpy(m_instanceBuffer[device.frameIndex()].mapped, m_visible.data(),
-                    sizeof(genome::WorldMatrix) * m_visible.size());
+    {
+        // Its own scope: a zone names a local, so two in one scope collide.
+        G3_ZONE("upload instances");
+        if (!m_visible.empty())
+            std::memcpy(m_instanceBuffer[device.frameIndex()].mapped, m_visible.data(),
+                        sizeof(genome::WorldMatrix) * m_visible.size());
+    }
 }
 
 void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjection,
                          const std::array<float, 4> &light)
 {
+    G3_ZONE("record draws");
+
     VkCommandBuffer command = device.commandBuffer();
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
 

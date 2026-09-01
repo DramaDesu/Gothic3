@@ -14,6 +14,7 @@
 #include "genome/tree.h"
 #include "genome/world.h"
 #include "render/window.h"
+#include "render/profile.h"
 #include "render/world_renderer.h"
 
 // windows.h is here only for the virtual-key codes, and its min/max macros
@@ -718,6 +719,7 @@ int main(int argc, char **argv)
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &toPresent);
 
         device.endFrame();
+        G3_FRAME_MARK;
 
         if (benchFrames > 0)
         {
