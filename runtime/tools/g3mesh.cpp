@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <iostream>
+#include <algorithm>
 #include <map>
 
 int main(int argc, char **argv)
@@ -48,6 +49,9 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    std::map<std::uint32_t, std::size_t> streamCensus;
+    std::size_t lightSamples = 0, lightFull = 0, lightDark = 0;
+    double lightTotal = 0.0;
     std::size_t parsed = 0, failed = 0, vertices = 0, triangles = 0;
     std::map<std::string, std::size_t> reasons;
     for (const genome::PakEntry &entry : archive->entries())
@@ -65,10 +69,36 @@ int main(int argc, char **argv)
             continue;
         }
         ++parsed;
+        for (const genome::MeshElement &element : mesh.elements)
+        {
+            for (std::uint32_t stream : element.streams)
+                ++streamCensus[stream];
+
+            for (std::uint32_t packed : element.vertexLight)
+            {
+                // Brightest of the three colour bytes, as a fraction.
+                const double value =
+                    std::max({packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF}) / 255.0;
+                ++lightSamples;
+                lightTotal += value;
+                lightFull += value > 0.99 ? 1 : 0;
+                lightDark += value < 0.25 ? 1 : 0;
+            }
+        }
         vertices += mesh.vertexCount();
         triangles += mesh.triangleCount();
     }
 
+    // Which vertex streams the archive actually uses, and how many elements
+    // carry each. A stream nobody reads is a feature nobody draws.
+    std::printf("stream census: ");
+    for (const auto &[stream, count] : streamCensus)
+        std::printf("%u:%zu ", stream, count);
+    std::printf("\n");
+    if (lightSamples != 0)
+        std::printf("stream 5 over %zu vertices: mean %.3f, %.1f%% at full, %.1f%% below a quarter\n", lightSamples,
+                    lightTotal / double(lightSamples), 100.0 * lightFull / double(lightSamples),
+                    100.0 * lightDark / double(lightSamples));
     std::printf("parsed %zu meshes, %zu failed\n", parsed, failed);
     std::printf("%zu vertices, %zu triangles in total\n", vertices, triangles);
     for (const auto &[reason, count] : reasons)

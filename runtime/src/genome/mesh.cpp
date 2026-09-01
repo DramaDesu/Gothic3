@@ -76,16 +76,19 @@ bool readMeshElement(Reader &reader, const StringTable &strings, MeshElement &el
         if (stride == 0 || !reader.ok() || count > reader.remaining() / stride)
             return false;
 
+        element.streams.push_back(streamType);
+
         // Streams appear in no fixed order, so dispatch on the type.
         switch (static_cast<StreamType>(streamType))
         {
-            case StreamType::Face: readInto(reader, element.indices, count); break;
-            case StreamType::Position: readInto(reader, element.positions, count); break;
-            case StreamType::Normal: readInto(reader, element.normals, count); break;
-            case StreamType::Tangent: readInto(reader, element.tangents, count); break;
-            case StreamType::TexCoord0: readInto(reader, element.texCoords, count); break;
-            case StreamType::Diffuse: readInto(reader, element.diffuse, count); break;
-            default: reader.skip(count * stride); break;
+        case StreamType::Face: readInto(reader, element.indices, count); break;
+        case StreamType::Position: readInto(reader, element.positions, count); break;
+        case StreamType::Normal: readInto(reader, element.normals, count); break;
+        case StreamType::Tangent: readInto(reader, element.tangents, count); break;
+        case StreamType::TexCoord0: readInto(reader, element.texCoords, count); break;
+        case StreamType::Diffuse: readInto(reader, element.diffuse, count); break;
+        case StreamType::Specular: readInto(reader, element.vertexLight, count); break;
+        default: reader.skip(count * stride); break;
         }
     }
 

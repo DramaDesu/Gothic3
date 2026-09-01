@@ -41,6 +41,15 @@ struct MeshElement
     std::vector<std::array<float, 2>> texCoords;         // UV set 0
     std::vector<std::uint32_t> diffuse;                  // bitangent handedness, see above
 
+    // Stream 5, on every element of every mesh in the archive - 9299 of 9299.
+    // Packed four bytes per vertex.
+    std::vector<std::uint32_t> vertexLight;
+
+    // Which streams this element actually carried, in file order. Kept because
+    // the ones we skip are as interesting as the ones we read - a stream nobody
+    // reads is a feature nobody draws.
+    std::vector<std::uint32_t> streams;
+
     std::size_t triangleCount() const { return indices.size() / 3; }
 };
 
