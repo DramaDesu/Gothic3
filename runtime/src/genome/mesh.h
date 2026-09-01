@@ -42,8 +42,12 @@ struct MeshElement
     std::vector<std::uint32_t> diffuse;                  // bitangent handedness, see above
 
     // Stream 5, on every element of every mesh in the archive - 9299 of 9299.
-    // Packed four bytes per vertex.
+    // Packed four bytes per vertex, and zero in every one of them.
     std::vector<std::uint32_t> vertexLight;
+
+    // Stream 73, on 2263 elements: the coordinates that address the baked
+    // lightmap bitmaps rather than the diffuse texture.
+    std::vector<std::array<float, 2>> lightmapUV;
 
     // Which streams this element actually carried, in file order. Kept because
     // the ones we skip are as interesting as the ones we read - a stream nobody

@@ -88,6 +88,7 @@ bool readMeshElement(Reader &reader, const StringTable &strings, MeshElement &el
         case StreamType::TexCoord0: readInto(reader, element.texCoords, count); break;
         case StreamType::Diffuse: readInto(reader, element.diffuse, count); break;
         case StreamType::Specular: readInto(reader, element.vertexLight, count); break;
+        case StreamType::LightmapUV: readInto(reader, element.lightmapUV, count); break;
         default: reader.skip(count * stride); break;
         }
     }

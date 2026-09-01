@@ -50,7 +50,8 @@ int main(int argc, char **argv)
     }
 
     std::map<std::uint32_t, std::size_t> streamCensus;
-    std::size_t lightSamples = 0, lightFull = 0, lightDark = 0;
+    std::size_t lightSamples = 0, lightFull = 0, lightDark = 0, lightmapSamples = 0;
+    float lightmapMinU = 1e9f, lightmapMaxU = -1e9f, lightmapMinV = 1e9f, lightmapMaxV = -1e9f;
     double lightTotal = 0.0;
     std::size_t parsed = 0, failed = 0, vertices = 0, triangles = 0;
     std::map<std::string, std::size_t> reasons;
@@ -74,6 +75,15 @@ int main(int argc, char **argv)
             for (std::uint32_t stream : element.streams)
                 ++streamCensus[stream];
 
+            for (const std::array<float, 2> &uv : element.lightmapUV)
+            {
+                ++lightmapSamples;
+                lightmapMinU = std::min(lightmapMinU, uv[0]);
+                lightmapMaxU = std::max(lightmapMaxU, uv[0]);
+                lightmapMinV = std::min(lightmapMinV, uv[1]);
+                lightmapMaxV = std::max(lightmapMaxV, uv[1]);
+            }
+
             for (std::uint32_t packed : element.vertexLight)
             {
                 // Brightest of the three colour bytes, as a fraction.
@@ -95,6 +105,9 @@ int main(int argc, char **argv)
     for (const auto &[stream, count] : streamCensus)
         std::printf("%u:%zu ", stream, count);
     std::printf("\n");
+    if (lightmapSamples != 0)
+        std::printf("lightmap uv over %zu vertices: u %.3f..%.3f, v %.3f..%.3f\n", lightmapSamples, lightmapMinU,
+                    lightmapMaxU, lightmapMinV, lightmapMaxV);
     if (lightSamples != 0)
         std::printf("stream 5 over %zu vertices: mean %.3f, %.1f%% at full, %.1f%% below a quarter\n", lightSamples,
                     lightTotal / double(lightSamples), 100.0 * lightFull / double(lightSamples),
