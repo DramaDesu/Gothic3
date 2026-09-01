@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <map>
 
@@ -28,6 +29,9 @@ int main(int argc, char **argv)
         std::cerr << "error: " << error << "\n";
         return 1;
     }
+
+    // With an index as well, the bitmap is written out so it can be looked at.
+    const int wanted = argc >= 4 ? std::atoi(argv[3]) : -1;
 
     if (argc >= 3)
     {
@@ -70,12 +74,47 @@ int main(int argc, char **argv)
                             image.height, image.offsetX, image.offsetY, image.uvSet, image.data.size());
             }
         }
+        if (wanted >= 0)
+        {
+            std::size_t seen = 0;
+            for (const genome::LightmapElement &element : map.elements)
+                for (const genome::LightmapBitmap &bitmap : element.bitmaps)
+                {
+                    if (int(seen++) != wanted)
+                        continue;
+                    if (bitmap.data.size() != std::size_t(bitmap.width) * bitmap.height * 4)
+                    {
+                        std::printf("bitmap %d is %zu bytes for %d x %d, not four a texel\n", wanted,
+                                    bitmap.data.size(), bitmap.width, bitmap.height);
+                        return 1;
+                    }
+
+                    std::FILE *out = std::fopen("bitmap.ppm", "wb");
+                    if (!out)
+                        return 1;
+                    std::fprintf(out, "P6\n%d %d\n255\n", bitmap.width, bitmap.height);
+                    for (std::size_t at = 0; at < bitmap.data.size(); at += 4)
+                    {
+                        // Stored blue first, as everything in this engine is.
+                        std::fputc(bitmap.data[at + 2], out);
+                        std::fputc(bitmap.data[at + 1], out);
+                        std::fputc(bitmap.data[at + 0], out);
+                    }
+                    std::fclose(out);
+                    std::printf("wrote bitmap.ppm, %d x %d\n", bitmap.width, bitmap.height);
+                    return 0;
+                }
+            std::printf("no bitmap %d here\n", wanted);
+            return 1;
+        }
         return 0;
     }
 
     std::size_t parsed = 0, failed = 0, vertices = 0, mixed = 0, bitmaps = 0;
     // What the two halves of the colour actually hold across the whole game.
     std::size_t totalLight = 0, totalSky = 0, litVertices = 0;
+    // Whether every bitmap really is four bytes a texel.
+    std::size_t sized = 0, oddlySized = 0;
     std::map<std::string, std::size_t> reasons;
     for (const genome::PakEntry &entry : archive->entries())
     {
@@ -101,12 +140,24 @@ int main(int argc, char **argv)
             }
         mixed += map.type == genome::LightmapType::Mixed ? 1 : 0;
         for (const genome::LightmapElement &element : map.elements)
+        {
             bitmaps += element.bitmaps.size();
+            for (const genome::LightmapBitmap &bitmap : element.bitmaps)
+            {
+                if (bitmap.data.empty())
+                    continue;
+                if (bitmap.data.size() == std::size_t(bitmap.width) * bitmap.height * 4)
+                    ++sized;
+                else
+                    ++oddlySized;
+            }
+        }
     }
 
     std::printf("parsed %zu lightmaps, %zu failed\n", parsed, failed);
     std::printf("%zu lit vertices, %zu instances lit by bitmaps as well, %zu bitmaps in all\n", vertices, mixed,
                 bitmaps);
+    std::printf("%zu bitmaps are four bytes a texel, %zu are not\n", sized, oddlySized);
     if (vertices != 0)
         std::printf("mean baked light %.1f of 255, mean sky %.1f of 255, %.1f%% of vertices carry any light\n",
                     double(totalLight) / double(vertices), double(totalSky) / double(vertices),
