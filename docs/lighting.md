@@ -80,37 +80,55 @@ Established by reading:
   varies from 0xf5 to 0xfe: bright, as an outdoor bridge should be. The second
   array is 307 floats, the first of which is exactly 1.0.
 
-**It is a directional lightmap.** The second array is not floats but unit
-vectors, twelve bytes each: over two thousand of them sampled, every single one
-has a length of 1.0000. So each vertex carries a colour and the direction the
-light came from - which is what a normal-mapped surface needs and a flat colour
-cannot give. The pair is followed by the marker `44332211`, the same shape the
-sector records use.
+**It is a directional lightmap, and it now reads completely: 11233 of 11233
+files, nothing failing.** 20689339 lit vertices, and 517012 bitmaps across the
+2815 instances that carry them.
 
-The decisive test was not the bytes of one file but three files of one mesh. The
-arena appears three times with different GUIDs and different sizes - 440280,
-245138 and 443880 - and all three carry the same count, 11285, which is exactly
-the vertex count of that mesh's first element. Their contents differ where they
-should: one has colours with all four bytes set, the others only the top byte,
-and a scalar in the header reads 1.0, 0.84 and 0.28. Per instance, as the file
-names say.
+The layout, as the engine reads it:
 
-`g3lightmap` reads that, and **2779 of the 11233 files parse - 3778454 lit
-vertices**. The remaining 8454 fail at the end marker, so a mesh with more than
-one element carries more than this, and the walk stops where it stops being sure.
+    u16 version (4, and it refuses less)
+    eCResourceBase_PS header
+    float ResourcePriority
+    string  the mesh this instance lights, in full
+    u32   type: 0 per vertex, 1 mixed
+    float scaling
+    u32   one entry per mesh element, each optional:
+            u16 version
+            array of u32   a colour per vertex
+            array of vec3  an incident direction per vertex
+            u16 bitmap count, then that many:
+              marker 11223344, a version, a UV set, an offset, a size, the pixels
 
-Still not established:
+Two things in there are worth stating plainly.
 
-- What follows for the other elements, and what the remaining bytes hold - 148565
-  of the bridge's 153723 are still unread.
-- Whether the colour is the light itself or light times albedo, and in what
-  space.
-- How the instance GUID in the file name binds to the sector entity.
+**The colour is two quantities in one word.** The low 24 bits are the baked light
+that reached the vertex; the top byte is not alpha but **ambient occlusion** -
+the bake writes it as the fraction of rays that reached the sky. They come from
+different passes, each preserving the other's bits. The bridge's first element
+reads light 0 and sky 222: unlit and open, which is what the underside of a
+bridge should be.
 
-## Vertex stream 5
+**The direction is a unit vector per vertex**, twelve bytes. That is what a
+normal-mapped surface needs and a flat colour cannot give.
 
-Every element of every mesh carries stream 5 - 9299 of 9299 - and a review
-suggested it holds per-vertex ambient occlusion. Read across all 11224508
-vertices it is **zero**: mean 0.000, none at full brightness. The contrast is in
-the lightmaps and there is nowhere else it could be. 2263 elements carry a second
-UV set, which is what addresses them.
+## What cost the time, and what saved it
+
+Three readings of a single file failed at the same offset. Two mistakes were
+mine and both are worth remembering.
+
+The first was a stride: read at sixteen bytes an entry, the vector (1, 0, 0)
+comes out as (0, 1.0, 0, 0), and 150 KB of perfectly good directions look like
+meaningless repeating records. The pattern was real; the reading was wrong.
+
+The second was assuming a marker ends something. `11223344` does not close the
+element - it **opens each bitmap**, and reading it as a terminator is what left
+those 150 KB unread and stopped the walk after the first element of three.
+
+What broke the deadlock twice over: comparing three lightmaps of one mesh, which
+showed at once which fields are per instance; and then reading the engine's own
+parser, `eCResourceLightmap_PS::Read` at 0x101CBB70, found through the export
+table rather than by hunting strings - Engine.dll exports 16224 decorated names,
+so the function could simply be looked up.
+
+Still not established: how the instance GUID in the file name binds to the sector
+entity, and whether the colour is light alone or light times albedo.
