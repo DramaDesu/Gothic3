@@ -36,6 +36,12 @@ struct MeshInstances
     std::vector<std::array<float, 6>> bounds;
     std::vector<const genome::Image *> textures; // one per mesh element, may be null
 
+    // Which elements throw away their transparent pixels. Foliage must - it is
+    // drawn as quads whose texture is mostly empty - and solid surfaces must not:
+    // a stone wall whose texture carries anything but 1 in its alpha channel
+    // comes out riddled with holes. One per mesh element; empty means none.
+    std::vector<char> alphaTested;
+
     // Whether these instances may hide what is behind them. A bounding box is a
     // fair stand-in for a house and a poor one for a tree, whose box is mostly
     // air - so foliage is drawn but never rasterised as an occluder.
@@ -81,6 +87,7 @@ class WorldRenderer
         std::uint32_t firstInstance = 0;
         std::uint32_t instanceCount = 0;
         VkDescriptorSet descriptor = VK_NULL_HANDLE;
+        bool alphaTested = false;
     };
 
     VkPipelineLayout m_layout = VK_NULL_HANDLE;

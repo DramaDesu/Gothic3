@@ -7,6 +7,7 @@ layout(push_constant) uniform Push
 {
     mat4 viewProjection;
     vec4 lightDirection;
+    float alphaTested;
 }
 push;
 
@@ -22,9 +23,11 @@ void main()
 {
     vec3 normal = normalize(inNormal);
     vec4 sampled = texture(diffuseMap, inTexCoord);
-    // Grass is drawn as crossed quads whose texture is mostly empty, so the
-    // transparent parts have to be thrown away rather than blended.
-    if (sampled.a < 0.5)
+    // Foliage is drawn as quads whose texture is mostly empty, so its
+    // transparent pixels are thrown away rather than blended. Solid surfaces are
+    // not tested: a wall whose texture carries anything but 1 in its alpha
+    // channel would come out riddled with holes.
+    if (push.alphaTested > 0.5 && sampled.a < 0.5)
         discard;
     vec3 ground = sampled.rgb;
 

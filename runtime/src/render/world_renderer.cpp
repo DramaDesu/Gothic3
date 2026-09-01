@@ -17,6 +17,7 @@ struct PushConstants
 {
     std::array<float, 16> viewProjection;
     std::array<float, 4> light;
+    float alphaTested = 0.0f; // per draw, not per frame
 };
 
 std::vector<char> readFile(const std::string &path)
@@ -103,6 +104,7 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
             range.vertexOffset = static_cast<std::int32_t>(vertices.size());
             range.firstInstance = firstInstance;
             range.instanceCount = static_cast<std::uint32_t>(batch.transforms.size());
+            range.alphaTested = elementIndex < batch.alphaTested.size() && batch.alphaTested[elementIndex] != 0;
             kept.ranges.push_back(m_ranges.size());
             m_ranges.push_back(range);
 
@@ -510,10 +512,20 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
     // One draw per range: tiles sharing a regional material share a descriptor,
     // so this is a handful of texture binds rather than one per tile.
     VkDescriptorSet bound = VK_NULL_HANDLE;
+    float boundAlphaTest = -1.0f;
     for (const Range &range : m_ranges)
     {
         if (range.instanceCount == 0)
             continue;
+
+        const float wanted = range.alphaTested ? 1.0f : 0.0f;
+        if (wanted != boundAlphaTest)
+        {
+            vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                               offsetof(PushConstants, alphaTested), sizeof(wanted), &wanted);
+            boundAlphaTest = wanted;
+        }
+
         if (range.descriptor != bound)
         {
             vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &range.descriptor, 0,

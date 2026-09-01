@@ -165,6 +165,8 @@ int main(int argc, char **argv)
 
     int sectorArgument = 0;
     const char *shotPath = nullptr;
+    // Everything so far has been counted in objects. This counts milliseconds.
+    int benchFrames = 0;
     int cameraArgument = 0;
     int treeArgument = 0;
     // How many different trees are grown per definition before they repeat.
@@ -175,6 +177,8 @@ int main(int argc, char **argv)
             sectorArgument = index + 1;
         if (std::string(argv[index]) == "--shot")
             shotPath = argv[index + 1];
+        if (std::string(argv[index]) == "--bench" && index + 1 < argc)
+            benchFrames = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--camera" && index + 5 < argc)
             cameraArgument = index + 1;
         if (std::string(argv[index]) == "--tree" && index + 1 < argc)
@@ -438,6 +442,9 @@ int main(int argc, char **argv)
         images.push_back(std::move(water));
 
         std::map<std::string, const genome::Image *> cache;
+        // Which materials throw away transparent pixels, remembered per name so
+        // the answer survives the texture cache.
+        std::map<std::string, bool> masked;
         for (render::MeshInstances &batch : batches)
         {
             for (const genome::MeshElement &element : batch.mesh->elements)
@@ -465,6 +472,9 @@ int main(int argc, char **argv)
                         images.push_back(std::move(image));
                     }
                     cache.emplace(element.materialName, loaded);
+                    // Our own foliage - grass patches, leaves and fronds - is
+                    // quads whose texture is mostly empty.
+                    masked.emplace(element.materialName, true);
                 }
                 else if (materials && imageArchive && !element.materialName.empty())
                 {
@@ -472,6 +482,9 @@ int main(int argc, char **argv)
                     std::string ignored;
                     if (genome::loadMaterial(materials->read(element.materialName, &ignored), material, &ignored))
                     {
+                        // The game says which surfaces mask; taking every alpha
+                        // channel at face value punches holes through stone.
+                        masked.emplace(element.materialName, material.blendMode == genome::BlendMode::Masked);
                         if (material.kind == genome::ShaderKind::Water)
                             loaded = waterImage;
                         else if (const genome::Sampler *sampler = material.texture(genome::Slot::Diffuse))
@@ -492,6 +505,8 @@ int main(int argc, char **argv)
                     cache.emplace(element.materialName, loaded);
                 }
                 batch.textures.push_back(loaded);
+                const auto isMasked = masked.find(element.materialName);
+                batch.alphaTested.push_back(isMasked != masked.end() && isMasked->second ? 1 : 0);
             }
         }
         std::size_t untextured = 0;
@@ -567,6 +582,13 @@ int main(int argc, char **argv)
     bool looking = false;
     bool occlusion = true;
     POINT lastCursor{};
+
+    std::vector<float> frameTimes, cullTimes;
+    if (benchFrames > 0)
+    {
+        frameTimes.reserve(std::size_t(benchFrames));
+        cullTimes.reserve(std::size_t(benchFrames));
+    }
 
     auto previous = std::chrono::steady_clock::now();
     std::size_t frames = 0;
@@ -667,7 +689,11 @@ int main(int argc, char **argv)
 
         // A pixel and a half: below that an object is a speck, whatever it is.
         const float pixelsPerRadian = float(extent.height) * 0.5f / std::tan(0.5f);
+        const auto cullStart = std::chrono::steady_clock::now();
         renderer.cull(device, viewProjection, eye, pixelsPerRadian, 1.5f, occlusion);
+        if (benchFrames > 0)
+            cullTimes.push_back(std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
+                                                                        cullStart).count());
 
         static float reportAt = 0.0f;
         reportAt += delta;
@@ -692,6 +718,33 @@ int main(int argc, char **argv)
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &toPresent);
 
         device.endFrame();
+
+        if (benchFrames > 0)
+        {
+            frameTimes.push_back(
+                std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - now).count());
+            if (int(frameTimes.size()) >= benchFrames)
+            {
+                // The first frames pay for pipeline warm-up and uploads, so they
+                // are not what a steady frame costs.
+                const std::size_t skip = std::min<std::size_t>(10, frameTimes.size() / 4);
+                auto report = [skip](std::vector<float> &times, const char *label) {
+                    std::vector<float> kept(times.begin() + skip, times.end());
+                    std::sort(kept.begin(), kept.end());
+                    float total = 0.0f;
+                    for (float value : kept)
+                        total += value;
+                    std::printf("%-6s mean %6.2f ms   median %6.2f   95th %6.2f   worst %6.2f\n", label,
+                                total / float(kept.size()), kept[kept.size() / 2],
+                                kept[std::size_t(float(kept.size()) * 0.95f)], kept.back());
+                };
+                report(frameTimes, "frame");
+                report(cullTimes, "cull");
+                std::printf("%zu of %zu instances drawn\n", renderer.visibleInstances(),
+                            renderer.instanceCount());
+                break;
+            }
+        }
 
         // Give the view a few frames to settle, then take the picture and go.
         if (shotPath && ++frames == 5)
