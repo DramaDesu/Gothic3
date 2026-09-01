@@ -108,6 +108,10 @@ class WorldRenderer
     std::size_t submittedTriangles() const { return m_submittedTriangles; }
     std::size_t submittedDraws() const { return m_submittedDraws; }
 
+    // How many instances the last cull actually looked at, as opposed to
+    // rejected a whole batch at a time. This is what the cull costs.
+    std::size_t testedInstances() const { return m_testedInstances; }
+
     const std::array<float, 3> &boundsMin() const { return m_boundsMin; }
     const std::array<float, 3> &boundsMax() const { return m_boundsMax; }
 
@@ -158,12 +162,30 @@ class WorldRenderer
         bool faceCamera = false;
     };
     std::vector<Batch> m_batches;
+
+    // A grid over the world, one entry per occupied cell, holding the batches
+    // that sit inside it. From an overview of the whole map every batch is
+    // inside the frustum, so testing batches one at a time rejects nothing and
+    // the cull ends up walking every instance; testing a cell rejects the
+    // hundreds of batches in it at once. The largest instance in a cell decides
+    // whether the cell is too small to bother with, so a cell of grass goes in
+    // one test and a cell with a house in it does not.
+    struct Cell
+    {
+        std::array<float, 6> bounds{};
+        float largestRadius = 0.0f;
+        std::vector<std::size_t> batches;
+    };
+    std::vector<Cell> m_cells;
+    std::vector<std::size_t> m_looseBatches; // no bounds, or spanning the map
+    void buildGrid();
     std::vector<genome::WorldMatrix> m_visible; // scratch, refilled each frame
     std::size_t m_visibleInstances = 0;
     std::size_t m_tooSmall = 0;
     std::size_t m_occluded = 0;
     std::size_t m_submittedTriangles = 0;
     std::size_t m_submittedDraws = 0;
+    std::size_t m_testedInstances = 0;
     OcclusionBuffer m_occlusion;
 
     // Instances big enough to hide other things: rasterised first, then used to

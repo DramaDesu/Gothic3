@@ -876,6 +876,7 @@ int main(int argc, char **argv)
                 };
                 report(frameTimes, "frame");
                 report(cullTimes, "cull");
+                std::printf("%.2fM instances walked by the cull\n", double(renderer.testedInstances()) / 1e6);
                 std::printf("%zu draws, %.2fM triangles submitted\n", renderer.submittedDraws(),
                             double(renderer.submittedTriangles()) / 1e6);
                 std::printf("%zu of %zu instances drawn\n", renderer.visibleInstances(),

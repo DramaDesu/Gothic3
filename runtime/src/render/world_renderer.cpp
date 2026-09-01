@@ -9,6 +9,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <tuple>
 
 namespace render
 {
@@ -46,6 +47,31 @@ VkShaderModule loadShader(VkDevice device, const std::string &path)
     VkShaderModule module = VK_NULL_HANDLE;
     vkCreateShaderModule(device, &info, nullptr, &module);
     return module;
+}
+
+// Geometry belongs in the card's own memory. Written host-visible it stays in
+// system RAM and every vertex the card fetches crosses the bus - at 15M vertices
+// of 32 bytes that is hundreds of megabytes a frame, for data that never
+// changes after loading. The instance buffers are a different case and stay
+// host-visible: they are rewritten every frame by the cull.
+bool uploadDeviceLocal(Device &device, const void *data, VkDeviceSize bytes, VkBufferUsageFlags usage,
+                       Buffer &out, std::string *error)
+{
+    out = device.createBuffer(bytes, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false, error);
+    if (!out.handle)
+        return false;
+
+    Buffer staging = device.createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, error);
+    if (!staging.handle)
+        return false;
+    std::memcpy(staging.mapped, data, std::size_t(bytes));
+
+    VkCommandBuffer command = device.beginOneShot();
+    VkBufferCopy copy{0, 0, bytes};
+    vkCmdCopyBuffer(command, staging.handle, out.handle, 1, &copy);
+    device.endOneShot(command);
+    device.destroyBuffer(staging);
+    return true;
 }
 
 // A one-pixel stand-in so an untextured range still has something to sample.
@@ -185,6 +211,8 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
         m_batches.push_back(std::move(kept));
     }
 
+    buildGrid();
+
     // Anything spanning more than about ten metres is worth rasterising as an
     // occluder: houses, cliffs and the landscape itself, not barrels.
     std::size_t foliageSkipped = 0;
@@ -216,17 +244,12 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
     m_indexCount = indices.size();
     m_instanceCount = instances.size();
 
-    m_vertexBuffer = device.createBuffer(sizeof(WorldVertex) * vertices.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                                         true, error);
-    if (!m_vertexBuffer.handle)
+    if (!uploadDeviceLocal(device, vertices.data(), sizeof(WorldVertex) * vertices.size(),
+                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, m_vertexBuffer, error))
         return false;
-    std::memcpy(m_vertexBuffer.mapped, vertices.data(), sizeof(WorldVertex) * vertices.size());
-
-    m_indexBuffer =
-        device.createBuffer(sizeof(std::uint32_t) * indices.size(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, true, error);
-    if (!m_indexBuffer.handle)
+    if (!uploadDeviceLocal(device, indices.data(), sizeof(std::uint32_t) * indices.size(),
+                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT, m_indexBuffer, error))
         return false;
-    std::memcpy(m_indexBuffer.mapped, indices.data(), sizeof(std::uint32_t) * indices.size());
 
     // One buffer per frame in flight: culling rewrites it every frame.
     for (Buffer &buffer : m_instanceBuffer)
@@ -445,6 +468,7 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     m_tooSmall = 0;
     m_submittedTriangles = 0;
     m_submittedDraws = 0;
+    m_testedInstances = 0;
     // Testing what a batch covers before testing its instances. Most of the map
     // is grass and each patch is one batch of its own, local to a few metres, so
     // a single test throws away every instance in it.
@@ -466,6 +490,17 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     // instance that survives the frustum, so the roots were worth removing.
     const float sizeRatio = minimumPixels / std::max(pixelsPerRadian, 1e-6f);
     const float sizeRatioSquared = sizeRatio * sizeRatio;
+    // The same question asked of a box with a radius given separately, which is
+    // how a cell is judged by the largest thing in it rather than by its own
+    // size - a cell is ten metres across whatever stands in it.
+    const auto tooSmallForRadius = [&eye, sizeRatioSquared](const std::array<float, 6> &box, float radius) {
+        const float centre[3] = {0.5f * (box[0] + box[3]), 0.5f * (box[1] + box[4]), 0.5f * (box[2] + box[5])};
+        const float distanceSquared = (centre[0] - eye[0]) * (centre[0] - eye[0]) +
+                                      (centre[1] - eye[1]) * (centre[1] - eye[1]) +
+                                      (centre[2] - eye[2]) * (centre[2] - eye[2]);
+        return distanceSquared > radius * radius && radius * radius < sizeRatioSquared * distanceSquared;
+    };
+
     const auto tooSmallOnScreen = [&eye, minimumPixels, sizeRatioSquared](const std::array<float, 6> &box) {
         if (minimumPixels <= 0.0f)
             return false;
@@ -479,12 +514,28 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
         return distanceSquared > radiusSquared && radiusSquared < sizeRatioSquared * distanceSquared;
     };
 
-    for (Batch &batch : m_batches)
+    // Reject whole cells first. From an overview of the map every batch is
+    // inside the frustum, so testing them one at a time rejects nothing; a cell
+    // takes its hundreds of batches with it. A cell survives if any part of it
+    // is in view and its largest instance is big enough to see.
+    std::vector<char> skipBatch(m_batches.size(), 0);
+    for (const Cell &cell : m_cells)
     {
+        if (!outsideFrustum(cell.bounds) &&
+            !(minimumPixels > 0.0f && tooSmallForRadius(cell.bounds, cell.largestRadius)))
+            continue;
+        for (std::size_t index : cell.batches)
+            skipBatch[index] = 1;
+    }
+
+    for (std::size_t batchIndex = 0; batchIndex < m_batches.size(); ++batchIndex)
+    {
+        Batch &batch = m_batches[batchIndex];
         const std::uint32_t firstInstance = static_cast<std::uint32_t>(m_visible.size());
         std::uint32_t visible = 0;
 
-        if (batch.hasExtent && (outsideFrustum(batch.extent) || tooSmallOnScreen(batch.extent)))
+        if (skipBatch[batchIndex] ||
+            (batch.hasExtent && (outsideFrustum(batch.extent) || tooSmallOnScreen(batch.extent))))
         {
             // Rejected whole. Its instances still have to be accounted for, or
             // the counts stop adding up to what was loaded.
@@ -497,6 +548,7 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
             continue;
         }
 
+        m_testedInstances += batch.transforms.size();
         const float nearSquared = batch.lodNear * batch.lodNear;
         const float farSquared = batch.lodFar * batch.lodFar;
 
@@ -630,6 +682,76 @@ void WorldRenderer::collectProfiling(Device &device)
 void WorldRenderer::stopProfiling()
 {
     gpuContextDestroy(m_gpu);
+}
+
+void WorldRenderer::buildGrid()
+{
+    // The game streams on a 10000-unit grid and its sector files are named for
+    // it, so a cell of the same size groups what was authored together.
+    constexpr float c_CellSize = 10000.0f;
+
+    m_cells.clear();
+    m_looseBatches.clear();
+
+    // Keyed by place and by size. One house in a cell would otherwise keep every
+    // blade of grass around it alive, because the cell is judged by its largest
+    // instance - so things of a size are grouped together and a cell of grass is
+    // rejected without the house having a say.
+    std::map<std::tuple<int, int, int>, std::size_t> cellAt;
+    for (std::size_t index = 0; index < m_batches.size(); ++index)
+    {
+        const Batch &batch = m_batches[index];
+        if (!batch.hasExtent)
+        {
+            m_looseBatches.push_back(index);
+            continue;
+        }
+
+        // A batch wider than a cell would make its cell useless, so it stays
+        // outside the grid and is tested on its own.
+        const float width = batch.extent[3] - batch.extent[0];
+        const float depth = batch.extent[5] - batch.extent[2];
+        if (width > c_CellSize || depth > c_CellSize)
+        {
+            m_looseBatches.push_back(index);
+            continue;
+        }
+
+        float largest = 0.0f;
+        for (const std::array<float, 6> &box : batch.bounds)
+        {
+            const float radius = 0.5f * std::sqrt((box[3] - box[0]) * (box[3] - box[0]) +
+                                                  (box[4] - box[1]) * (box[4] - box[1]) +
+                                                  (box[5] - box[2]) * (box[5] - box[2]));
+            largest = std::max(largest, radius);
+        }
+
+        // Octaves of size: everything within a factor of two shares a bucket.
+        const int sizeClass = largest > 1.0f ? std::min(15, int(std::log2(largest))) : 0;
+        const std::tuple<int, int, int> key{int(std::floor(0.5f * (batch.extent[0] + batch.extent[3]) / c_CellSize)),
+                                            int(std::floor(0.5f * (batch.extent[2] + batch.extent[5]) / c_CellSize)),
+                                            sizeClass};
+        auto found = cellAt.find(key);
+        if (found == cellAt.end())
+        {
+            found = cellAt.emplace(key, m_cells.size()).first;
+            Cell cell;
+            cell.bounds = batch.extent;
+            m_cells.push_back(std::move(cell));
+        }
+
+        Cell &cell = m_cells[found->second];
+        cell.batches.push_back(index);
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            cell.bounds[axis] = std::min(cell.bounds[axis], batch.extent[axis]);
+            cell.bounds[axis + 3] = std::max(cell.bounds[axis + 3], batch.extent[axis + 3]);
+        }
+        cell.largestRadius = std::max(cell.largestRadius, largest);
+    }
+
+    std::printf("%zu grid cells hold %zu batches, %zu tested on their own\n", m_cells.size(),
+                m_batches.size() - m_looseBatches.size(), m_looseBatches.size());
 }
 
 const std::array<float, 6> *WorldRenderer::batchExtent(std::size_t batch) const
