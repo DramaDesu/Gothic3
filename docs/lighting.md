@@ -80,18 +80,32 @@ Established by reading:
   varies from 0xf5 to 0xfe: bright, as an outdoor bridge should be. The second
   array is 307 floats, the first of which is exactly 1.0.
 
-Not established:
+**It is a directional lightmap.** The second array is not floats but unit
+vectors, twelve bytes each: over two thousand of them sampled, every single one
+has a length of 1.0000. So each vertex carries a colour and the direction the
+light came from - which is what a normal-mapped surface needs and a flat colour
+cannot give. The pair is followed by the marker `44332211`, the same shape the
+sector records use.
 
-- What follows those two arrays. The next bytes are 16-byte records repeating
-  `0, 1.0, 0, 0`, and neither of the mesh's other element counts (2573 and 3354)
-  appears anywhere as a u32 in the first 20 KB - so the remaining elements are
-  not stored the same way, and the file is not simply a list of per-element
-  vertex colours.
-- Which of the two arrays is the light and which is the occlusion, and in what
+The decisive test was not the bytes of one file but three files of one mesh. The
+arena appears three times with different GUIDs and different sizes - 440280,
+245138 and 443880 - and all three carry the same count, 11285, which is exactly
+the vertex count of that mesh's first element. Their contents differ where they
+should: one has colours with all four bytes set, the others only the top byte,
+and a scalar in the header reads 1.0, 0.84 and 0.28. Per instance, as the file
+names say.
+
+`g3lightmap` reads that, and **2779 of the 11233 files parse - 3778454 lit
+vertices**. The remaining 8454 fail at the end marker, so a mesh with more than
+one element carries more than this, and the walk stops where it stops being sure.
+
+Still not established:
+
+- What follows for the other elements, and what the remaining bytes hold - 148565
+  of the bridge's 153723 are still unread.
+- Whether the colour is the light itself or light times albedo, and in what
   space.
 - How the instance GUID in the file name binds to the sector entity.
-
-`g3lightmap` reads what is understood and stops there rather than guessing.
 
 ## Vertex stream 5
 

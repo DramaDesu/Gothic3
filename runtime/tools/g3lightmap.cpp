@@ -19,9 +19,13 @@ namespace
 
 struct Lightmap
 {
-    std::string meshName;
-    // One array per mesh element, four bytes a vertex.
-    std::vector<std::vector<std::uint32_t>> perElement;
+    float scale = 0.0f;          // a per-instance scalar, 1.0, 0.84 and 0.28 in three of one mesh
+    std::uint32_t elements = 0;  // matches the element count of the mesh it names
+
+    // Baked lighting for the first element: a packed colour and a unit direction
+    // per vertex.
+    std::vector<std::uint32_t> colours;
+    std::vector<float> directions;
     std::size_t leftover = 0;
 };
 
@@ -48,30 +52,39 @@ bool loadLightmap(const std::vector<std::uint8_t> &bytes, Lightmap &out, std::st
     if (!genome::readResourceBase(reader, resourceVersion))
         return fail("bad resource header");
 
-    // The body: a version, the priority property this class carries, then one
-    // array of vertex colours per element of the mesh it lights. Each array is a
-    // one-byte prefix and a u32 count, the same shape the vegetation grid uses.
-    reader.skip(14);
+    // The body: a per-instance scalar, the priority this class carries, the
+    // element count of the mesh, then the baked lighting itself - a colour and a
+    // direction for every vertex of the first element, each as a prefixed array.
+    reader.skip(4);
+    out.scale = reader.f32();
+    reader.skip(6);
     const std::uint32_t elements = reader.u32();
     if (!reader.ok() || elements > 64)
         return fail("implausible element count");
-    reader.skip(3); // list prefix and a count repeated as a u16
+    out.elements = elements;
+    reader.skip(3);
 
-    out.perElement.clear();
-    // Only the first pair is understood, so only the first pair is read. What
-    // follows it is 16-byte records that no vertex count explains - see
-    // docs/lighting.md.
-    for (std::uint32_t index = 0; index < 2 && reader.ok(); ++index)
-    {
-        reader.skip(1);
-        const std::uint32_t count = reader.u32();
-        if (!reader.ok() || count > reader.remaining() / 4)
-            return fail("implausible vertex count");
+    reader.skip(1);
+    const std::uint32_t count = reader.u32();
+    if (!reader.ok() || count > reader.remaining() / 16)
+        return fail("implausible vertex count");
 
-        std::vector<std::uint32_t> colours(count);
-        reader.array(colours.data(), count);
-        out.perElement.push_back(std::move(colours));
-    }
+    out.colours.resize(count);
+    reader.array(out.colours.data(), count);
+
+    // The same count again, of unit vectors - the direction the light came from,
+    // which is what a normal-mapped surface needs and a flat colour cannot give.
+    reader.skip(1);
+    if (reader.u32() != count)
+        return fail("the direction array does not match the colours");
+    out.directions.resize(std::size_t(count) * 3);
+    reader.array(out.directions.data(), out.directions.size());
+
+    // The record ends with a marker, as the sector entities do.
+    if (reader.u16() != 0x03d5 && !reader.ok())
+        return fail("truncated before the marker");
+    if (reader.u32() != 0x11223344)
+        return fail("no end marker after the vertex data");
 
     // How much is left after the arrays. A reading that stops in the wrong place
     // is a reading that happens to fit, so the leftover is reported rather than
@@ -108,26 +121,21 @@ int main(int argc, char **argv)
             return 1;
         }
 
-        std::printf("mesh %s\n", map.meshName.c_str());
-        for (std::size_t index = 0; index < map.perElement.size(); ++index)
+        std::printf("scale %.3f, %u elements, %zu lit vertices, %zu bytes not read\n", map.scale, map.elements,
+                    map.colours.size(), map.leftover);
+
+        std::size_t total = 0, darkest = 255, brightest = 0;
+        for (std::uint32_t packed : map.colours)
         {
-            const std::vector<std::uint32_t> &colours = map.perElement[index];
-            if (colours.empty())
-            {
-                std::printf("  element %zu: empty\n", index);
-                continue;
-            }
-            std::size_t total = 0, darkest = 255, brightest = 0;
-            for (std::uint32_t packed : colours)
-            {
-                const std::size_t value = std::max({packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF});
-                total += value;
-                darkest = std::min(darkest, value);
-                brightest = std::max(brightest, value);
-            }
-            std::printf("  element %zu: %6zu vertices, brightness %zu..%zu mean %zu, first %08x\n", index,
-                        colours.size(), darkest, brightest, total / colours.size(), colours.front());
+            const std::size_t value = std::max({packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF});
+            total += value;
+            darkest = std::min(darkest, value);
+            brightest = std::max(brightest, value);
         }
+        if (!map.colours.empty())
+            std::printf("brightness %zu..%zu mean %zu, first colour %08x, first direction %.3f %.3f %.3f\n",
+                        darkest, brightest, total / map.colours.size(), map.colours.front(), map.directions[0],
+                        map.directions[1], map.directions[2]);
         return 0;
     }
 
@@ -147,8 +155,7 @@ int main(int argc, char **argv)
             continue;
         }
         ++parsed;
-        for (const std::vector<std::uint32_t> &colours : map.perElement)
-            vertices += colours.size();
+        vertices += map.colours.size();
     }
 
     std::printf("parsed %zu lightmaps, %zu failed\n", parsed, failed);
