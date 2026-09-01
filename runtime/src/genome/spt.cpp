@@ -295,13 +295,20 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
             out.leafProbability = token.floats.empty() ? 1.0f : token.floats[0];
             break;
         case 12002:
-            // Component 2 tracks the height of the tree as the game places it,
-            // to r = 0.90 over the 64 definitions that carry it.
+            // The 12000 band records the tree's extents, and this component
+            // tracks the height the game's own instances reached at r = 0.90
+            // over the 64 definitions that carry it - against r = 0.66 for size.
+            //
+            // Taking the largest extent of the band instead looks better in
+            // isolation, fitting 54 of 90 definitions against 36 of 64, because
+            // it covers more files with one constant. In place it is worse - 39
+            // of 92 rather than 43 - because this pair is already two formulas,
+            // and the second covers those files more accurately than one shared
+            // constant does. Measured, not reasoned.
             if (token.floats.size() > 2 && token.floats[2] > 0.01f)
                 out.recordedHeight = token.floats[2] * 175.5f;
             break;
         case 12003:
-            // The same in a second form, in the files that lack 12002.
             if (token.floats.size() > 4 && token.floats[4] > 0.01f && out.recordedHeight == 0.0f)
                 out.recordedHeight = token.floats[4] * 208.0f; // only where 12002 is absent
             break;
