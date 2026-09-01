@@ -40,6 +40,7 @@ class Device
     VkDevice device() const { return m_device; }
     VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
     VkCommandBuffer commandBuffer() const { return m_commandBuffers[m_frame]; }
+    VkQueue queue() const { return m_queue; }
     VkFormat colorFormat() const { return m_surfaceFormat.format; }
     VkFormat depthFormat() const { return m_depthFormat; }
     VkExtent2D extent() const { return m_extent; }

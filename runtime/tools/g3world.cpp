@@ -551,6 +551,11 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    // Before the loop: setting this up records and submits a command buffer of
+    // its own to calibrate the card's clock against ours, which cannot happen
+    // while a frame is being recorded.
+    renderer.startProfiling(device);
+
     const std::array<float, 3> &min = renderer.boundsMin();
     const std::array<float, 3> &max = renderer.boundsMax();
     const std::array<float, 3> centre{(min[0] + max[0]) * 0.5f, (min[1] + max[1]) * 0.5f, (min[2] + max[2]) * 0.5f};
@@ -708,6 +713,9 @@ int main(int argc, char **argv)
         renderer.draw(device, viewProjection, {0.45f, 0.75f, 0.35f, 0.0f});
 
         vkCmdEndRendering(command);
+        // Outside the render pass, which is where the profiler may write to its
+        // query pool.
+        renderer.collectProfiling(device);
 
         VkImageMemoryBarrier toPresent{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         toPresent.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -765,6 +773,7 @@ int main(int argc, char **argv)
     }
 
     vkDeviceWaitIdle(device.device());
+    renderer.stopProfiling();
     renderer.destroy(device);
     device.destroy();
     return 0;

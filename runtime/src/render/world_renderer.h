@@ -8,6 +8,7 @@
 #include "genome/mesh.h"
 #include "genome/world.h"
 #include "occlusion.h"
+#include "profile.h"
 #include "texture.h"
 #include "vulkan.h"
 
@@ -51,6 +52,12 @@ struct MeshInstances
 class WorldRenderer
 {
   public:
+    // Timestamps around the drawing, collected by the profiler. Call collect
+    // once a frame, outside a render pass.
+    void startProfiling(Device &device);
+    void collectProfiling(Device &device);
+    void stopProfiling();
+
     bool create(Device &device, const std::vector<MeshInstances> &batches, std::string *error);
     void destroy(Device &device);
 
@@ -90,6 +97,7 @@ class WorldRenderer
         bool alphaTested = false;
     };
 
+    GpuContext m_gpu = nullptr;
     VkPipelineLayout m_layout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
 

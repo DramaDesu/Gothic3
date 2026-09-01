@@ -536,12 +536,29 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     }
 }
 
+void WorldRenderer::startProfiling(Device &device)
+{
+    if (!m_gpu)
+        m_gpu = gpuContextCreate(device.physicalDevice(), device.device(), device.queue(), device.commandBuffer());
+}
+
+void WorldRenderer::collectProfiling(Device &device)
+{
+    gpuCollect(m_gpu, device.commandBuffer());
+}
+
+void WorldRenderer::stopProfiling()
+{
+    gpuContextDestroy(m_gpu);
+}
+
 void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjection,
                          const std::array<float, 4> &light)
 {
     G3_ZONE("record draws");
 
     VkCommandBuffer command = device.commandBuffer();
+    G3_GPU_ZONE(m_gpu, command, "world");
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
 
     PushConstants push{viewProjection, light};
