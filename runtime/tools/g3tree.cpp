@@ -131,7 +131,9 @@ int main(int argc, char **argv)
         leaves += tree.leaves.size();
 
         genome::Mesh grown;
-        if (genome::growTree(tree, tree.seed, genome::TreeGrowth{}, grown))
+        genome::TreeGrowth nominal;
+        nominal.applyVariance = false; // so the figure compares with the game's mean
+        if (genome::growTree(tree, tree.seed, nominal, grown))
         {
             ++grown_ok;
             triangles += grown.triangleCount();

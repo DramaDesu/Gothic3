@@ -379,13 +379,45 @@ bool growTree(const SpeedTree &definition, std::uint32_t seed, const TreeGrowth 
     // Size varies per instance around what the definition asks for, which is how
     // one file grows a wood rather than a row of identical trees.
     const float wanted = growth.size > 0.0f ? growth.size : definition.size;
-    const float size = std::max(1.0f, grower.rng.vary(wanted, definition.sizeVariance));
+    // The variance is as wide as the size itself for the winter bushes, so an
+    // unlucky draw asks for a tree of nothing. The game's own trees vary by a
+    // factor of about two and a half, never to zero, so the draw has a floor.
+    const float size = growth.applyVariance
+                           ? std::max(wanted * 0.4f, grower.rng.vary(wanted, definition.sizeVariance))
+                           : wanted;
 
     Frame trunk;
     grower.grow(0, trunk, size * c_UnitsPerSize, size * c_UnitsPerSize * 0.05f);
 
     boundsOf(bark);
     boundsOf(foliage);
+
+    // The curves give the shape; the definition's own recorded extent gives the
+    // scale. Growing from size alone put the palms at two and a half times the
+    // height the game places them at and the acacias at two fifths, because a
+    // palm and an acacia of the same size are nothing alike. Scaling the finished
+    // tree to the recorded height fixes the proportion without touching the
+    // silhouette, and the variance still applies through the size.
+    if (definition.recordedHeight > 1.0f)
+    {
+        float grownHeight = bark.boundsMax[1] - bark.boundsMin[1];
+        if (!foliage.positions.empty())
+            grownHeight = std::max(grownHeight, foliage.boundsMax[1] - foliage.boundsMin[1]);
+
+        if (grownHeight > 1.0f)
+        {
+            const float wantedHeight = definition.recordedHeight * (size / std::max(1.0f, definition.size));
+            const float scale = wantedHeight / grownHeight;
+            for (MeshElement *element : {&bark, &foliage})
+            {
+                for (std::array<float, 3> &position : element->positions)
+                    for (int axis = 0; axis < 3; ++axis)
+                        position[axis] *= scale;
+                boundsOf(*element);
+            }
+        }
+    }
+
     out.boundsMin = bark.boundsMin;
     out.boundsMax = bark.boundsMax;
     for (int axis = 0; axis < 3; ++axis)

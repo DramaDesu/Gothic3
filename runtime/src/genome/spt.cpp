@@ -294,6 +294,17 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
         case 3002:
             out.leafProbability = token.floats.empty() ? 1.0f : token.floats[0];
             break;
+        case 12002:
+            // Component 2 tracks the height of the tree as the game places it,
+            // to r = 0.90 over the 64 definitions that carry it.
+            if (token.floats.size() > 2 && token.floats[2] > 0.01f)
+                out.recordedHeight = token.floats[2] * 175.5f;
+            break;
+        case 12003:
+            // The same in a second form, in the files that lack 12002.
+            if (token.floats.size() > 4 && token.floats[4] > 0.01f && out.recordedHeight == 0.0f)
+                out.recordedHeight = token.floats[4] * 208.0f; // only where 12002 is absent
+            break;
         case 14002:
             out.frond.texture = token.text;
             break;

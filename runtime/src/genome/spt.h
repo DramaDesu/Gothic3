@@ -123,6 +123,12 @@ struct SpeedTree
     // for the sparse firs and 1.0 for a red oak, in that order.
     float leafMinScale = 0.0f;       // id 3000
     float leafProbability = 1.0f;    // id 3002
+    // The height the definition records for itself, in world units. Size alone
+    // predicts the game's own tree heights poorly - a palm and an acacia of the
+    // same size are nothing alike - but the 12000 band carries an extent that
+    // does, and it is the yardstick the grown tree is scaled to.
+    float recordedHeight = 0.0f;
+
     float size = 0.0f;               // id 2006
     float sizeVariance = 0.0f;       // id 2007
 

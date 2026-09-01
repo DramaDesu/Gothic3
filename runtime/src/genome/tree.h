@@ -23,6 +23,11 @@ struct TreeGrowth
     // How many children a level may spawn, whatever the definition asks for.
     // Shipping definitions ask for up to a thousand at the leaf level, and this
     // keeps a first draw honest about what it is drawing.
+    // Instances vary; a definition compared against the game should not. With
+    // this off the tree comes out at the size the file names, which is what the
+    // game's mean height over thousands of instances can be measured against.
+    bool applyVariance = true;
+
     std::uint32_t branchLimit = 400;
     std::uint32_t leafLimit = 6000;
 };

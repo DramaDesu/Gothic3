@@ -181,6 +181,34 @@ definition gives **57315 trees from 268 grown meshes**, and the whole map then
 loads 1222158 instances of 9.6M triangles. The sector's own bounds decide
 visibility, so the existing frustum, size and occlusion tests apply unchanged.
 
+## Measured against the game
+
+The world places 57315 trees and the sectors record what each one grew to, so
+there is a yardstick: grow all 98 definitions, compare each against the mean
+height of its own instances in the game.
+
+Growing from size alone failed it. Only 35 of 92 definitions landed within a
+quarter of the game's height, spread from 0.40 to 3.11 - the palms two and a
+half times too tall, the umbrella thorns two fifths too short. Size is real, but
+a palm and an acacia of the same size are nothing alike.
+
+The 12000 band carries the missing scale. Its component tracks the game's own
+heights at r = 0.90 across the 64 definitions that carry it, against r = 0.66 for
+size, and a second field covers 26 more. Scaling the finished tree to that
+extent - the curves still decide the shape - takes it to **43 of 92 within a
+quarter, spread 0.35 to 1.98**.
+
+Two things surfaced while measuring, both mine rather than the format's. The
+winter bushes carry a variance as wide as their size, so an unlucky draw asked
+for a tree of nothing and the height collapsed tenfold; the draw now has a floor.
+And a definition compared against the game must be grown at its nominal size,
+because a single varied sample is noise next to a mean over thousands of
+instances - `g3tree` now grows with the variance off for exactly that reason.
+
+What remains is a tail that is consistently too short - tamarind, longleaf pine,
+bulford holly and the bushes all sit near 0.4 - so their recorded extent likely
+means something other than a height.
+
 ## What is not done
 
 Outstanding: wind (the game animates it in the vertex shader, driven by
