@@ -23,6 +23,11 @@ using WorldMatrix = std::array<float, 16>;
 struct Placement
 {
     std::string name;
+
+    // The instance's own identifier, which is how its baked lighting is found:
+    // Lightmaps.pak names every file <mesh>_{guid}.xlmp, and those bytes are
+    // this field.
+    std::string guid;
     WorldMatrix world{};   // absolute, no parent to resolve
     std::string meshName;  // from eCVisualMeshStatic_PS, empty when not a mesh
 

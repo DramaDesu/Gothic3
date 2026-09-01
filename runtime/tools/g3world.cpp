@@ -12,6 +12,7 @@
 #include "genome/pak.h"
 #include "genome/spt.h"
 #include "genome/tree.h"
+#include "genome/lightmap.h"
 #include "genome/world.h"
 #include "render/window.h"
 #include "render/profile.h"
@@ -141,6 +142,12 @@ int main(int argc, char **argv)
     // they were grown - the billboard atlas is baked from exactly these.
     std::vector<std::size_t> treeFullDetail;
     std::vector<genome::PointLight> worldLights;
+    // Every instance's baked vertex lighting, end to end. The shader indexes it
+    // by the base each instance carries, which is how per-instance lighting
+    // survives sharing one vertex buffer between instances.
+    std::vector<std::uint32_t> lightmapColours;
+    std::unique_ptr<genome::PakArchive> lightmapArchive;
+    std::size_t lightmapsFound = 0, lightmapsMissing = 0;
     static const genome::WorldMatrix c_Identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
     const bool wantLandscape = filter != "none";
@@ -235,6 +242,8 @@ int main(int argc, char **argv)
         }
     }
 
+    lightmapArchive = genome::PakArchive::open(dataDirectory + "/Lightmaps.pak", nullptr);
+
     // Sectors name their trees by definition; growing one mesh per definition
     // and instancing it is the only way 57315 of them fit, and it is what the
     // game itself did - it batched every tree of a species from one buffer.
@@ -282,11 +291,40 @@ int main(int argc, char **argv)
                     if (placement.meshName.empty())
                         continue;
 
+                    // The baked lighting of this instance, found by the mesh it
+                    // places and its own identifier - which is exactly how the
+                    // archive names its files.
+                    std::int32_t lightmapBase = -1;
+                    if (lightmapArchive && !placement.guid.empty())
+                    {
+                        std::string name = placement.meshName;
+                        const std::size_t dot = name.find_last_of('.');
+                        if (dot != std::string::npos)
+                            name = name.substr(0, dot);
+                        name += "_{" + placement.guid + "}.xlmp";
+
+                        std::string why;
+                        genome::Lightmap map;
+                        const std::vector<std::uint8_t> bytes = lightmapArchive->read(name, &why);
+                        if (!bytes.empty() && genome::loadLightmap(bytes, map, &why) && !map.elements.empty() &&
+                            !map.elements.front().colours.empty())
+                        {
+                            lightmapBase = std::int32_t(lightmapColours.size());
+                            for (const genome::LightmapElement &element : map.elements)
+                                lightmapColours.insert(lightmapColours.end(), element.colours.begin(),
+                                                       element.colours.end());
+                            ++lightmapsFound;
+                        }
+                        else
+                            ++lightmapsMissing;
+                    }
+
                     const auto known = batchOf.find(placement.meshName);
                     if (known != batchOf.end())
                     {
                         if (known->second != std::size_t(-1))
                         {
+                            batches[known->second].lightmapBase.push_back(lightmapBase);
                             batches[known->second].transforms.push_back(placement.world);
                             batches[known->second].bounds.push_back(
                                 {placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
@@ -306,6 +344,7 @@ int main(int argc, char **argv)
 
                     render::MeshInstances batch;
                     batch.mesh = mesh.get();
+                    batch.lightmapBase.push_back(lightmapBase);
                     batch.transforms.push_back(placement.world);
                     batch.bounds.push_back({placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
                                             placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
@@ -683,7 +722,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    std::printf("%zu instances lit by a baked lightmap, %zu without one, %zu colours in all\n", lightmapsFound,
+                lightmapsMissing, lightmapColours.size());
     renderer.setLights(worldLights);
+    renderer.setLightmaps(std::move(lightmapColours));
 
     // Before the loop: setting this up records and submits a command buffer of
     // its own to calibrate the card's clock against ours, which cannot happen

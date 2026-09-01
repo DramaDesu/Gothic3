@@ -56,6 +56,12 @@ struct MeshInstances
     // was not already being paid.
     bool faceCamera = false;
 
+    // Where this instance's baked lighting starts in the shared buffer, or -1
+    // for none. Lighting is per instance and vertices are shared between
+    // instances, so it cannot live in the vertex buffer: the shader reads it by
+    // index instead. One per transform.
+    std::vector<std::int32_t> lightmapBase;
+
     // Whether these instances may hide what is behind them. A bounding box is a
     // fair stand-in for a house and a poor one for a tree, whose box is mostly
     // air - so foliage is drawn but never rasterised as an occluder.
@@ -87,6 +93,9 @@ class WorldRenderer
     // map, so the nearest handful to the camera are picked each frame and
     // handed to the shader; a light beyond its own range lights nothing.
     void setLights(const std::vector<genome::PointLight> &lights) { m_lights = lights; }
+
+    // Every instance's baked vertex lighting, concatenated. Call before create.
+    void setLightmaps(std::vector<std::uint32_t> colours) { m_lightmapColours = std::move(colours); }
     std::size_t litInstances() const { return m_litLights; }
 
     // Baking a billboard needs one batch at a time into its own viewport, with
@@ -141,6 +150,8 @@ class WorldRenderer
     static constexpr std::uint32_t c_MaxFrameLights = 16;
 
     std::vector<genome::PointLight> m_lights;
+    std::vector<std::uint32_t> m_lightmapColours;
+    Buffer m_lightmapBuffer{};
     std::size_t m_litLights = 0;
     Buffer m_lightBuffer[Device::c_FramesInFlight]{};
     VkDescriptorSetLayout m_lightLayout = VK_NULL_HANDLE;

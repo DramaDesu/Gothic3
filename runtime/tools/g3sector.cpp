@@ -43,8 +43,8 @@ int main(int argc, char **argv)
             if (placement.meshName.empty() || shown++ >= 20)
                 continue;
             const std::array<float, 3> at = placement.translation();
-            std::printf("  %-34s %9.0f %8.0f %9.0f  %s\n", placement.name.c_str(), at[0], at[1], at[2],
-                        placement.meshName.c_str());
+            std::printf("  %-34s %9.0f %8.0f %9.0f  {%s}  %s\n", placement.name.c_str(), at[0], at[1], at[2],
+                        placement.guid.c_str(), placement.meshName.c_str());
         }
         return 0;
     }

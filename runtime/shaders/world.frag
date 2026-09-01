@@ -28,6 +28,8 @@ layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec2 inTexCoord;
 layout(location = 2) in float inHeight;
 layout(location = 3) in vec3 inWorld;
+layout(location = 4) in vec3 inBaked;
+layout(location = 5) in float inSky;
 
 layout(location = 0) out vec4 outColor;
 
@@ -43,8 +45,14 @@ void main()
     if (push.alphaTested > 0.5 && sampled.a < 0.5)
         discard;
 
+    // Daylight, shadowed by how much sky the vertex can see. That factor is
+    // what the world was missing: without it every surface is lit as though it
+    // stood in the open, and the picture comes out flat however bright it is.
     float day = 0.55 + 0.45 * max(dot(normal, normalize(push.lightDirection.xyz)), 0.0);
-    vec3 lit = sampled.rgb * day;
+    vec3 lit = sampled.rgb * day * inSky;
+
+    // Then the light the bake recorded as having reached this vertex.
+    lit += sampled.rgb * inBaked;
 
     int used = int(lights.count.x);
     for (int index = 0; index < used; ++index)

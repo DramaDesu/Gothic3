@@ -1,5 +1,7 @@
 #include "world.h"
 
+#include <cstdio>
+
 #include <cmath>
 #include <unordered_map>
 
@@ -14,6 +16,7 @@ constexpr std::uint32_t c_RecordMarker = 0xDEADC0DE;
 
 // Offsets inside the entity body. The file order of the bounding volumes is not
 // the member order in the engine headers, so these are taken from the data.
+constexpr std::size_t c_GuidOffset = 4;
 constexpr std::size_t c_NameOffset = 41;
 constexpr std::size_t c_WorldMatrixOffset = 43;
 constexpr std::size_t c_WorldBoundsOffset = 219;
@@ -123,6 +126,26 @@ void transformBounds(const std::array<float, 3> &boxMin, const std::array<float,
         outMin[axis] = centre - extent;
         outMax[axis] = centre + extent;
     }
+}
+
+// A GUID, in the order Windows stores one: three little-endian fields and then
+// eight bytes as they lie. Written back out in the form the lightmap file names
+// use, so the two can simply be compared.
+std::string readGuid(Reader &reader)
+{
+    const std::uint32_t first = reader.u32();
+    const std::uint16_t second = reader.u16();
+    const std::uint16_t third = reader.u16();
+    std::uint8_t rest[8]{};
+    for (std::uint8_t &value : rest)
+        value = reader.u8();
+    if (!reader.ok())
+        return {};
+
+    char text[40];
+    std::snprintf(text, sizeof(text), "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x", first, second, third,
+                  rest[0], rest[1], rest[2], rest[3], rest[4], rest[5], rest[6], rest[7]);
+    return text;
 }
 
 // A nested subclass omits the leading version field a top-level record carries,
@@ -332,6 +355,9 @@ bool loadWorldNode(const std::vector<std::uint8_t> &bytes, WorldLayer &layer, st
             return fail("entity body runs past the end of the file");
 
         Placement placement;
+
+        reader.seek(bodyStart + c_GuidOffset);
+        placement.guid = readGuid(reader);
 
         reader.seek(bodyStart + c_NameOffset);
         placement.name = strings.entry(reader);
