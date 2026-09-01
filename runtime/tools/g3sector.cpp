@@ -35,6 +35,7 @@ int main(int argc, char **argv)
             return 1;
         }
 
+        std::printf("%zu lights in this sector\n", layer.lights.size());
         std::printf("%zu entities, %zu with a static mesh\n", layer.placements.size(), layer.meshCount());
         std::size_t shown = 0;
         for (const genome::Placement &placement : layer.placements)
@@ -58,6 +59,8 @@ int main(int argc, char **argv)
         float lowest = 1e9f, tallest = 0.0f, total = 0.0f;
     };
     std::map<std::string, TreeStats> byResource;
+    std::size_t lights = 0, shadowing = 0;
+    float shortestRange = 1e9f, longestRange = 0.0f;
     for (const genome::PakEntry &entry : archive->entries())
     {
         if (entry.deleted || entry.path.find("_cstat.node") == std::string::npos)
@@ -75,6 +78,13 @@ int main(int argc, char **argv)
         entities += layer.placements.size();
         vegetation += layer.vegetation.size();
         trees += layer.trees.size();
+        lights += layer.lights.size();
+        for (const genome::PointLight &light : layer.lights)
+        {
+            shortestRange = std::min(shortestRange, light.range);
+            longestRange = std::max(longestRange, light.range);
+            shadowing += light.castShadows ? 1 : 0;
+        }
         for (const genome::TreePlacement &tree : layer.trees)
         {
             TreeStats &stats = byResource[tree.resource];
@@ -92,6 +102,9 @@ int main(int argc, char **argv)
     std::printf("%zu entities, %zu placing a static mesh, %zu plants from %zu plant meshes\n", entities, meshes,
                 vegetation, plantMeshes);
     std::printf("%zu trees from %zu definitions\n", trees, byResource.size());
+    if (lights != 0)
+        std::printf("%zu static point lights, %zu casting shadows, range %.0f to %.0f units\n", lights, shadowing,
+                    shortestRange, longestRange);
     for (const auto &[reason, count] : reasons)
         std::printf("  %5zu  %s\n", count, reason.c_str());
 

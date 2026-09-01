@@ -140,6 +140,7 @@ int main(int argc, char **argv)
     // Which batch holds the full-detail mesh of each tree variant, in the order
     // they were grown - the billboard atlas is baked from exactly these.
     std::vector<std::size_t> treeFullDetail;
+    std::vector<genome::PointLight> worldLights;
     static const genome::WorldMatrix c_Identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
     const bool wantLandscape = filter != "none";
@@ -313,6 +314,8 @@ int main(int argc, char **argv)
                     ownedMeshes.push_back(std::move(mesh));
                     ++placed;
                 }
+                worldLights.insert(worldLights.end(), layer.lights.begin(), layer.lights.end());
+
                 for (const genome::TreePlacement &tree : layer.trees)
                 {
                     if (!treeArchive)
@@ -679,6 +682,8 @@ int main(int argc, char **argv)
         std::cerr << "renderer: " << error << "\n";
         return 1;
     }
+
+    renderer.setLights(worldLights);
 
     // Before the loop: setting this up records and submits a command buffer of
     // its own to calibrate the card's clock against ours, which cannot happen

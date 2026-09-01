@@ -375,6 +375,35 @@ bool loadWorldNode(const std::vector<std::uint8_t> &bytes, WorldLayer &layer, st
                 continue;
             }
 
+            if (className == "eCStaticPointLight_PS")
+            {
+                PointLight light;
+                light.position = placement.translation();
+                for (const Property &property : properties)
+                {
+                    Reader value(property.value);
+                    if (property.name == "Color" && property.value.size() >= 16)
+                    {
+                        // Four bytes of tag, then red, green and blue.
+                        value.skip(4);
+                        for (float &channel : light.colour)
+                            channel = value.f32();
+                    }
+                    else if (property.name == "Range" && property.value.size() >= 4)
+                        light.range = value.f32();
+                    else if (property.name == "CastShadows" && !property.value.empty())
+                        light.castShadows = property.value[0] != 0;
+                    else if (property.name == "Offset" && property.value.size() >= 12)
+                    {
+                        for (float &axis : light.position)
+                            axis += value.f32();
+                    }
+                }
+                if (light.range > 0.0f)
+                    layer.lights.push_back(light);
+                continue;
+            }
+
             if (className == "eCSpeedTree_PS")
             {
                 TreePlacement tree;

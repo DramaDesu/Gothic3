@@ -78,10 +78,23 @@ struct TreePlacement
     float boundsHeight() const { return boundsMax[1] - boundsMin[1]; }
 };
 
+// A static point light. The colour is three floats behind a four-byte tag, the
+// range is in world units - a thousand of them is ten metres - and the offset
+// moves the light off the entity's own origin, which is how a lamp hangs below
+// the bracket that carries it.
+struct PointLight
+{
+    std::array<float, 3> position{};
+    std::array<float, 3> colour{1.0f, 1.0f, 1.0f};
+    float range = 0.0f;
+    bool castShadows = false;
+};
+
 struct WorldLayer
 {
     std::vector<Placement> placements;
     std::vector<TreePlacement> trees;
+    std::vector<PointLight> lights;
     std::vector<VegetationMesh> vegetationMeshes;
     std::vector<VegetationInstance> vegetation;
 

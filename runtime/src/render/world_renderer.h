@@ -83,6 +83,12 @@ class WorldRenderer
 
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);
 
+    // The world's static point lights. There are 588 of them across the whole
+    // map, so the nearest handful to the camera are picked each frame and
+    // handed to the shader; a light beyond its own range lights nothing.
+    void setLights(const std::vector<genome::PointLight> &lights) { m_lights = lights; }
+    std::size_t litInstances() const { return m_litLights; }
+
     // Baking a billboard needs one batch at a time into its own viewport, with
     // every instance present rather than the visible subset - so these two step
     // around cull() instead of through it.
@@ -129,6 +135,17 @@ class WorldRenderer
         VkDescriptorSet descriptor = VK_NULL_HANDLE;
         bool alphaTested = false;
     };
+
+    // Up to this many lights reach the shader in one frame. The world has 588
+    // and their ranges are 3 to 40 metres, so nowhere sees many at once.
+    static constexpr std::uint32_t c_MaxFrameLights = 16;
+
+    std::vector<genome::PointLight> m_lights;
+    std::size_t m_litLights = 0;
+    Buffer m_lightBuffer[Device::c_FramesInFlight]{};
+    VkDescriptorSetLayout m_lightLayout = VK_NULL_HANDLE;
+    VkDescriptorSet m_lightSet[Device::c_FramesInFlight]{};
+    VkDescriptorPool m_lightPool = VK_NULL_HANDLE;
 
     GpuContext m_gpu = nullptr;
     VkPipelineLayout m_layout = VK_NULL_HANDLE;

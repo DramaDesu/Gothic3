@@ -8,6 +8,7 @@ layout(push_constant) uniform Push
 {
     mat4 viewProjection;
     vec4 lightDirection;
+    float alphaTested; // read by the fragment stage; declared here so the block matches
 }
 push;
 
@@ -22,6 +23,8 @@ layout(location = 6) in vec4 inRow3;
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec2 outTexCoord;
 layout(location = 2) out float outHeight;
+// The point lights need to know where the surface is, not only which way it faces.
+layout(location = 3) out vec3 outWorld;
 
 void main()
 {
@@ -30,5 +33,6 @@ void main()
     outNormal = inRow0.xyz * inNormal.x + inRow1.xyz * inNormal.y + inRow2.xyz * inNormal.z;
     outTexCoord = inTexCoord;
     outHeight = world.y;
+    outWorld = world;
     gl_Position = push.viewProjection * vec4(world, 1.0);
 }

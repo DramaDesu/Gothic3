@@ -325,13 +325,62 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
         return false;
     }
 
+    // Set 1: the lights near the camera this frame. One buffer per frame in
+    // flight, because the cull rewrites it while the previous frame may still be
+    // reading the last one.
+    VkDescriptorSetLayoutBinding lightBinding{};
+    lightBinding.binding = 0;
+    lightBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    lightBinding.descriptorCount = 1;
+    lightBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo lightLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    lightLayoutInfo.bindingCount = 1;
+    lightLayoutInfo.pBindings = &lightBinding;
+    vkCreateDescriptorSetLayout(device.device(), &lightLayoutInfo, nullptr, &m_lightLayout);
+
+    VkDescriptorPoolSize lightPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Device::c_FramesInFlight};
+    VkDescriptorPoolCreateInfo lightPoolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    lightPoolInfo.maxSets = Device::c_FramesInFlight;
+    lightPoolInfo.poolSizeCount = 1;
+    lightPoolInfo.pPoolSizes = &lightPoolSize;
+    VkDescriptorPool lightPool = VK_NULL_HANDLE;
+    vkCreateDescriptorPool(device.device(), &lightPoolInfo, nullptr, &lightPool);
+    m_lightPool = lightPool;
+
+    // Four floats of count and ambient, then position and range, then colour.
+    const VkDeviceSize lightBytes = 16 + VkDeviceSize(c_MaxFrameLights) * 32;
+    for (std::uint32_t frame = 0; frame < Device::c_FramesInFlight; ++frame)
+    {
+        m_lightBuffer[frame] = device.createBuffer(lightBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, error);
+        if (!m_lightBuffer[frame].handle)
+            return false;
+        std::memset(m_lightBuffer[frame].mapped, 0, std::size_t(lightBytes));
+
+        VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocate.descriptorPool = lightPool;
+        allocate.descriptorSetCount = 1;
+        allocate.pSetLayouts = &m_lightLayout;
+        vkAllocateDescriptorSets(device.device(), &allocate, &m_lightSet[frame]);
+
+        VkDescriptorBufferInfo bufferInfo{m_lightBuffer[frame].handle, 0, lightBytes};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = m_lightSet[frame];
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write.pBufferInfo = &bufferInfo;
+        vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
+    }
+
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.size = sizeof(PushConstants);
 
     VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    layoutInfo.setLayoutCount = 1;
-    layoutInfo.pSetLayouts = &m_descriptorLayout;
+    const VkDescriptorSetLayout setLayouts[2] = {m_descriptorLayout, m_lightLayout};
+    layoutInfo.setLayoutCount = 2;
+    layoutInfo.pSetLayouts = setLayouts;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushRange;
     vkCreatePipelineLayout(device.device(), &layoutInfo, nullptr, &m_layout);
@@ -665,6 +714,55 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
         }
     }
 
+    // The lights that reach this frame: nearest first, and only those whose own
+    // range still covers the camera's surroundings. 588 in the world, at most
+    // sixteen in a frame.
+    {
+        G3_ZONE("pick lights");
+        std::vector<std::pair<float, const genome::PointLight *>> near;
+        near.reserve(m_lights.size());
+        for (const genome::PointLight &light : m_lights)
+        {
+            const float dx = light.position[0] - eye[0];
+            const float dy = light.position[1] - eye[1];
+            const float dz = light.position[2] - eye[2];
+            const float distance = dx * dx + dy * dy + dz * dz;
+            // Beyond a few times its own range a light contributes nothing that
+            // survives rounding.
+            const float reach = light.range * 6.0f;
+            if (distance < reach * reach)
+                near.push_back({distance, &light});
+        }
+        std::sort(near.begin(), near.end(),
+                  [](const auto &a, const auto &b) { return a.first < b.first; });
+        if (near.size() > c_MaxFrameLights)
+            near.resize(c_MaxFrameLights);
+        m_litLights = near.size();
+
+        float *out = static_cast<float *>(m_lightBuffer[device.frameIndex()].mapped);
+        out[0] = float(near.size());
+        out[1] = out[2] = out[3] = 0.0f;
+        // The shader declares two arrays, not an array of pairs, and std140 lays
+        // them out one after the other: the count, then sixteen position-and-
+        // range vectors, then sixteen colours. Writing them interleaved made the
+        // shader read positions as colours, and a colour of 58700 turns the
+        // whole picture white.
+        float *positions = out + 4;
+        float *colours = out + 4 + 4 * c_MaxFrameLights;
+        for (std::size_t index = 0; index < near.size(); ++index)
+        {
+            const genome::PointLight &light = *near[index].second;
+            positions[index * 4 + 0] = light.position[0];
+            positions[index * 4 + 1] = light.position[1];
+            positions[index * 4 + 2] = light.position[2];
+            positions[index * 4 + 3] = light.range;
+            colours[index * 4 + 0] = light.colour[0];
+            colours[index * 4 + 1] = light.colour[1];
+            colours[index * 4 + 2] = light.colour[2];
+            colours[index * 4 + 3] = 0.0f;
+        }
+    }
+
     m_visibleInstances = m_visible.size();
 
     {
@@ -796,6 +894,11 @@ void WorldRenderer::drawBatch(Device &device, std::size_t batch, const std::arra
         return;
 
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+    // The pipeline uses set 1 whatever it is drawing, so the bake binds it too -
+    // with whatever lights the last cull left there, which do not reach a
+    // billboard drawn under an orthographic camera anyway.
+    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 1, 1,
+                            &m_lightSet[device.frameIndex()], 0, nullptr);
 
     PushConstants push{viewProjection, {0.0f, 1.0f, 0.0f, 0.0f}};
     vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
@@ -835,6 +938,9 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
     PushConstants push{viewProjection, light};
     vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
                        &push);
+
+    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 1, 1,
+                            &m_lightSet[device.frameIndex()], 0, nullptr);
 
     const VkDeviceSize offsets[2] = {0, 0};
     const VkBuffer buffers[2] = {m_vertexBuffer.handle, m_instanceBuffer[device.frameIndex()].handle};
@@ -876,6 +982,15 @@ void WorldRenderer::destroy(Device &device)
     for (Texture &texture : m_textures)
         destroyTexture(device, texture);
     destroyTexture(device, m_white);
+    for (std::uint32_t frame = 0; frame < Device::c_FramesInFlight; ++frame)
+        device.destroyBuffer(m_lightBuffer[frame]);
+    if (m_lightPool)
+        vkDestroyDescriptorPool(device.device(), m_lightPool, nullptr);
+    if (m_lightLayout)
+        vkDestroyDescriptorSetLayout(device.device(), m_lightLayout, nullptr);
+    m_lightPool = VK_NULL_HANDLE;
+    m_lightLayout = VK_NULL_HANDLE;
+
     if (m_descriptorPool)
         vkDestroyDescriptorPool(device.device(), m_descriptorPool, nullptr);
     if (m_descriptorLayout)
