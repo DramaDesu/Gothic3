@@ -28,7 +28,7 @@ class Device
   public:
     static constexpr std::uint32_t c_FramesInFlight = 2;
 
-    bool create(Window &window, std::string *error);
+    bool create(Window &window, std::string *error, bool validation = false);
     void destroy();
 
     // Returns false when the swapchain needs rebuilding; the caller should skip
@@ -62,6 +62,12 @@ class Device
     // is in use, so the runtime takes its own picture.
     bool capture(const char *path, std::string *error);
 
+    // One sampler per texture is one Vulkan object per texture, and the driver
+    // guarantees only 4000 of them - the game ships 1897 images and the number
+    // was climbing. Every texture wants the same filtering, so they share, and
+    // the device owns them rather than the textures.
+    VkSampler sampler(bool clampToEdge);
+
     VkCommandBuffer beginOneShot();
     void endOneShot(VkCommandBuffer command);
 
@@ -90,6 +96,9 @@ class Device
     VkDeviceMemory m_depthMemory = VK_NULL_HANDLE;
     VkImageView m_depthView = VK_NULL_HANDLE;
     VkFormat m_depthFormat = VK_FORMAT_D32_SFLOAT;
+    VkSampler m_repeatSampler = VK_NULL_HANDLE;
+    VkSampler m_clampSampler = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT m_messenger = VK_NULL_HANDLE;
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     VkCommandBuffer m_commandBuffers[c_FramesInFlight]{};

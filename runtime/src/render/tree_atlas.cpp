@@ -3,6 +3,7 @@
 #include "world_renderer.h"
 
 #include <cmath>
+#include <cstring>
 
 namespace render
 {
@@ -106,9 +107,13 @@ bool bakeTreeAtlas(Device &device, WorldRenderer &source, const std::vector<std:
     out.size = size;
     out.cells.clear();
 
-    const VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
+    // The pipeline that draws into this was built for the swapchain's format,
+    // and a mismatch here is undefined behaviour that happens to work - which is
+    // exactly what the validation layers said when they were first switched on.
+    const VkFormat format = device.colorFormat();
     if (!createImage(device, size, format,
-                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                         VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                      VK_IMAGE_ASPECT_COLOR_BIT, out.texture.image, out.texture.memory, out.texture.view, error))
         return false;
 
@@ -119,17 +124,9 @@ bool bakeTreeAtlas(Device &device, WorldRenderer &source, const std::vector<std:
                      VK_IMAGE_ASPECT_DEPTH_BIT, depthImage, depthMemory, depthView, error))
         return false;
 
-    VkSamplerCreateInfo samplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    // A cell must not bleed into its neighbour, so this one clamps where the
-    // world textures wrap.
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.maxAnisotropy = 1.0f;
-    vkCreateSampler(device.device(), &samplerInfo, nullptr, &out.texture.sampler);
+    // Clamped rather than wrapped: a cell must not bleed into its neighbour.
+    // The device owns it, shared with anything else that clamps.
+    out.texture.sampler = device.sampler(true);
 
     source.prepareAll(device);
 
@@ -234,16 +231,9 @@ bool readTreeAtlas(Device &device, const TreeAtlas &atlas, genome::Image &out, s
     out.format = genome::ImageFormat::A8R8G8B8;
     out.data.resize(std::size_t(bytes));
 
-    // The image is RGBA and the loader's A8R8G8B8 is stored blue first, so the
-    // two colour ends swap on the way through.
-    const std::uint8_t *source = static_cast<const std::uint8_t *>(staging.mapped);
-    for (std::size_t at = 0; at < out.data.size(); at += 4)
-    {
-        out.data[at + 0] = source[at + 2];
-        out.data[at + 1] = source[at + 1];
-        out.data[at + 2] = source[at + 0];
-        out.data[at + 3] = source[at + 3];
-    }
+    // The swapchain format is blue first, which is the order the loader's
+    // A8R8G8B8 already stores, so this is a straight copy.
+    std::memcpy(out.data.data(), staging.mapped, out.data.size());
     out.levels.push_back({atlas.size, atlas.size, 0, std::uint32_t(bytes)});
     out.faceStride = std::uint32_t(bytes);
 

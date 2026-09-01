@@ -110,25 +110,18 @@ bool createTexture(Device &device, const genome::Image &source, bool srgb, Textu
     viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipCount, 0, 1};
     vkCreateImageView(device.device(), &viewInfo, nullptr, &texture.view);
 
-    // The game's UVs run far outside [0,1], so wrapping is not optional.
-    VkSamplerCreateInfo samplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.maxAnisotropy = 1.0f;
-    samplerInfo.maxLod = static_cast<float>(mipCount);
-    vkCreateSampler(device.device(), &samplerInfo, nullptr, &texture.sampler);
+    // The game's UVs run far outside [0,1], so wrapping is not optional. The
+    // sampler belongs to the device and is shared: it is the same for every
+    // texture, and there is a hard limit on how many may exist.
+    texture.sampler = device.sampler(false);
 
     return true;
 }
 
 void destroyTexture(Device &device, Texture &texture)
 {
-    if (texture.sampler)
-        vkDestroySampler(device.device(), texture.sampler, nullptr);
+    // The sampler is the device's, shared by every texture, so it is not
+    // destroyed here.
     if (texture.view)
         vkDestroyImageView(device.device(), texture.view, nullptr);
     if (texture.image)

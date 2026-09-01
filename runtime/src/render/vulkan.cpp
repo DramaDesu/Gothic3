@@ -26,23 +26,74 @@ bool check(VkResult result, std::string *error, const char *what)
     return false;
 }
 
+VKAPI_ATTR VkBool32 VKAPI_CALL reportValidation(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                                                VkDebugUtilsMessageTypeFlagsEXT,
+                                                const VkDebugUtilsMessengerCallbackDataEXT *data, void *)
+{
+    if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT && data && data->pMessage)
+        std::fprintf(stderr, "vulkan: %s\n", data->pMessage);
+    return VK_FALSE;
+}
+
+bool validationAvailable()
+{
+    std::uint32_t count = 0;
+    vkEnumerateInstanceLayerProperties(&count, nullptr);
+    std::vector<VkLayerProperties> layers(count);
+    vkEnumerateInstanceLayerProperties(&count, layers.data());
+    for (const VkLayerProperties &layer : layers)
+        if (std::strcmp(layer.layerName, "VK_LAYER_KHRONOS_validation") == 0)
+            return true;
+    return false;
+}
+
 } // namespace
 
-bool Device::create(Window &window, std::string *error)
+bool Device::create(Window &window, std::string *error, bool validation)
 {
     m_window = &window;
+
+    // Off unless asked for: the layers cost real time, and a machine without the
+    // SDK installed does not have them at all. With them, a mistake in this code
+    // says so instead of being drawn wrong or working by luck on one driver.
+    const bool wantValidation = validation && validationAvailable();
+    if (validation && !wantValidation)
+        std::fprintf(stderr, "vulkan: validation asked for but the layer is not installed\n");
 
     VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     application.pApplicationName = "Genome runtime";
     application.apiVersion = VK_API_VERSION_1_3;
 
-    const char *instanceExtensions[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+    const char *instanceExtensions[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+                                        VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
+    const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
+
     VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     instanceInfo.pApplicationInfo = &application;
-    instanceInfo.enabledExtensionCount = 2;
+    instanceInfo.enabledExtensionCount = wantValidation ? 3 : 2;
     instanceInfo.ppEnabledExtensionNames = instanceExtensions;
+    instanceInfo.enabledLayerCount = wantValidation ? 1 : 0;
+    instanceInfo.ppEnabledLayerNames = layers;
     if (!check(vkCreateInstance(&instanceInfo, nullptr, &m_instance), error, "vkCreateInstance"))
         return false;
+
+    if (wantValidation)
+    {
+        auto createMessenger = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(m_instance, "vkCreateDebugUtilsMessengerEXT"));
+        if (createMessenger)
+        {
+            VkDebugUtilsMessengerCreateInfoEXT messengerInfo{
+                VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+            messengerInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                            VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+            messengerInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                                        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+            messengerInfo.pfnUserCallback = reportValidation;
+            createMessenger(m_instance, &messengerInfo, nullptr, &m_messenger);
+        }
+    }
 
     VkWin32SurfaceCreateInfoKHR surfaceInfo{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
     surfaceInfo.hinstance = reinterpret_cast<HINSTANCE>(window.instance());
@@ -262,11 +313,40 @@ bool Device::recreateSwapchain()
     return createSwapchain(nullptr) && createDepth(nullptr);
 }
 
+VkSampler Device::sampler(bool clampToEdge)
+{
+    VkSampler &cached = clampToEdge ? m_clampSampler : m_repeatSampler;
+    if (cached != VK_NULL_HANDLE)
+        return cached;
+
+    const VkSamplerAddressMode mode =
+        clampToEdge ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT;
+
+    VkSamplerCreateInfo info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    info.magFilter = VK_FILTER_LINEAR;
+    info.minFilter = VK_FILTER_LINEAR;
+    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    info.addressModeU = mode;
+    info.addressModeV = mode;
+    info.addressModeW = mode;
+    info.maxAnisotropy = 1.0f;
+    // Whatever the image has: clamping this per texture is what made a sampler
+    // per texture look necessary in the first place.
+    info.maxLod = VK_LOD_CLAMP_NONE;
+    vkCreateSampler(m_device, &info, nullptr, &cached);
+    return cached;
+}
+
 void Device::destroy()
 {
     if (!m_device)
         return;
     vkDeviceWaitIdle(m_device);
+    if (m_repeatSampler)
+        vkDestroySampler(m_device, m_repeatSampler, nullptr);
+    if (m_clampSampler)
+        vkDestroySampler(m_device, m_clampSampler, nullptr);
+    m_repeatSampler = m_clampSampler = VK_NULL_HANDLE;
     destroySwapchain();
     for (std::uint32_t index = 0; index < c_FramesInFlight; ++index)
     {
@@ -276,6 +356,13 @@ void Device::destroy()
     }
     vkDestroyCommandPool(m_device, m_commandPool, nullptr);
     vkDestroyDevice(m_device, nullptr);
+    if (m_messenger)
+    {
+        auto destroyMessenger = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(m_instance, "vkDestroyDebugUtilsMessengerEXT"));
+        if (destroyMessenger)
+            destroyMessenger(m_instance, m_messenger, nullptr);
+    }
     vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
     vkDestroyInstance(m_instance, nullptr);
     m_device = VK_NULL_HANDLE;

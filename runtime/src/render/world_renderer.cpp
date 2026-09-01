@@ -454,21 +454,6 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
 
     std::array<std::array<float, 4>, 6> planes{plane(0), plane(1), plane(2), plane(3), plane(4), plane(5)};
 
-    m_occluded = 0;
-    if (useOcclusion)
-    {
-        G3_ZONE("occluders");
-
-        m_occlusion.clear();
-        for (const Occluder &occluder : m_occluders)
-            m_occlusion.addOccluder(m_batches[occluder.batch].bounds[occluder.instance], viewProjection);
-    }
-
-    m_visible.clear();
-    m_tooSmall = 0;
-    m_submittedTriangles = 0;
-    m_submittedDraws = 0;
-    m_testedInstances = 0;
     // Testing what a batch covers before testing its instances. Most of the map
     // is grass and each patch is one batch of its own, local to a few metres, so
     // a single test throws away every instance in it.
@@ -513,6 +498,29 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                                       (centre[2] - eye[2]) * (centre[2] - eye[2]);
         return distanceSquared > radiusSquared && radiusSquared < sizeRatioSquared * distanceSquared;
     };
+
+    m_occluded = 0;
+    if (useOcclusion)
+    {
+        G3_ZONE("occluders");
+
+        m_occlusion.clear();
+        for (const Occluder &occluder : m_occluders)
+        {
+            // An occluder behind the camera hides nothing, and rasterising it
+            // costs the same as one that does.
+            const std::array<float, 6> &box = m_batches[occluder.batch].bounds[occluder.instance];
+            if (outsideFrustum(box))
+                continue;
+            m_occlusion.addOccluder(box, viewProjection);
+        }
+    }
+
+    m_visible.clear();
+    m_tooSmall = 0;
+    m_submittedTriangles = 0;
+    m_submittedDraws = 0;
+    m_testedInstances = 0;
 
     // Reject whole cells first. From an overview of the map every batch is
     // inside the frustum, so testing them one at a time rejects nothing; a cell
@@ -805,8 +813,8 @@ void WorldRenderer::drawBatch(Device &device, std::size_t batch, const std::arra
             continue;
 
         const float alphaTest = range.alphaTested ? 1.0f : 0.0f;
-        vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_FRAGMENT_BIT, offsetof(PushConstants, alphaTested),
-                           sizeof(alphaTest), &alphaTest);
+        vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           offsetof(PushConstants, alphaTested), sizeof(alphaTest), &alphaTest);
         if (range.descriptor != VK_NULL_HANDLE)
             vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_layout, 0, 1, &range.descriptor, 0,
                                     nullptr);
@@ -845,7 +853,9 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
         const float wanted = range.alphaTested ? 1.0f : 0.0f;
         if (wanted != boundAlphaTest)
         {
-            vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+            // The declared range covers both stages, so a push into it has to
+            // name both - even though only the fragment shader reads this byte.
+            vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                offsetof(PushConstants, alphaTested), sizeof(wanted), &wanted);
             boundAlphaTest = wanted;
         }

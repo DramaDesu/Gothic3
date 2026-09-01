@@ -174,6 +174,7 @@ int main(int argc, char **argv)
     int benchFrames = 0;
     int cameraArgument = 0;
     int treeArgument = 0;
+    bool validation = false;
     // How many different trees are grown per definition before they repeat.
     constexpr std::uint32_t c_TreeVariants = 3;
     // Where a tree drops to its thinned form, in world units - a metre is a
@@ -197,6 +198,8 @@ int main(int argc, char **argv)
             cameraArgument = index + 1;
         if (std::string(argv[index]) == "--tree" && index + 1 < argc)
             treeArgument = index + 1;
+        if (std::string(argv[index]) == "--validate")
+            validation = true;
     }
 
     const bool showOneTree = treeArgument != 0 && treeArgument + 1 < argc &&
@@ -578,7 +581,7 @@ int main(int argc, char **argv)
 
     render::Window window("Genome runtime - world", 1280, 720);
     render::Device device;
-    if (!device.create(window, &error))
+    if (!device.create(window, &error, validation))
     {
         std::cerr << "vulkan: " << error << "\n";
         return 1;
@@ -904,6 +907,7 @@ int main(int argc, char **argv)
     vkDeviceWaitIdle(device.device());
     renderer.stopProfiling();
     renderer.destroy(device);
+    render::destroyTreeAtlas(device, treeAtlas);
     device.destroy();
     return 0;
 }
