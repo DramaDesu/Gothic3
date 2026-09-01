@@ -87,6 +87,24 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
         Batch kept;
         kept.transforms = batch.transforms;
         kept.bounds = batch.bounds;
+
+        for (const std::array<float, 6> &box : kept.bounds)
+        {
+            if (!kept.hasExtent)
+            {
+                kept.extent = box;
+                kept.hasExtent = true;
+                continue;
+            }
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                kept.extent[axis] = std::min(kept.extent[axis], box[axis]);
+                kept.extent[axis + 3] = std::max(kept.extent[axis + 3], box[axis + 3]);
+            }
+        }
+        // Only useful when every instance has bounds; otherwise some are drawn
+        // unconditionally and the batch cannot be rejected as a whole.
+        kept.hasExtent = kept.hasExtent && kept.bounds.size() == kept.transforms.size();
         kept.occludes = batch.occludes;
 
         std::size_t elementIndex = 0;
@@ -416,53 +434,67 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
 
     m_visible.clear();
     m_tooSmall = 0;
+    // Testing what a batch covers before testing its instances. Most of the map
+    // is grass and each patch is one batch of its own, local to a few metres, so
+    // a single test throws away every instance in it.
+    const auto outsideFrustum = [&planes](const std::array<float, 6> &box) {
+        for (const std::array<float, 4> &p : planes)
+        {
+            const float x = p[0] >= 0.0f ? box[3] : box[0];
+            const float y = p[1] >= 0.0f ? box[4] : box[1];
+            const float z = p[2] >= 0.0f ? box[5] : box[2];
+            if (p[0] * x + p[1] * y + p[2] * z + p[3] < 0.0f)
+                return true;
+        }
+        return false;
+    };
+
+    // Comparing squares: the test asks whether radius / distance * focal length
+    // falls below a pixel threshold, and squaring both sides answers the same
+    // question without two square roots per instance. This runs over every
+    // instance that survives the frustum, so the roots were worth removing.
+    const float sizeRatio = minimumPixels / std::max(pixelsPerRadian, 1e-6f);
+    const float sizeRatioSquared = sizeRatio * sizeRatio;
+    const auto tooSmallOnScreen = [&eye, minimumPixels, sizeRatioSquared](const std::array<float, 6> &box) {
+        if (minimumPixels <= 0.0f)
+            return false;
+        const float radiusSquared = 0.25f * ((box[3] - box[0]) * (box[3] - box[0]) +
+                                             (box[4] - box[1]) * (box[4] - box[1]) +
+                                             (box[5] - box[2]) * (box[5] - box[2]));
+        const float centre[3] = {0.5f * (box[0] + box[3]), 0.5f * (box[1] + box[4]), 0.5f * (box[2] + box[5])};
+        const float distanceSquared = (centre[0] - eye[0]) * (centre[0] - eye[0]) +
+                                      (centre[1] - eye[1]) * (centre[1] - eye[1]) +
+                                      (centre[2] - eye[2]) * (centre[2] - eye[2]);
+        return distanceSquared > radiusSquared && radiusSquared < sizeRatioSquared * distanceSquared;
+    };
+
     for (Batch &batch : m_batches)
     {
         const std::uint32_t firstInstance = static_cast<std::uint32_t>(m_visible.size());
         std::uint32_t visible = 0;
 
+        if (batch.hasExtent && (outsideFrustum(batch.extent) || tooSmallOnScreen(batch.extent)))
+        {
+            // Rejected whole. Its instances still have to be accounted for, or
+            // the counts stop adding up to what was loaded.
+            m_tooSmall += batch.transforms.size();
+            for (std::size_t range : batch.ranges)
+            {
+                m_ranges[range].firstInstance = firstInstance;
+                m_ranges[range].instanceCount = 0;
+            }
+            continue;
+        }
+
         for (std::size_t instance = 0; instance < batch.transforms.size(); ++instance)
         {
-            bool inside = true;
-            if (instance < batch.bounds.size())
-            {
-                const std::array<float, 6> &box = batch.bounds[instance];
-                for (const std::array<float, 4> &p : planes)
-                {
-                    // The corner furthest along the plane normal decides: if even
-                    // that one is behind, the whole box is.
-                    const float x = p[0] >= 0.0f ? box[3] : box[0];
-                    const float y = p[1] >= 0.0f ? box[4] : box[1];
-                    const float z = p[2] >= 0.0f ? box[5] : box[2];
-                    if (p[0] * x + p[1] * y + p[2] * z + p[3] < 0.0f)
-                    {
-                        inside = false;
-                        break;
-                    }
-                }
-            }
-            if (!inside)
+            if (instance < batch.bounds.size() && outsideFrustum(batch.bounds[instance]))
                 continue;
 
-            if (minimumPixels > 0.0f && instance < batch.bounds.size())
+            if (instance < batch.bounds.size() && tooSmallOnScreen(batch.bounds[instance]))
             {
-                // Screen size of the bounding sphere: radius over distance is
-                // the angle it subtends, and that times the focal length in
-                // pixels is how big it lands.
-                const std::array<float, 6> &box = batch.bounds[instance];
-                const float radius = 0.5f * std::sqrt((box[3] - box[0]) * (box[3] - box[0]) +
-                                                      (box[4] - box[1]) * (box[4] - box[1]) +
-                                                      (box[5] - box[2]) * (box[5] - box[2]));
-                const float centre[3] = {0.5f * (box[0] + box[3]), 0.5f * (box[1] + box[4]),
-                                         0.5f * (box[2] + box[5])};
-                const float distance = std::sqrt((centre[0] - eye[0]) * (centre[0] - eye[0]) +
-                                                 (centre[1] - eye[1]) * (centre[1] - eye[1]) +
-                                                 (centre[2] - eye[2]) * (centre[2] - eye[2]));
-                if (distance > radius && radius / distance * pixelsPerRadian < minimumPixels)
-                {
-                    ++m_tooSmall;
-                    continue;
-                }
+                ++m_tooSmall;
+                continue;
             }
 
             if (useOcclusion && instance < batch.bounds.size())

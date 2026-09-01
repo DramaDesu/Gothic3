@@ -109,6 +109,13 @@ class WorldRenderer
         std::vector<std::array<float, 6>> bounds;
         std::vector<std::size_t> ranges; // indices into m_ranges
         bool occludes = true;
+
+        // Everything this batch's instances cover. A grass patch or a tree
+        // clump is local, so one test against this rejects all of its instances
+        // at once; a mesh scattered across the map spans everything and falls
+        // through to the per-instance tests, which is the honest outcome.
+        std::array<float, 6> extent{};
+        bool hasExtent = false;
     };
     std::vector<Batch> m_batches;
     std::vector<genome::WorldMatrix> m_visible; // scratch, refilled each frame
