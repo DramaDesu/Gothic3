@@ -31,6 +31,10 @@ layout(location = 3) in vec3 inWorld;
 layout(location = 4) in vec3 inBaked;
 layout(location = 5) in float inSky;
 layout(location = 6) in vec3 inIncident;
+layout(location = 7) in vec2 inPatch;
+
+// Every baked patch in the scene, packed into one image.
+layout(set = 1, binding = 4) uniform sampler2D lightmapAtlas;
 
 layout(location = 0) out vec4 outColor;
 
@@ -59,6 +63,12 @@ void main()
     // rest of the room.
     float facing = dot(inIncident, inIncident) > 0.01 ? max(dot(normal, normalize(inIncident)), 0.0) : 1.0;
     lit += sampled.rgb * inBaked * (0.5 + 0.5 * facing);
+
+    // The patch of baked light this surface carries, where it has one. This is
+    // where the light actually is: the per-vertex colour is nearly empty and the
+    // vertices mostly hold occlusion.
+    if (inPatch.x >= 0.0)
+        lit += sampled.rgb * texture(lightmapAtlas, inPatch).rgb;
 
     int used = int(lights.count.x);
     for (int index = 0; index < used; ++index)

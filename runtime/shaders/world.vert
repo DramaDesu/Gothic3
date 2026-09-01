@@ -36,6 +36,14 @@ layout(set = 1, binding = 2) readonly buffer Incident
 }
 incident;
 
+// Where each vertex samples the baked patch it belongs to, two floats, in step
+// with the colours. A negative u means it belongs to none.
+layout(set = 1, binding = 3) readonly buffer LightmapCoords
+{
+    float values[];
+}
+coords;
+
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec2 outTexCoord;
 layout(location = 2) out float outHeight;
@@ -45,6 +53,7 @@ layout(location = 3) out vec3 outWorld;
 layout(location = 4) out vec3 outBaked;
 layout(location = 5) out float outSky;
 layout(location = 6) out vec3 outIncident;
+layout(location = 7) out vec2 outPatch;
 
 void main()
 {
@@ -58,6 +67,7 @@ void main()
     outBaked = vec3(0.0);
     outSky = 1.0;
     outIncident = vec3(0.0);
+    outPatch = vec2(-1.0);
     if (inRow0.w >= 0.0)
     {
         // The low three bytes are the light that reached the vertex; the top
@@ -68,6 +78,9 @@ void main()
 
         const uint at = (uint(inRow0.w) + uint(gl_VertexIndex)) * 3u;
         outIncident = vec3(incident.values[at], incident.values[at + 1u], incident.values[at + 2u]);
+
+        const uint patchAt = (uint(inRow0.w) + uint(gl_VertexIndex)) * 2u;
+        outPatch = vec2(coords.values[patchAt], coords.values[patchAt + 1u]);
     }
     gl_Position = push.viewProjection * vec4(world, 1.0);
 }

@@ -93,9 +93,9 @@ bool readMeshElement(Reader &reader, const StringTable &strings, MeshElement &el
         }
     }
 
-    // Trailing per-element blocks: lightmap groups and a spatial hierarchy. We
-    // skip them, but they have to be parsed exactly or the next element starts
-    // at the wrong offset.
+    // Trailing per-element blocks: the lightmap charts, then a spatial
+    // hierarchy which is skipped. All of it has to be parsed exactly or the next
+    // element starts at the wrong offset.
     if (version >= 3)
     {
         for (int block = 0; block < 2; ++block)
@@ -109,15 +109,31 @@ bool readMeshElement(Reader &reader, const StringTable &strings, MeshElement &el
     {
         reader.skip(1);
         const std::uint32_t groupCount = reader.u32();
+        element.charts.reserve(groupCount);
         for (std::uint32_t group = 0; group < groupCount && reader.ok(); ++group)
         {
+            LightmapChart chart;
+
             reader.skip(1);
-            const std::uint32_t first = reader.u32();
-            reader.skip(static_cast<std::size_t>(first) * 4);
+            const std::uint32_t vertexCount = reader.u32();
+            if (!reader.ok() || vertexCount > reader.remaining() / 4)
+                return false;
+            chart.vertices.resize(vertexCount);
+            reader.array(chart.vertices.data(), vertexCount);
+
             reader.skip(1);
-            const std::uint32_t second = reader.u32();
-            reader.skip(static_cast<std::size_t>(second) * 4);
-            reader.skip(12 + 64 + 8); // vector, matrix, vector2
+            const std::uint32_t triangleCount = reader.u32();
+            if (!reader.ok() || triangleCount > reader.remaining() / 4)
+                return false;
+            chart.triangles.resize(triangleCount);
+            reader.array(chart.triangles.data(), triangleCount);
+
+            // The projection axis and the matrix that produced the coordinates
+            // are not needed: the coordinates themselves are in the vertices.
+            reader.skip(12 + 64);
+            reader.array(chart.extent.data(), 2);
+
+            element.charts.push_back(std::move(chart));
         }
     }
     if (version >= 4)

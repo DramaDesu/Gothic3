@@ -30,6 +30,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -101,6 +102,61 @@ std::array<float, 16> multiply(const std::array<float, 16> &a, const std::array<
     return out;
 }
 
+// Somewhere to put the baked patches. They are small - the whole game's come to
+// about six and a half million texels - so one image holds a sector's easily,
+// and a shelf packer is enough for rectangles that arrive in no particular size.
+struct PatchAtlas
+{
+    static constexpr std::uint32_t c_Size = 2048;
+
+    genome::Image image;
+    std::uint32_t shelfY = 0, shelfHeight = 0, penX = 0;
+    std::size_t packed = 0, refused = 0;
+
+    PatchAtlas()
+    {
+        image.width = c_Size;
+        image.height = c_Size;
+        image.faceCount = 1;
+        image.format = genome::ImageFormat::A8R8G8B8;
+        image.data.assign(std::size_t(c_Size) * c_Size * 4, 0);
+        image.levels.push_back({c_Size, c_Size, 0, std::uint32_t(image.data.size())});
+        image.faceStride = std::uint32_t(image.data.size());
+    }
+
+    // Returns false when the atlas is full; the caller then leaves that patch
+    // unlit rather than drawing someone else's light.
+    bool place(const genome::LightmapBitmap &bitmap, std::uint32_t &outX, std::uint32_t &outY)
+    {
+        const std::uint32_t width = std::uint32_t(bitmap.width), height = std::uint32_t(bitmap.height);
+        if (width == 0 || height == 0 || width > c_Size || height > c_Size)
+            return false;
+
+        if (penX + width > c_Size)
+        {
+            penX = 0;
+            shelfY += shelfHeight;
+            shelfHeight = 0;
+        }
+        if (shelfY + height > c_Size)
+        {
+            ++refused;
+            return false;
+        }
+
+        outX = penX;
+        outY = shelfY;
+        for (std::uint32_t row = 0; row < height; ++row)
+            std::memcpy(&image.data[(std::size_t(outY + row) * c_Size + outX) * 4],
+                        &bitmap.data[std::size_t(row) * width * 4], std::size_t(width) * 4);
+
+        penX += width;
+        shelfHeight = std::max(shelfHeight, height);
+        ++packed;
+        return true;
+    }
+};
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -147,6 +203,9 @@ int main(int argc, char **argv)
     // survives sharing one vertex buffer between instances.
     std::vector<std::uint32_t> lightmapColours;
     std::vector<float> lightmapIncident;
+    std::vector<float> lightmapCoords;
+    PatchAtlas patchAtlas;
+    std::size_t patchedVertices = 0, sizeMatches = 0, sizeMismatches = 0;
     std::unique_ptr<genome::PakArchive> lightmapArchive;
     std::size_t lightmapsFound = 0, lightmapsMissing = 0;
     static const genome::WorldMatrix c_Identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -311,10 +370,71 @@ int main(int argc, char **argv)
                             !map.elements.front().colours.empty())
                         {
                             lightmapBase = std::int32_t(lightmapColours.size());
+                            const std::size_t coordBase = lightmapColours.size();
+                            const genome::Mesh *lit = nullptr;
+                            {
+                                const auto found = batchOf.find(placement.meshName);
+                                if (found != batchOf.end() && found->second != std::size_t(-1))
+                                    lit = batches[found->second].mesh;
+                            }
+
+                            std::size_t elementIndex = 0, vertexRunning = 0;
                             for (const genome::LightmapElement &element : map.elements)
                             {
                                 lightmapColours.insert(lightmapColours.end(), element.colours.begin(),
                                                        element.colours.end());
+                                lightmapCoords.resize(lightmapColours.size() * 2, -1.0f);
+
+                                // The charts live in the mesh and the patches in
+                                // the lightmap, one for one. A chart's extent is
+                                // in world units and so are its coordinates, so
+                                // the texel is 1 + uv * scaling - the one being
+                                // the gutter the bake leaves on every side.
+                                const genome::MeshElement *meshElement =
+                                    lit && elementIndex < lit->elements.size() ? &lit->elements[elementIndex]
+                                                                              : nullptr;
+                                if (meshElement && !meshElement->lightmapUV.empty())
+                                {
+                                    for (std::size_t chart = 0;
+                                         chart < meshElement->charts.size() && chart < element.bitmaps.size();
+                                         ++chart)
+                                    {
+                                        const genome::LightmapBitmap &bitmap = element.bitmaps[chart];
+                                        if (bitmap.data.empty())
+                                            continue;
+
+                                        const std::array<float, 2> &extent = meshElement->charts[chart].extent;
+                                        const int wantedWidth =
+                                            int(std::ceil(extent[0] * map.scaling)) + 2;
+                                        const int wantedHeight =
+                                            int(std::ceil(extent[1] * map.scaling)) + 2;
+                                        if (wantedWidth == bitmap.width && wantedHeight == bitmap.height)
+                                            ++sizeMatches;
+                                        else
+                                            ++sizeMismatches;
+
+                                        std::uint32_t atX = 0, atY = 0;
+                                        if (!patchAtlas.place(bitmap, atX, atY))
+                                            continue;
+
+                                        for (std::uint32_t vertex : meshElement->charts[chart].vertices)
+                                        {
+                                            if (vertex >= meshElement->lightmapUV.size())
+                                                continue;
+                                            const std::array<float, 2> &uv = meshElement->lightmapUV[vertex];
+                                            const std::size_t at = (coordBase + vertexRunning + vertex) * 2;
+                                            if (at + 1 >= lightmapCoords.size())
+                                                continue;
+                                            lightmapCoords[at] =
+                                                (float(atX) + 1.0f + uv[0] * map.scaling) / float(PatchAtlas::c_Size);
+                                            lightmapCoords[at + 1] =
+                                                (float(atY) + 1.0f + uv[1] * map.scaling) / float(PatchAtlas::c_Size);
+                                            ++patchedVertices;
+                                        }
+                                    }
+                                }
+                                vertexRunning += element.colours.size();
+                                ++elementIndex;
                                 // The two run in step, so a missing direction
                                 // array still has to occupy its place.
                                 lightmapIncident.resize(lightmapColours.size() * 3, 0.0f);
@@ -738,6 +858,28 @@ int main(int argc, char **argv)
     renderer.setLights(worldLights);
     renderer.setLightmaps(std::move(lightmapColours));
     renderer.setLightmapDirections(std::move(lightmapIncident));
+    std::printf("%zu baked patches packed, %zu refused, %zu vertices given one; sizes match the charts %zu to %zu\n",
+                patchAtlas.packed, patchAtlas.refused, patchedVertices, sizeMatches, sizeMismatches);
+    lightmapCoords.resize(std::max<std::size_t>(lightmapCoords.size(), 2), -1.0f);
+    renderer.setLightmapCoords(std::move(lightmapCoords));
+    renderer.setLightmapAtlas(&patchAtlas.image);
+    if (const char *dump = std::getenv("G3_DUMP_ATLAS"))
+    {
+        // The packed patches, so the packing can be looked at rather than
+        // trusted.
+        if (std::FILE *out = std::fopen(dump, "wb"))
+        {
+            std::fprintf(out, "P6\n%u %u\n255\n", patchAtlas.image.width, patchAtlas.image.height);
+            for (std::size_t at = 0; at < patchAtlas.image.data.size(); at += 4)
+            {
+                std::fputc(patchAtlas.image.data[at + 2], out);
+                std::fputc(patchAtlas.image.data[at + 1], out);
+                std::fputc(patchAtlas.image.data[at + 0], out);
+            }
+            std::fclose(out);
+            std::printf("wrote the patch atlas to %s\n", dump);
+        }
+    }
 
     // Before the loop: setting this up records and submits a command buffer of
     // its own to calibrate the card's clock against ours, which cannot happen

@@ -101,6 +101,12 @@ class WorldRenderer
     // same order as the colours. Without it the bake can only brighten; with it
     // a surface answers to where the light was.
     void setLightmapDirections(std::vector<float> incident) { m_lightmapIncident = std::move(incident); }
+
+    // Where each vertex of each instance samples the baked light: two floats
+    // into the atlas below, in step with the colours. A negative u means the
+    // vertex has no baked patch.
+    void setLightmapCoords(std::vector<float> coords) { m_lightmapCoords = std::move(coords); }
+    void setLightmapAtlas(const genome::Image *atlas) { m_lightmapAtlas = atlas; }
     std::size_t litInstances() const { return m_litLights; }
 
     // Baking a billboard needs one batch at a time into its own viewport, with
@@ -157,6 +163,10 @@ class WorldRenderer
     std::vector<genome::PointLight> m_lights;
     std::vector<std::uint32_t> m_lightmapColours;
     std::vector<float> m_lightmapIncident;
+    std::vector<float> m_lightmapCoords;
+    const genome::Image *m_lightmapAtlas = nullptr;
+    Texture m_lightmapTexture{};
+    Buffer m_coordBuffer{};
     Buffer m_lightmapBuffer{};
     Buffer m_incidentBuffer{};
     std::size_t m_litLights = 0;

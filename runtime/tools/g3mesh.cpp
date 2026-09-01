@@ -51,6 +51,7 @@ int main(int argc, char **argv)
 
     std::map<std::uint32_t, std::size_t> streamCensus;
     std::size_t lightSamples = 0, lightFull = 0, lightDark = 0, lightmapSamples = 0;
+    std::size_t charts = 0, chartVertices = 0, elementsWithCharts = 0;
     float lightmapMinU = 1e9f, lightmapMaxU = -1e9f, lightmapMinV = 1e9f, lightmapMaxV = -1e9f;
     double lightTotal = 0.0;
     std::size_t parsed = 0, failed = 0, vertices = 0, triangles = 0;
@@ -74,6 +75,11 @@ int main(int argc, char **argv)
         {
             for (std::uint32_t stream : element.streams)
                 ++streamCensus[stream];
+
+            charts += element.charts.size();
+            for (const genome::LightmapChart &chart : element.charts)
+                chartVertices += chart.vertices.size();
+            elementsWithCharts += element.charts.empty() ? 0 : 1;
 
             for (const std::array<float, 2> &uv : element.lightmapUV)
             {
@@ -105,6 +111,9 @@ int main(int argc, char **argv)
     for (const auto &[stream, count] : streamCensus)
         std::printf("%u:%zu ", stream, count);
     std::printf("\n");
+    if (charts != 0)
+        std::printf("%zu lightmap charts on %zu elements, covering %zu vertices\n", charts, elementsWithCharts,
+                    chartVertices);
     if (lightmapSamples != 0)
         std::printf("lightmap uv over %zu vertices: u %.3f..%.3f, v %.3f..%.3f\n", lightmapSamples, lightmapMinU,
                     lightmapMaxU, lightmapMinV, lightmapMaxV);

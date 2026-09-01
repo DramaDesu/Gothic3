@@ -28,6 +28,15 @@ enum class StreamType : std::uint32_t
     LightmapUV = 73,
 };
 
+// One chart of an element's surface, and the piece of the baked lightmap that
+// covers it.
+struct LightmapChart
+{
+    std::vector<std::uint32_t> vertices;   // element-local
+    std::vector<std::uint32_t> triangles;  // element-local
+    std::array<float, 2> extent{};         // in world units, which is what the coordinates measure
+};
+
 struct MeshElement
 {
     std::string materialName;
@@ -46,8 +55,16 @@ struct MeshElement
     std::vector<std::uint32_t> vertexLight;
 
     // Stream 73, on 2263 elements: the coordinates that address the baked
-    // lightmap bitmaps rather than the diffuse texture.
+    // lightmap bitmaps rather than the diffuse texture. They are not fractions
+    // of a texture but positions in world units inside a chart, running from
+    // zero to that chart's extent.
     std::vector<std::array<float, 2>> lightmapUV;
+
+    // The charts the element's surface is cut into for baking. Chart i is
+    // bitmap i of the lightmap's element i, one for one, and the bitmap is
+    // ceil(extent * scaling) + 2 texels - the two being a gutter, one texel each
+    // side. A vertex belongs to exactly one chart and no triangle straddles two.
+    std::vector<LightmapChart> charts;
 
     // Which streams this element actually carried, in file order. Kept because
     // the ones we skip are as interesting as the ones we read - a stream nobody
