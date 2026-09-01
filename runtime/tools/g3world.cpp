@@ -243,6 +243,9 @@ int main(int argc, char **argv)
     int cameraArgument = 0;
     int treeArgument = 0;
     bool validation = false;
+    // Whether a baked patch stands in for the daylight on that surface, or adds
+    // to it. Measurable either way, which is the point of the switch.
+    float lightmapReplaces = 0.0f;
     // How many different trees are grown per definition before they repeat.
     constexpr std::uint32_t c_TreeVariants = 3;
     // Where a tree drops to its thinned form, in world units - a metre is a
@@ -250,24 +253,27 @@ int main(int argc, char **argv)
     float treeLodDistance = 6000.0f;
     // And where it becomes a single quad. Four hundred metres.
     float treeBillboardDistance = 40000.0f;
-    for (int index = 2; index + 1 < argc; ++index)
+    for (int index = 2; index < argc; ++index)
     {
-        if (std::string(argv[index]) == "--sectors")
+        const bool hasValue = index + 1 < argc;
+        if (std::string(argv[index]) == "--sectors" && hasValue)
             sectorArgument = index + 1;
-        if (std::string(argv[index]) == "--shot")
+        if (std::string(argv[index]) == "--shot" && hasValue)
             shotPath = argv[index + 1];
-        if (std::string(argv[index]) == "--lod" && index + 1 < argc)
+        if (std::string(argv[index]) == "--lod" && hasValue)
             treeLodDistance = float(std::atof(argv[index + 1]));
-        if (std::string(argv[index]) == "--billboard" && index + 1 < argc)
+        if (std::string(argv[index]) == "--billboard" && hasValue)
             treeBillboardDistance = float(std::atof(argv[index + 1]));
-        if (std::string(argv[index]) == "--bench" && index + 1 < argc)
+        if (std::string(argv[index]) == "--bench" && hasValue)
             benchFrames = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--camera" && index + 5 < argc)
             cameraArgument = index + 1;
-        if (std::string(argv[index]) == "--tree" && index + 1 < argc)
+        if (std::string(argv[index]) == "--tree" && hasValue)
             treeArgument = index + 1;
         if (std::string(argv[index]) == "--validate")
             validation = true;
+        if (std::string(argv[index]) == "--baked-replaces")
+            lightmapReplaces = 1.0f;
     }
 
     const bool showOneTree = treeArgument != 0 && treeArgument + 1 < argc &&
@@ -863,6 +869,8 @@ int main(int argc, char **argv)
     lightmapCoords.resize(std::max<std::size_t>(lightmapCoords.size(), 2), -1.0f);
     renderer.setLightmapCoords(std::move(lightmapCoords));
     renderer.setLightmapAtlas(&patchAtlas.image);
+    std::printf("baked patches %s the daylight where they cover\n",
+                lightmapReplaces > 0.5f ? "replace" : "add to");
     if (const char *dump = std::getenv("G3_DUMP_ATLAS"))
     {
         // The packed patches, so the packing can be looked at rather than
@@ -1040,7 +1048,7 @@ int main(int argc, char **argv)
                         renderer.instanceCount(), renderer.tooSmallInstances(), renderer.occludedInstances(),
                         occlusion ? "" : ", occlusion off");
         }
-        renderer.draw(device, viewProjection, {0.45f, 0.75f, 0.35f, 0.0f});
+        renderer.draw(device, viewProjection, {0.45f, 0.75f, 0.35f, lightmapReplaces});
 
         vkCmdEndRendering(command);
         // Outside the render pass, which is where the profiler may write to its

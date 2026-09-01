@@ -50,42 +50,31 @@ void main()
     if (push.alphaTested > 0.5 && sampled.a < 0.5)
         discard;
 
-    // Daylight, shadowed by how much sky the vertex can see. That factor is
-    // what the world was missing: without it every surface is lit as though it
-    // stood in the open, and the picture comes out flat however bright it is.
+    // How the baked light and the daylight go together. The fourth component of
+    // the light direction chooses: zero adds the patch to the daylight, one lets
+    // it stand in for it. A surface the bake covered already accounts for the
+    // sun that reached it, so adding both counts the same light twice - which is
+    // what made the room brighter and flatter at once.
+    float replace = push.lightDirection.w;
+
     float day = 0.55 + 0.45 * max(dot(normal, normalize(push.lightDirection.xyz)), 0.0);
     vec3 lit = sampled.rgb * day * inSky;
 
-    // Then the light the bake recorded as having reached this vertex, answering
-    // to where it came from: a wall facing the window takes it and the wall
-    // beside it does not. Half of the term is kept unshaped, because the bake
-    // stores one dominant direction and a surface still receives light from the
-    // rest of the room.
+    // The light the bake recorded at this vertex, answering to where it came
+    // from: a wall facing the window takes it and the wall beside it does not.
+    // Half the term is left unshaped, because the bake stores one dominant
+    // direction and a surface still receives light from the rest of the room.
     float facing = dot(inIncident, inIncident) > 0.01 ? max(dot(normal, normalize(inIncident)), 0.0) : 1.0;
-    lit += sampled.rgb * inBaked * (0.5 + 0.5 * facing);
+    vec3 baked = inBaked * (0.5 + 0.5 * facing);
 
-    // The patch of baked light this surface carries, where it has one. This is
-    // where the light actually is: the per-vertex colour is nearly empty and the
-    // vertices mostly hold occlusion.
     if (inPatch.x >= 0.0)
-        lit += sampled.rgb * texture(lightmapAtlas, inPatch).rgb;
-
-    int used = int(lights.count.x);
-    for (int index = 0; index < used; ++index)
     {
-        vec3 toLight = lights.positionRange[index].xyz - inWorld;
-        float range = lights.positionRange[index].w;
-        float distance = length(toLight);
-        if (distance >= range)
-            continue;
-
-        // Falls off with the square of distance and is cut to nothing at the
-        // range the entity declares, so a lamp lights its room and not the hill.
-        float fade = 1.0 - distance / range;
-        float attenuation = fade * fade;
-        float facing = max(dot(normal, toLight / max(distance, 0.001)), 0.0);
-        lit += sampled.rgb * lights.colour[index].rgb * (facing * attenuation);
+        // A patch of light on this surface, at the texel the chart says.
+        baked += texture(lightmapAtlas, inPatch).rgb;
+        lit = mix(lit, sampled.rgb * 0.25 * inSky, replace);
     }
+
+    lit += sampled.rgb * baked;
 
     // The game's own tone curve, from its shipped ip_hdri.fx and the defaults in
     // ge3.INI: Render.HDRExposure 2.85 and Render.HDRGamma 0.60. Without it a
