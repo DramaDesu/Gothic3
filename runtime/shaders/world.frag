@@ -63,5 +63,11 @@ void main()
         lit += sampled.rgb * lights.colour[index].rgb * (facing * attenuation);
     }
 
-    outColor = vec4(lit, 1.0);
+    // The game's own tone curve, from its shipped ip_hdri.fx and the defaults in
+    // ge3.INI: Render.HDRExposure 2.85 and Render.HDRGamma 0.60. Without it a
+    // texel of 0.15 stays 0.15 and the world reads as night; through it the same
+    // texel lands at 0.53. The darkness was never in the textures.
+    vec3 mapped = 1.0 - exp(-2.85 * lit);
+    mapped = pow(max(mapped, vec3(1e-5)), vec3(0.60));
+    outColor = vec4(mapped, 1.0);
 }
