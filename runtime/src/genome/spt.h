@@ -109,12 +109,12 @@ struct SpeedTreeToken
 struct SpeedTree
 {
     std::string barkTexture;
-    // Id 2001 is constant within a species - a red oak and its variants all
-    // carry 1100 - so it is not the size. Id 2006 is: it reads 5, 10 and 20 for
-    // the xs, s and m variants of one species, and 2007 is the variance the
-    // runtime applies per instance.
-    float parameter2001 = 0.0f;
-    float parameter2003 = 0.0f;
+    // The distances at which the tree changes detail. They are constant within a
+    // species, which is why 2001 looked like a height for so long - a red oak
+    // and all its size variants carry 1100. The far one is greater than the near
+    // one in all 98 files.
+    float lodFarDistance = 0.0f;     // id 2001
+    float lodNearDistance = 0.0f;    // id 2003
     std::uint32_t seed = 0;          // id 2005
 
     // Ids 3000-3010 are the leaf group, not the trunk. Two of them are worth

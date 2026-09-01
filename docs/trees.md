@@ -53,8 +53,13 @@ Id 18005 is **empty in 97 of the 98 files**. The one that carries a value names
 note here quoted that string as though it were the field's content, which is the
 mistake of reading one sample as a rule.
 
-Id 2001 looks like a height - a red oak carries 1100 - but it is identical for
-the XS and the S variant of a species, so it cannot be the size. **Id 2006 is**:
+**Ids 2001 and 2003 are the distances at which the tree changes detail**, far
+and near. That is why 2001 looked like a height and could not be one: a red oak
+and every size variant of it carries 1100, because the distance is authored per
+species rather than per tree. The far distance exceeds the near one in all 98
+files, and the engine's own parser puts them there rather than in the 9000 band.
+
+**Id 2006 is the size**:
 it reads 5, 10, 20, 30 for the xs, s, m and l variants, tracking the size prefix
 in the file name exactly, and a direct diff of `m_douglasfir_01` against
 `l_douglasfir_01` shows 2006 and 2007 as the only size-like difference between
@@ -180,6 +185,26 @@ renderer batched every tree of a species out of one buffer. Three variants per
 definition gives **57315 trees from 268 grown meshes**, and the whole map then
 loads 1222158 instances of 9.6M triangles. The sector's own bounds decide
 visibility, so the existing frustum, size and occlusion tests apply unchanged.
+
+## Levels of detail
+
+The 9000 band holds no distances at all - it is the shape of the detail ladder,
+and the distances live in 2001 and 2003. It is also **two nested blocks**, not
+one: 9005 opens an inner block that 9006 closes, and 9001 then closes the outer
+one. Both are markers with no payload.
+
+That matters because our width table gave 9006 a four-byte value, and it read
+exactly 9001 in all 98 files - those bytes were the next token, not a value. The
+byte count is the same either way, which is exactly why a wrong reading survived
+so long: the stream still landed on the last byte of every file. A parse that
+succeeds is not the same as a parse that is right.
+
+What the ladder says, per definition: how many branch levels (9007) and leaf
+levels (9011) to build, what fraction of branch weight survives at the nearest
+and furthest (9012, 9008), how likely a leaf is dropped at each step down (9010)
+and how much the remaining cards grow to cover for it (9009), plus how the order
+of dropping is randomised (9013) and which heaviest branches are protected from
+it (9014). We read them; nothing uses them yet.
 
 ## Measured against the game
 

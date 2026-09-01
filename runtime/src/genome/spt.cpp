@@ -39,8 +39,13 @@ const std::unordered_map<std::uint32_t, int> &widthTable()
         {6011, 4}, {6012, 4}, {6013, 4}, {6014, 4}, {6015, 1}, {6016, 1}, {6017, c_String},
         {8000, 0}, {8001, 4}, {8002, 4}, {8003, 52}, {8004, 4}, {8005, 52}, {8006, 4}, {8007, 4},
         {8008, 4}, {8009, 52},
-        {9002, 4}, {9003, 4}, {9004, 4}, {9005, 0}, {9006, 4}, {9007, 4}, {9008, 4}, {9009, 4},
-        {9010, 4}, {9011, 4}, {9012, 4}, {9013, 4}, {9014, 4},
+        // 9005 opens a nested block and 9006 closes it; 9001 then closes the
+        // outer one. Both are markers with no payload. The four bytes this table
+        // used to give 9006 read exactly 9001 in all 98 files - they were the
+        // next token, not a value. The byte count is the same either way, which
+        // is why a wrong reading here parsed cleanly for so long.
+        {9001, 0}, {9002, 4}, {9003, 4}, {9004, 4}, {9005, 0}, {9006, 0}, {9007, 4}, {9008, 4},
+        {9009, 4}, {9010, 4}, {9011, 4}, {9012, 4}, {9013, 4}, {9014, 4},
         {10001, 4}, {10002, c_Array32}, {10003, c_Array32}, {10004, c_Array32},
         {11000, 0}, {11001, 4}, {11002, 4},
         {12001, 4}, {12002, 16}, {12003, 20}, {12004, 24},
@@ -261,10 +266,10 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
             out.barkTexture = token.text;
             break;
         case 2001:
-            out.parameter2001 = token.floats.empty() ? 0.0f : token.floats[0];
+            out.lodFarDistance = token.floats.empty() ? 0.0f : token.floats[0];
             break;
         case 2003:
-            out.parameter2003 = token.floats.empty() ? 0.0f : token.floats[0];
+            out.lodNearDistance = token.floats.empty() ? 0.0f : token.floats[0];
             break;
         case 2005:
             // A seed, so the integer reading is the meaningful one.
