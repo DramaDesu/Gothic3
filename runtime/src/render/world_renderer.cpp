@@ -153,25 +153,31 @@ bool WorldRenderer::create(Device &device, const Budget &budget, std::string *er
     const std::uint32_t setCount = budget.textures + 1;
     VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, setCount};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    // Without this the spec forbids freeing a set back to the pool at all -
+    // only vkResetDescriptorPool, which would invalidate every set at once.
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     poolInfo.maxSets = setCount;
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &poolSize;
     vkCreateDescriptorPool(device.device(), &poolInfo, nullptr, &m_descriptorPool);
 
-    m_whiteSet = descriptorFor(device, nullptr, error);
+    m_whiteSet = acquireTexture(device, nullptr, error);
     if (!m_whiteSet)
         return false;
 
     return createPipeline(device, error);
 }
 
-VkDescriptorSet WorldRenderer::descriptorFor(Device &device, const genome::Image *image, std::string *error)
+VkDescriptorSet WorldRenderer::acquireTexture(Device &device, const genome::Image *image, std::string *error)
 {
     if (image)
     {
-        const auto existing = m_textureSets.find(image);
-        if (existing != m_textureSets.end())
-            return existing->second;
+        const auto existing = m_textureOf.find(image);
+        if (existing != m_textureOf.end())
+        {
+            ++existing->second.refs;
+            return existing->second.set;
+        }
     }
     else if (m_whiteSet)
         return m_whiteSet;
@@ -185,10 +191,18 @@ VkDescriptorSet WorldRenderer::descriptorFor(Device &device, const genome::Image
     allocate.descriptorPool = m_descriptorPool;
     allocate.descriptorSetCount = 1;
     allocate.pSetLayouts = &m_descriptorLayout;
-    if (vkAllocateDescriptorSets(device.device(), &allocate, &set) != VK_SUCCESS)
+    const VkResult allocated = vkAllocateDescriptorSets(device.device(), &allocate, &set);
+    if (allocated != VK_SUCCESS)
     {
+        // With the free bit set the driver runs the pool as a general
+        // allocator, so running out and fragmenting are different answers and
+        // saying "raise the budget" to the second one would be wrong.
         if (error)
-            *error = "the descriptor pool is out of sets; raise Budget::textures";
+            *error = allocated == VK_ERROR_FRAGMENTED_POOL
+                         ? "the descriptor pool is fragmented; sets are being freed and remade too finely"
+                         : "the descriptor pool is out of sets; raise Budget::textures";
+        if (image)
+            destroyTexture(device, texture);
         return VK_NULL_HANDLE;
     }
 
@@ -203,10 +217,28 @@ VkDescriptorSet WorldRenderer::descriptorFor(Device &device, const genome::Image
 
     if (image)
     {
-        m_textures.push_back(texture);
-        m_textureSets.emplace(image, set);
+        m_texturesRemade += m_everFreed.count(image) != 0 ? 1 : 0;
+        m_textureOf.emplace(image, TextureEntry{texture, set, 1});
     }
     return set;
+}
+
+// Gives back one batch's hold. At zero the handles go on the retiring list
+// rather than being destroyed here: a frame already submitted may still be
+// binding that set.
+void WorldRenderer::releaseTexture(const genome::Image *image)
+{
+    if (!image)
+        return;
+    const auto found = m_textureOf.find(image);
+    if (found == m_textureOf.end() || found->second.refs == 0)
+        return;
+    if (--found->second.refs != 0)
+        return;
+
+    m_retiringTextures.push_back({found->second.texture, found->second.set, m_frameCounter});
+    m_everFreed.insert(image);
+    m_textureOf.erase(found);
 }
 
 // Puts a mesh in the arenas, or finds the copy already there. The element table
@@ -319,9 +351,10 @@ void WorldRenderer::queueRelease(GpuArena &arena, std::size_t offset, std::size_
         m_pendingReleases.push_back({&arena, offset, count, m_frameCounter});
 }
 
-void WorldRenderer::retireReleases(std::uint64_t frame)
+void WorldRenderer::retireReleases(Device &device, std::uint64_t frame)
 {
     m_frameCounter = frame;
+    std::size_t retiredHere = 0;
     for (std::size_t index = 0; index < m_pendingReleases.size();)
     {
         const PendingRelease &one = m_pendingReleases[index];
@@ -335,6 +368,23 @@ void WorldRenderer::retireReleases(std::uint64_t frame)
         one.arena->release(one.offset, one.count);
         m_pendingReleases.erase(m_pendingReleases.begin() + std::ptrdiff_t(index));
     }
+
+    for (std::size_t index = 0; index < m_retiringTextures.size() && retiredHere < c_RetirePerFrame;)
+    {
+        RetiringTexture &one = m_retiringTextures[index];
+        if (frame < one.frame + Device::c_FramesInFlight + 1)
+        {
+            ++index;
+            continue;
+        }
+        vkFreeDescriptorSets(device.device(), m_descriptorPool, 1, &one.set);
+        destroyTexture(device, one.texture);
+        ++m_texturesFreed;
+        ++retiredHere;
+        m_retiringTextures.erase(m_retiringTextures.begin() + std::ptrdiff_t(index));
+    }
+
+    m_worstRetireBurst = std::max(m_worstRetireBurst, retiredHere);
 }
 
 void WorldRenderer::releaseMesh(Device &device, const genome::Mesh *mesh)
@@ -529,11 +579,15 @@ bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::v
 
                 const genome::Image *image =
                     elementIndex < incoming.textures.size() ? incoming.textures[elementIndex] : nullptr;
-                range.descriptor = descriptorFor(device, image, error);
+                range.image = image;
+                range.descriptor = acquireTexture(device, image, error);
                 if (!range.descriptor)
                 {
                     // This batch was never pushed, so dropSector cannot see it:
-                    // its ranges and its hold on the mesh are undone here.
+                    // its ranges, their textures and its hold on the mesh are
+                    // all undone here.
+                    for (const Range &taken : fresh.ranges)
+                        releaseTexture(taken.image);
                     m_rangeCount -= fresh.ranges.size();
                     releaseMesh(device, incoming.mesh);
                     return giveUp();
@@ -648,7 +702,10 @@ void WorldRenderer::dropSector(Device &device, std::uint32_t sector)
             continue;
         }
 
-        // Nothing is drawing this mesh any more, so the arenas get it back.
+        // Nothing is drawing this mesh any more, so the arenas get it back,
+        // and so do the textures its ranges were holding.
+        for (const Range &range : batch.ranges)
+            releaseTexture(range.image);
         releaseMesh(device, batch.mesh);
         m_rangeCount -= batch.ranges.size();
         m_batches.erase(m_batches.begin() + std::ptrdiff_t(index));
@@ -791,14 +848,23 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
     return true;
 }
 
+VkDeviceSize WorldRenderer::textureBytes() const
+{
+    VkDeviceSize bytes = 0;
+    for (const auto &[image, entry] : m_textureOf)
+        bytes += entry.texture.bytes;
+    return bytes;
+}
+
 void WorldRenderer::reportArenas() const
 {
+    std::printf("textures hold %.0f MB\n", double(textureBytes()) / 1048576.0);
     std::printf("arenas: %.0f%% of %zuM vertices, %.0f%% of %zuM indices, %.0f%% of %zuM lit vertices, "
                 "%zu textures, %zu staging submits\n",
                 100.0 * double(m_vertices.highWater()) / double(m_vertices.capacity()), m_vertices.capacity() >> 20,
                 100.0 * double(m_indices.highWater()) / double(m_indices.capacity()), m_indices.capacity() >> 20,
                 100.0 * double(m_lightmapArena.highWater()) / double(m_lightmapArena.capacity()),
-                m_lightmapArena.capacity() >> 20, m_textureSets.size(), m_uploader.submits());
+                m_lightmapArena.capacity() >> 20, m_textureOf.size(), m_uploader.submits());
     std::printf("%zu sectors resident, %zu batches, %zu instances of which %zu carry baked light\n",
                 m_sectors.size(), m_batches.size(), m_instanceCount, m_bakedInstances);
     std::printf("%zu occluders, %zu large enough but foliage\n", m_occluders.size(), m_foliageSkipped);
@@ -1056,7 +1122,7 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                          const std::array<float, 3> &eye, float pixelsPerRadian, float minimumPixels,
                          bool useOcclusion)
 {
-    retireReleases(device.frameCounter());
+    retireReleases(device, device.frameCounter());
     ensureDerived();
 
     G3_ZONE("cull");
@@ -1553,8 +1619,10 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
 
 void WorldRenderer::destroy(Device &device)
 {
-    for (Texture &texture : m_textures)
-        destroyTexture(device, texture);
+    retireReleases(device, m_frameCounter + Device::c_FramesInFlight + 2);
+    for (auto &[image, entry] : m_textureOf)
+        destroyTexture(device, entry.texture);
+    m_textureOf.clear();
     destroyTexture(device, m_white);
     for (std::uint32_t frame = 0; frame < Device::c_FramesInFlight; ++frame)
         device.destroyBuffer(m_lightBuffer[frame]);

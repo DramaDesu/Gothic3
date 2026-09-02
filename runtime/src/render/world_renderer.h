@@ -15,6 +15,7 @@
 
 #include <array>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -133,6 +134,18 @@ class WorldRenderer
     // How much of each arena is spoken for, for whoever set the budget.
     void reportArenas() const;
 
+    // What the textures hold, and how much of it belongs to no batch that is
+    // still here - which is what evicting them would give back.
+    VkDeviceSize textureBytes() const;
+    std::size_t textureCount() const { return m_textureOf.size(); }
+    std::size_t texturesFreed() const { return m_texturesFreed; }
+    // Of those, how many were later wanted again and uploaded a second time -
+    // the one path that only exists once textures can be freed.
+    std::size_t texturesRemade() const { return m_texturesRemade; }
+    // The most handles destroyed on any one frame, and the most arena ranges.
+    // A burst of departures makes a burst of these three frames later.
+    std::size_t worstRetireBurst() const { return m_worstRetireBurst; }
+
     // Rebuilds this frame's instance buffer from what the camera can see.
     // `eye` and `pixelsPerRadian` let small distant objects be dropped: a fork
     // inside a house a kilometre away passes a frustum test but covers no
@@ -177,7 +190,7 @@ class WorldRenderer
     std::size_t occludedInstances() const { return m_occluded; }
 
     // Frees what has outlived the frames in flight. Called every frame.
-    void retireReleases(std::uint64_t frame);
+    void retireReleases(Device &device, std::uint64_t frame);
     std::size_t pendingReleases() const { return m_pendingReleases.size(); }
 
     // How many arrivals landed while a departure had already shifted the batch
@@ -217,6 +230,9 @@ class WorldRenderer
         std::uint32_t firstInstance = 0;
         std::uint32_t instanceCount = 0;
         VkDescriptorSet descriptor = VK_NULL_HANDLE;
+        // Which image that set was made from, so a batch that goes can give
+        // its textures back.
+        const genome::Image *image = nullptr;
         bool alphaTested = false;
     };
 
@@ -320,10 +336,43 @@ class WorldRenderer
     std::size_t m_staleLookups = 0;
     std::size_t m_staleOutOfRange = 0;
 
-    // One descriptor set per texture, made when the texture is first seen.
-    std::map<const genome::Image *, VkDescriptorSet> m_textureSets;
+    // One entry per texture, keyed by the image it was made from - which is
+    // the route that did not exist before, and without which nothing could find
+    // a texture to free. The count is of batches naming it, not sectors: a
+    // batch is keyed by mesh and carries several sectors' transforms at once.
+    struct TextureEntry
+    {
+        Texture texture{};
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        std::size_t refs = 0;
+    };
+    std::map<const genome::Image *, TextureEntry> m_textureOf;
     VkDescriptorSet m_whiteSet = VK_NULL_HANDLE;
-    VkDescriptorSet descriptorFor(Device &device, const genome::Image *image, std::string *error);
+
+    // Takes a reference, making the texture if this is the first. Null means
+    // the shared white one, which is never counted and never freed.
+    VkDescriptorSet acquireTexture(Device &device, const genome::Image *image, std::string *error);
+    void releaseTexture(const genome::Image *image);
+
+    // Handles a batch gave back. They cannot be destroyed at once: a submitted
+    // frame may still be binding that set, which is
+    // VUID-vkFreeDescriptorSets-pDescriptorSets-00309.
+    struct RetiringTexture
+    {
+        Texture texture{};
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        std::uint64_t frame = 0;
+    };
+    // Destroying a texture is four driver calls, and a burst of departures
+    // makes a burst of them come due together. Nothing waits on one being
+    // destroyed promptly - it has already waited out the frames in flight - so
+    // they go a few a frame.
+    static constexpr std::size_t c_RetirePerFrame = 8;
+    std::vector<RetiringTexture> m_retiringTextures;
+    std::size_t m_texturesFreed = 0;
+    std::size_t m_texturesRemade = 0;
+    std::size_t m_worstRetireBurst = 0;
+    std::set<const genome::Image *> m_everFreed;
 
     // Per batch: the transforms and their bounds, kept so each frame can pick
     // the visible subset.
@@ -398,7 +447,6 @@ class WorldRenderer
 
     VkDescriptorSetLayout m_descriptorLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
-    std::vector<Texture> m_textures;
     Texture m_white;
 
     std::array<float, 3> m_boundsMin{};

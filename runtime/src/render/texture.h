@@ -19,6 +19,8 @@ struct Texture
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
     VkSampler sampler = VK_NULL_HANDLE;
+    // What the card gave it, which is what giving it back would return.
+    VkDeviceSize bytes = 0;
 
     bool valid() const { return view != VK_NULL_HANDLE; }
 };

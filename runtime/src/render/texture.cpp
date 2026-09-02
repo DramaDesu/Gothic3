@@ -58,6 +58,7 @@ bool createTexture(Device &device, const genome::Image &source, bool srgb, Textu
 
     VkMemoryRequirements requirements{};
     vkGetImageMemoryRequirements(device.device(), texture.image, &requirements);
+    texture.bytes = requirements.size;
     if (!device.allocate(requirements, false, texture.memory, error))
     {
         // The image is already made by this point, and the caller drops the

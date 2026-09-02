@@ -261,11 +261,11 @@ worst frame is 12.8 ms and an arrival costs 1 ms on the frame.
 
 ## What it still does not do
 
-- **Textures are still never freed.** Not a wall, as above, but 599 MB. If they
-  are ever evicted the descriptor pool needs
-  VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, the sets have to wait out
-  the frames in flight the way arena ranges do, and there is currently no route
-  from a genome::Image to its Texture to free.
+- **The CPU-side genome::Image is still never freed.** The GPU texture goes with
+  its last batch now, but the pixels it was made from stay in host memory,
+  owned by the loader thread whose caches are keyed on those pointers. A sector
+  that returns re-uploads rather than re-reading, which is the good half of
+  that bargain.
 - **A refused sector is retried every time the rectangle changes**, and fails
   again for the same reason. Harmless, since the unwind is clean, but it is
   work done for nothing.

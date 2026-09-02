@@ -2025,6 +2025,10 @@ int main(int argc, char **argv)
                                     "%zu lookups would have named the wrong batch and %zu one past the end\n",
                                     renderer.staleArrivals(), renderer.staleLookups(),
                                     renderer.staleOutOfRange());
+                    std::printf("%zu textures freed as their sectors left, %zu came back, %zu still held\n",
+                                renderer.texturesFreed(), renderer.texturesRemade(), renderer.textureCount());
+                    std::printf("the biggest retirement on one frame destroyed %zu textures\n",
+                                renderer.worstRetireBurst());
                     if (device.swapchainRebuilds() != 0)
                         std::printf("the swapchain was rebuilt %zu times, each of which drains the device\n",
                                     device.swapchainRebuilds());
