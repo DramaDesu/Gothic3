@@ -562,6 +562,9 @@ int main(int argc, char **argv)
     bool startWithOcclusion = false;
     // Below this many pixels an instance is not asked whether it is hidden.
     float occlusionPixels = 0.0f;
+    // Runs the cull several times a frame. The cost of the extra passes is the
+    // warm-cache cost; the difference from the first is what the memory costs.
+    int cullRepeat = 1;
     // Residency is decided against a far plane of its own, not the one the
     // camera draws with: it is the game's number, and what made 36 sectors the
     // answer rather than some other count.
@@ -618,6 +621,8 @@ int main(int argc, char **argv)
             uncapped = true;
         if (std::string(argv[index]) == "--occlusion")
             startWithOcclusion = true;
+        if (std::string(argv[index]) == "--cull-repeat" && hasValue)
+            cullRepeat = std::max(1, std::atoi(argv[index + 1]));
         if (std::string(argv[index]) == "--occlusion-pixels" && hasValue)
             occlusionPixels = float(std::atof(argv[index + 1]));
         if (std::string(argv[index]) == "--stream")
@@ -1959,7 +1964,8 @@ int main(int argc, char **argv)
         // A pixel and a half: below that an object is a speck, whatever it is.
         const float pixelsPerRadian = float(extent.height) * 0.5f / std::tan(0.5f);
         const auto cullStart = std::chrono::steady_clock::now();
-        renderer.cull(device, viewProjection, eye, pixelsPerRadian, 1.5f, occlusion);
+        for (int pass = 0; pass < cullRepeat; ++pass)
+            renderer.cull(device, viewProjection, eye, pixelsPerRadian, 1.5f, occlusion);
         phases.cull = millisSince(cullStart);
         const auto recordStart = std::chrono::steady_clock::now();
         if (benchFrames > 0)
