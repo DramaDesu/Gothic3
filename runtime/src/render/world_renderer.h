@@ -231,6 +231,10 @@ class WorldRenderer
     // They add up to the whole of it.
     struct CullPhases
     {
+        // Retiring handles and rebuilding the derived views, which on a frame
+        // where a sector moved is a full rebuild of the extents, the occluders,
+        // the grid and the mesh map. It used to be counted as occluder time.
+        float prologue = 0.0f;
         float occluders = 0.0f, cells = 0.0f, instances = 0.0f, lights = 0.0f;
     };
     const CullPhases &cullPhases() const { return m_cullPhases; }

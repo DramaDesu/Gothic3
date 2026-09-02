@@ -2054,8 +2054,9 @@ int main(int argc, char **argv)
                 report(cullTimes, "cull");
                 {
                     const render::WorldRenderer::CullPhases &split = renderer.cullPhases();
-                    std::printf("the last cull went: %.2f occluders, %.2f cells, %.2f instances, %.2f lights\n",
-                                split.occluders, split.cells, split.instances, split.lights);
+                    std::printf("the last cull went: %.2f prologue, %.2f occluders, %.2f cells, %.2f instances, "
+                                "%.2f lights\n",
+                                split.prologue, split.occluders, split.cells, split.instances, split.lights);
                 }
 
                 // Which frame was the worst, and what it was doing.

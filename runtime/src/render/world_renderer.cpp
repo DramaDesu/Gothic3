@@ -1159,9 +1159,11 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                          const std::array<float, 3> &eye, float pixelsPerRadian, float minimumPixels,
                          bool useOcclusion)
 {
-    const auto cullStarted = std::chrono::steady_clock::now();
+    const auto prologueStart = std::chrono::steady_clock::now();
     retireReleases(device, device.frameCounter());
     ensureDerived();
+    m_cullPhases.prologue = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
+                                                                     prologueStart).count();
 
     G3_ZONE("cull");
 
@@ -1230,10 +1232,21 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
 
     m_occluded = 0;
     m_occlusionTests = 0;
+    // Filled by the occluder block below, which may not run at all.
+    float occludersTimed = 0.0f;
     if (useOcclusion)
     {
         G3_ZONE("occluders");
         const auto occluderStart = std::chrono::steady_clock::now();
+        struct Timed
+        {
+            float &into;
+            std::chrono::steady_clock::time_point start;
+            ~Timed()
+            {
+                into = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+            }
+        } timed{occludersTimed, occluderStart};
 
         m_occlusion.clear();
         for (const Occluder &occluder : m_occluders)
@@ -1253,8 +1266,7 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     m_submittedDraws = 0;
     m_testedInstances = 0;
 
-    m_cullPhases.occluders = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
-                                                                      cullStarted).count();
+    m_cullPhases.occluders = occludersTimed;
 
     const auto cellStart = std::chrono::steady_clock::now();
     // Reject whole cells first. From an overview of the map every batch is
