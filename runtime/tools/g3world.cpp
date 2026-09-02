@@ -850,27 +850,32 @@ int main(int argc, char **argv)
         baker.destroy(device);
     }
 
+    std::printf("%zu instances lit by a baked lightmap, %zu without one, %zu colours, %zu direction floats\n",
+                lightmapsFound, lightmapsMissing, lightmapColours.size(), lightmapIncident.size());
+    std::printf("%zu baked patches packed, %zu refused, %zu vertices given one; sizes match the charts %zu to %zu\n",
+                patchAtlas.packed, patchAtlas.refused, patchedVertices, sizeMatches, sizeMismatches);
+    std::printf("baked patches %s the daylight where they cover\n",
+                lightmapReplaces > 0.5f ? "replace" : "add to");
+
+    // Everything the lighting needs has to be handed over BEFORE the renderer is
+    // created: create() is where the buffers are filled and the descriptors
+    // written. Handing it over afterwards leaves the shader reading a one-entry
+    // placeholder, and out-of-range reads on a storage buffer come back as
+    // zeros - so the lighting was not wrong, it was absent, and every attempt to
+    // change it changed nothing at all.
     render::WorldRenderer renderer;
+    renderer.setLights(worldLights);
+    renderer.setLightmaps(std::move(lightmapColours));
+    renderer.setLightmapDirections(std::move(lightmapIncident));
+    lightmapCoords.resize(std::max<std::size_t>(lightmapCoords.size(), 2), -1.0f);
+    renderer.setLightmapCoords(std::move(lightmapCoords));
+    renderer.setLightmapAtlas(&patchAtlas.image);
+
     if (!renderer.create(device, batches, &error))
     {
         std::cerr << "renderer: " << error << "\n";
         return 1;
     }
-
-    std::printf("%zu instances lit by a baked lightmap, %zu without one, %zu colours, %zu direction floats\n",
-                lightmapsFound, lightmapsMissing, lightmapColours.size(), lightmapIncident.size());
-    std::printf("%zu instances lit, %zu without\n", lightmapsFound,
-                lightmapsMissing, lightmapColours.size());
-    renderer.setLights(worldLights);
-    renderer.setLightmaps(std::move(lightmapColours));
-    renderer.setLightmapDirections(std::move(lightmapIncident));
-    std::printf("%zu baked patches packed, %zu refused, %zu vertices given one; sizes match the charts %zu to %zu\n",
-                patchAtlas.packed, patchAtlas.refused, patchedVertices, sizeMatches, sizeMismatches);
-    lightmapCoords.resize(std::max<std::size_t>(lightmapCoords.size(), 2), -1.0f);
-    renderer.setLightmapCoords(std::move(lightmapCoords));
-    renderer.setLightmapAtlas(&patchAtlas.image);
-    std::printf("baked patches %s the daylight where they cover\n",
-                lightmapReplaces > 0.5f ? "replace" : "add to");
     if (const char *dump = std::getenv("G3_DUMP_ATLAS"))
     {
         // The packed patches, so the packing can be looked at rather than

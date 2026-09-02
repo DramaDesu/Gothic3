@@ -68,19 +68,23 @@ void main()
     outSky = 1.0;
     outIncident = vec3(0.0);
     outPatch = vec2(-1.0);
-    if (inRow0.w >= 0.0)
+    if (inRow1.w > 0.5)
     {
+        // The bias is added to the vertex's place in the shared buffer, so it
+        // may be negative; the flag above is what says there is lighting.
+        const int at = int(inRow0.w) + gl_VertexIndex;
         // The low three bytes are the light that reached the vertex; the top
         // byte is not alpha but the fraction of rays that reached the sky.
-        const uint packed = lightmap.colours[uint(inRow0.w) + uint(gl_VertexIndex)];
+        const uint packed = lightmap.colours[at];
         outBaked = vec3(float((packed >> 16) & 0xFFu), float((packed >> 8) & 0xFFu), float(packed & 0xFFu)) / 255.0;
         outSky = float((packed >> 24) & 0xFFu) / 255.0;
 
-        const uint at = (uint(inRow0.w) + uint(gl_VertexIndex)) * 3u;
-        outIncident = vec3(incident.values[at], incident.values[at + 1u], incident.values[at + 2u]);
+        const int incidentAt = at * 3;
+        outIncident =
+            vec3(incident.values[incidentAt], incident.values[incidentAt + 1], incident.values[incidentAt + 2]);
 
-        const uint patchAt = (uint(inRow0.w) + uint(gl_VertexIndex)) * 2u;
-        outPatch = vec2(coords.values[patchAt], coords.values[patchAt + 1u]);
+        const int patchAt = at * 2;
+        outPatch = vec2(coords.values[patchAt], coords.values[patchAt + 1]);
     }
     gl_Position = push.viewProjection * vec4(world, 1.0);
 }

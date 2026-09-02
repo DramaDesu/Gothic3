@@ -101,6 +101,7 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
     m_boundsMax = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
                    std::numeric_limits<float>::lowest()};
 
+    std::size_t litInstances = 0;
     std::map<const genome::Image *, std::size_t> uploaded;
     std::vector<std::size_t> textureForRange;
 
@@ -115,11 +116,22 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
         Batch kept;
         kept.transforms = batch.transforms;
 
-        // The first row's w is unused by the transform, so the base index rides
-        // there and the instance buffer keeps its shape.
+        // Where this mesh's vertices begin in the shared buffer. The shader
+        // indexes its lighting with gl_VertexIndex, which counts from the start
+        // of that buffer rather than from the start of the mesh.
+        const std::int32_t meshFirstVertex = static_cast<std::int32_t>(vertices.size());
+
+        // Two unused corners of the transform carry it: the first row's w holds
+        // the bias, which may be negative, and the second row's w says whether
+        // there is any lighting at all - a sentinel in the bias would be
+        // indistinguishable from a legitimate negative one.
         for (std::size_t index = 0; index < kept.transforms.size(); ++index)
-            kept.transforms[index][3] =
-                index < batch.lightmapBase.size() ? float(batch.lightmapBase[index]) : -1.0f;
+        {
+            const bool lit = index < batch.lightmapBase.size() && batch.lightmapBase[index] >= 0;
+            kept.transforms[index][3] = lit ? float(batch.lightmapBase[index] - meshFirstVertex) : 0.0f;
+            kept.transforms[index][7] = lit ? 1.0f : 0.0f;
+            litInstances += lit ? 1 : 0;
+        }
         kept.bounds = batch.bounds;
 
         for (const std::array<float, 6> &box : kept.bounds)
@@ -217,6 +229,7 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
         m_batches.push_back(std::move(kept));
     }
 
+    std::printf("%zu instances carry baked lighting into the shader\n", litInstances);
     buildGrid();
 
     // Anything spanning more than about ten metres is worth rasterising as an
