@@ -243,9 +243,12 @@ int main(int argc, char **argv)
     int cameraArgument = 0;
     int treeArgument = 0;
     bool validation = false;
-    // Whether a baked patch stands in for the daylight on that surface, or adds
-    // to it. Measurable either way, which is the point of the switch.
-    float lightmapReplaces = 0.0f;
+    // A baked patch stands in for the daylight on the surface it covers, rather
+    // than adding to it: the bake already accounted for the sun that reached
+    // there, and adding both counts the same light twice. Measured - replacing
+    // gives contrast 25.4 against 23.1 - and --baked-adds puts it back for
+    // comparison.
+    float lightmapReplaces = 1.0f;
     // How many different trees are grown per definition before they repeat.
     constexpr std::uint32_t c_TreeVariants = 3;
     // Where a tree drops to its thinned form, in world units - a metre is a
@@ -272,8 +275,8 @@ int main(int argc, char **argv)
             treeArgument = index + 1;
         if (std::string(argv[index]) == "--validate")
             validation = true;
-        if (std::string(argv[index]) == "--baked-replaces")
-            lightmapReplaces = 1.0f;
+        if (std::string(argv[index]) == "--baked-adds")
+            lightmapReplaces = 0.0f;
     }
 
     const bool showOneTree = treeArgument != 0 && treeArgument + 1 < argc &&
@@ -357,109 +360,110 @@ int main(int argc, char **argv)
                     if (placement.meshName.empty())
                         continue;
 
-                    // The baked lighting of this instance, found by the mesh it
-                    // places and its own identifier - which is exactly how the
-                    // archive names its files.
-                    std::int32_t lightmapBase = -1;
-                    if (lightmapArchive && !placement.guid.empty())
+                    // The baked lighting of this instance, attached once its
+                    // mesh is known: the charts that address the patches are in
+                    // the mesh, not in the lightmap.
+                    const auto attachLightmap = [&](const genome::Mesh *lit) {
+        // The baked lighting of this instance, found by the mesh it
+        // places and its own identifier - which is exactly how the
+        // archive names its files.
+        std::int32_t lightmapBase = -1;
+        if (lightmapArchive && !placement.guid.empty())
+        {
+            std::string name = placement.meshName;
+            const std::size_t dot = name.find_last_of('.');
+            if (dot != std::string::npos)
+                name = name.substr(0, dot);
+            name += "_{" + placement.guid + "}.xlmp";
+
+            std::string why;
+            genome::Lightmap map;
+            const std::vector<std::uint8_t> bytes = lightmapArchive->read(name, &why);
+            if (!bytes.empty() && genome::loadLightmap(bytes, map, &why) && !map.elements.empty() &&
+                !map.elements.front().colours.empty())
+            {
+                lightmapBase = std::int32_t(lightmapColours.size());
+                const std::size_t coordBase = lightmapColours.size();
+                std::size_t elementIndex = 0, vertexRunning = 0;
+                for (const genome::LightmapElement &element : map.elements)
+                {
+                    lightmapColours.insert(lightmapColours.end(), element.colours.begin(),
+                                           element.colours.end());
+                    lightmapCoords.resize(lightmapColours.size() * 2, -1.0f);
+
+                    // The charts live in the mesh and the patches in
+                    // the lightmap, one for one. A chart's extent is
+                    // in world units and so are its coordinates, so
+                    // the texel is 1 + uv * scaling - the one being
+                    // the gutter the bake leaves on every side.
+                    const genome::MeshElement *meshElement =
+                        lit && elementIndex < lit->elements.size() ? &lit->elements[elementIndex]
+                                                                  : nullptr;
+                    if (meshElement && !meshElement->lightmapUV.empty())
                     {
-                        std::string name = placement.meshName;
-                        const std::size_t dot = name.find_last_of('.');
-                        if (dot != std::string::npos)
-                            name = name.substr(0, dot);
-                        name += "_{" + placement.guid + "}.xlmp";
-
-                        std::string why;
-                        genome::Lightmap map;
-                        const std::vector<std::uint8_t> bytes = lightmapArchive->read(name, &why);
-                        if (!bytes.empty() && genome::loadLightmap(bytes, map, &why) && !map.elements.empty() &&
-                            !map.elements.front().colours.empty())
+                        for (std::size_t chart = 0;
+                             chart < meshElement->charts.size() && chart < element.bitmaps.size();
+                             ++chart)
                         {
-                            lightmapBase = std::int32_t(lightmapColours.size());
-                            const std::size_t coordBase = lightmapColours.size();
-                            const genome::Mesh *lit = nullptr;
+                            const genome::LightmapBitmap &bitmap = element.bitmaps[chart];
+                            if (bitmap.data.empty())
+                                continue;
+
+                            const std::array<float, 2> &extent = meshElement->charts[chart].extent;
+                            const int wantedWidth =
+                                int(std::ceil(extent[0] * map.scaling)) + 2;
+                            const int wantedHeight =
+                                int(std::ceil(extent[1] * map.scaling)) + 2;
+                            if (wantedWidth == bitmap.width && wantedHeight == bitmap.height)
+                                ++sizeMatches;
+                            else
+                                ++sizeMismatches;
+
+                            std::uint32_t atX = 0, atY = 0;
+                            if (!patchAtlas.place(bitmap, atX, atY))
+                                continue;
+
+                            for (std::uint32_t vertex : meshElement->charts[chart].vertices)
                             {
-                                const auto found = batchOf.find(placement.meshName);
-                                if (found != batchOf.end() && found->second != std::size_t(-1))
-                                    lit = batches[found->second].mesh;
+                                if (vertex >= meshElement->lightmapUV.size())
+                                    continue;
+                                const std::array<float, 2> &uv = meshElement->lightmapUV[vertex];
+                                const std::size_t at = (coordBase + vertexRunning + vertex) * 2;
+                                if (at + 1 >= lightmapCoords.size())
+                                    continue;
+                                lightmapCoords[at] =
+                                    (float(atX) + 1.0f + uv[0] * map.scaling) / float(PatchAtlas::c_Size);
+                                lightmapCoords[at + 1] =
+                                    (float(atY) + 1.0f + uv[1] * map.scaling) / float(PatchAtlas::c_Size);
+                                ++patchedVertices;
                             }
-
-                            std::size_t elementIndex = 0, vertexRunning = 0;
-                            for (const genome::LightmapElement &element : map.elements)
-                            {
-                                lightmapColours.insert(lightmapColours.end(), element.colours.begin(),
-                                                       element.colours.end());
-                                lightmapCoords.resize(lightmapColours.size() * 2, -1.0f);
-
-                                // The charts live in the mesh and the patches in
-                                // the lightmap, one for one. A chart's extent is
-                                // in world units and so are its coordinates, so
-                                // the texel is 1 + uv * scaling - the one being
-                                // the gutter the bake leaves on every side.
-                                const genome::MeshElement *meshElement =
-                                    lit && elementIndex < lit->elements.size() ? &lit->elements[elementIndex]
-                                                                              : nullptr;
-                                if (meshElement && !meshElement->lightmapUV.empty())
-                                {
-                                    for (std::size_t chart = 0;
-                                         chart < meshElement->charts.size() && chart < element.bitmaps.size();
-                                         ++chart)
-                                    {
-                                        const genome::LightmapBitmap &bitmap = element.bitmaps[chart];
-                                        if (bitmap.data.empty())
-                                            continue;
-
-                                        const std::array<float, 2> &extent = meshElement->charts[chart].extent;
-                                        const int wantedWidth =
-                                            int(std::ceil(extent[0] * map.scaling)) + 2;
-                                        const int wantedHeight =
-                                            int(std::ceil(extent[1] * map.scaling)) + 2;
-                                        if (wantedWidth == bitmap.width && wantedHeight == bitmap.height)
-                                            ++sizeMatches;
-                                        else
-                                            ++sizeMismatches;
-
-                                        std::uint32_t atX = 0, atY = 0;
-                                        if (!patchAtlas.place(bitmap, atX, atY))
-                                            continue;
-
-                                        for (std::uint32_t vertex : meshElement->charts[chart].vertices)
-                                        {
-                                            if (vertex >= meshElement->lightmapUV.size())
-                                                continue;
-                                            const std::array<float, 2> &uv = meshElement->lightmapUV[vertex];
-                                            const std::size_t at = (coordBase + vertexRunning + vertex) * 2;
-                                            if (at + 1 >= lightmapCoords.size())
-                                                continue;
-                                            lightmapCoords[at] =
-                                                (float(atX) + 1.0f + uv[0] * map.scaling) / float(PatchAtlas::c_Size);
-                                            lightmapCoords[at + 1] =
-                                                (float(atY) + 1.0f + uv[1] * map.scaling) / float(PatchAtlas::c_Size);
-                                            ++patchedVertices;
-                                        }
-                                    }
-                                }
-                                vertexRunning += element.colours.size();
-                                ++elementIndex;
-                                // The two run in step, so a missing direction
-                                // array still has to occupy its place.
-                                lightmapIncident.resize(lightmapColours.size() * 3, 0.0f);
-                                for (std::size_t index = 0; index < element.incident.size(); ++index)
-                                    lightmapIncident[lightmapIncident.size() - element.incident.size() + index] =
-                                        element.incident[index];
-                            }
-                            ++lightmapsFound;
                         }
-                        else
-                            ++lightmapsMissing;
                     }
+                    vertexRunning += element.colours.size();
+                    ++elementIndex;
+                    // The two run in step, so a missing direction
+                    // array still has to occupy its place.
+                    lightmapIncident.resize(lightmapColours.size() * 3, 0.0f);
+                    for (std::size_t index = 0; index < element.incident.size(); ++index)
+                        lightmapIncident[lightmapIncident.size() - element.incident.size() + index] =
+                            element.incident[index];
+                }
+                ++lightmapsFound;
+            }
+            else
+                ++lightmapsMissing;
+        }
+
+        return lightmapBase;
+                    };
 
                     const auto known = batchOf.find(placement.meshName);
                     if (known != batchOf.end())
                     {
                         if (known->second != std::size_t(-1))
                         {
-                            batches[known->second].lightmapBase.push_back(lightmapBase);
+                            batches[known->second].lightmapBase.push_back(
+                                attachLightmap(batches[known->second].mesh));
                             batches[known->second].transforms.push_back(placement.world);
                             batches[known->second].bounds.push_back(
                                 {placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
@@ -479,7 +483,7 @@ int main(int argc, char **argv)
 
                     render::MeshInstances batch;
                     batch.mesh = mesh.get();
-                    batch.lightmapBase.push_back(lightmapBase);
+                    batch.lightmapBase.push_back(attachLightmap(mesh.get()));
                     batch.transforms.push_back(placement.world);
                     batch.bounds.push_back({placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
                                             placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});

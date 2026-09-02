@@ -168,3 +168,33 @@ a direction is the whole point.
 Still not established: whether the colour is light alone or light times albedo,
 and what the 517012 bitmaps hold - those are addressed by the second UV set,
 which 2263 mesh elements carry and nothing yet uses.
+
+
+## The patches, and two orderings that hid everything
+
+The baked patches now reach the screen, and getting there took correcting two
+orderings rather than any of the things that looked wrong.
+
+The first: every `setLightmap` call came after `create()`, which is where the
+buffers are filled. The shader read a one-entry placeholder, and out-of-range
+reads on a storage buffer come back as zeros - so the occlusion term was zero
+everywhere and nothing that touched it could change anything.
+
+The second: a lightmap was attached before its mesh was loaded. The charts that
+address the patches live in the mesh, so for the first placement of every mesh
+there was no mesh to ask, and only later instances got coordinates. Attaching it
+once the mesh is known took the patches from 493 to **2545**, and the vertices
+carrying one from 3688 to **16139**.
+
+Then the question the switch was built for. Measured on one view, three ways:
+
+    no patches            mean 89.0   contrast 22.5
+    patches added         mean 92.0   contrast 23.1
+    patches replacing     mean 80.9   contrast 25.4
+
+**Replacing wins**, and it should: the bake already accounted for the sun that
+reached that surface, so adding both counts the same light twice - which flattens
+exactly as much as it brightens. It is now the default, and `--baked-adds` puts
+the other back for comparison.
+
+![The room with its baked patches](world-baked-patches.png)
