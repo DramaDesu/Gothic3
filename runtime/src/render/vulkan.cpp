@@ -10,6 +10,7 @@
 #include <vulkan/vulkan_win32.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 namespace render
@@ -393,13 +394,23 @@ void Device::destroy()
 
 bool Device::beginFrame()
 {
+    const auto millisSince = [](std::chrono::steady_clock::time_point from) {
+        return std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - from).count();
+    };
+
+    const auto retireStart = std::chrono::steady_clock::now();
     retireTransfers();
+    m_lastRetireMillis = millisSince(retireStart);
     ++m_frameCounter;
 
+    const auto fenceStart = std::chrono::steady_clock::now();
     vkWaitForFences(m_device, 1, &m_inFlight[m_frame], VK_TRUE, UINT64_MAX);
+    m_lastFenceMillis = millisSince(fenceStart);
 
+    const auto acquireStart = std::chrono::steady_clock::now();
     const VkResult acquired =
         vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX, m_acquired[m_frame], VK_NULL_HANDLE, &m_imageIndex);
+    m_lastAcquireMillis = millisSince(acquireStart);
     if (acquired == VK_ERROR_OUT_OF_DATE_KHR || acquired == VK_SUBOPTIMAL_KHR)
         return false;
 

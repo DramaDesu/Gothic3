@@ -278,12 +278,16 @@ worst frame is 12.8 ms and an arrival costs 1 ms on the frame.
   billboard from 29 to 8. The last 8 are definitions with no variant baked at
   all, and closing that would mean a render pass and a readback in the middle of
   a frame for eight trees.
-- **A quarter-second frame turns up in roughly one run in four**, and it is not
-  attributed. The grid printf and a swapchain rebuild were both guessed and both
-  measured wrong - the swapchain is never rebuilt during a flight. Four clean
-  runs put the real worst frame at 13 to 21 ms and name what it did: an arrival
-  costs about 5 ms over the baseline, a departure burst about 11. Until it can
-  be caught, the worst-frame figure is the one from a run without it.
+- **The quarter-second frame is not this program's.** It was chased through
+  four hypotheses - the grid printf, a swapchain rebuild, a burst of texture
+  retirements, and finally a partition of the frame into six phases that account
+  for every millisecond of it. Caught: 264.7 ms, of which 227.9 sat in
+  vkWaitForFences on the frame two back, 0.0 in acquiring an image, 0.0 in
+  streaming, 0.0 in the cull and 0.0 in recording - while the input phase, which
+  does nothing but GetAsyncKeyState, took 25.7 ms of the same frame. Both the
+  CPU and the GPU were taken away at once, which is not a shape any code here
+  can make. Two of the four hypotheses were real defects and are fixed; this one
+  is the machine.
 - **Synchronization validation has never actually run here.** The unwaited
   uploads are correct by the spec rule that a barrier orders against later
   submissions on the same queue, and that is an argument rather than a check. It

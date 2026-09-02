@@ -115,6 +115,13 @@ class Device
     // How many times the swapchain was rebuilt. Each one drains the device,
     // so a frame that took a quarter of a second is worth checking against it.
     std::size_t swapchainRebuilds() const { return m_swapchainRebuilds; }
+
+    // What the last beginFrame spent, in milliseconds, on each of the three
+    // things it can block in. Retiring is a poll and should always be nothing;
+    // the fence is our own GPU work; the acquire is the presentation engine.
+    float lastRetireMillis() const { return m_lastRetireMillis; }
+    float lastFenceMillis() const { return m_lastFenceMillis; }
+    float lastAcquireMillis() const { return m_lastAcquireMillis; }
     VkDeviceSize liveBytes() const { return m_liveBytes; }
     VkDeviceSize peakBytes() const { return m_peakBytes; }
 
@@ -174,6 +181,7 @@ class Device
     std::size_t m_liveAllocations = 0;
     std::size_t m_peakAllocations = 0;
     std::size_t m_swapchainRebuilds = 0;
+    float m_lastRetireMillis = 0.0f, m_lastFenceMillis = 0.0f, m_lastAcquireMillis = 0.0f;
     VkDeviceSize m_liveBytes = 0;
     VkDeviceSize m_peakBytes = 0;
     // What each allocation was worth, so giving it back subtracts the right

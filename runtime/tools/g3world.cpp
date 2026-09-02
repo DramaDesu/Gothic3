@@ -1610,6 +1610,19 @@ int main(int argc, char **argv)
     // guessed at. Two guesses have already been measured and been wrong.
     std::vector<std::uint8_t> frameWork;
     std::uint8_t workThisFrame = 0;
+    // Where a frame's time went, in six parts that add up to the whole of it.
+    struct FramePhases
+    {
+        float input = 0.0f, streaming = 0.0f, begin = 0.0f, cull = 0.0f, record = 0.0f, present = 0.0f;
+        // The three things beginFrame can block in, which together make up begin.
+        float retire = 0.0f, fence = 0.0f, acquire = 0.0f;
+        float total() const { return input + streaming + begin + cull + record + present; }
+    };
+    FramePhases phases;
+    std::vector<FramePhases> framePhases;
+    const auto millisSince = [](std::chrono::steady_clock::time_point from) {
+        return std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - from).count();
+    };
     if (benchFrames > 0)
     {
         frameTimes.reserve(std::size_t(benchFrames));
@@ -1721,6 +1734,9 @@ int main(int argc, char **argv)
             occlusion = !occlusion;
         if (flySpeed != 0.0f)
             move(forward, flySpeed * delta);
+
+        phases.input = millisSince(now);
+        const auto streamingStart = std::chrono::steady_clock::now();
 
         // Sectors arrive and leave as the camera moves. The rectangle changing
         // is the cheap test; the distance is what stops a camera sitting on a
@@ -1871,6 +1887,8 @@ int main(int argc, char **argv)
         const std::array<float, 16> viewProjection =
             multiply(perspective(1.0f, aspect, 50.0f, span * 4.0f), lookAt(eye, target));
 
+        phases.streaming = millisSince(streamingStart);
+        const auto beginStart = std::chrono::steady_clock::now();
         if (!device.beginFrame())
             continue;
 
@@ -1906,6 +1924,10 @@ int main(int argc, char **argv)
         rendering.colorAttachmentCount = 1;
         rendering.pColorAttachments = &color;
         rendering.pDepthAttachment = &depthAttachment;
+        phases.begin = millisSince(beginStart);
+        phases.retire = device.lastRetireMillis();
+        phases.fence = device.lastFenceMillis();
+        phases.acquire = device.lastAcquireMillis();
         vkCmdBeginRendering(command, &rendering);
 
         VkViewport viewport{0.0f, 0.0f, float(extent.width), float(extent.height), 0.0f, 1.0f};
@@ -1917,6 +1939,8 @@ int main(int argc, char **argv)
         const float pixelsPerRadian = float(extent.height) * 0.5f / std::tan(0.5f);
         const auto cullStart = std::chrono::steady_clock::now();
         renderer.cull(device, viewProjection, eye, pixelsPerRadian, 1.5f, occlusion);
+        phases.cull = millisSince(cullStart);
+        const auto recordStart = std::chrono::steady_clock::now();
         if (benchFrames > 0)
             cullTimes.push_back(std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
                                                                         cullStart).count());
@@ -1932,6 +1956,7 @@ int main(int argc, char **argv)
         }
         renderer.draw(device, viewProjection, {0.45f, 0.75f, 0.35f, lightmapReplaces});
 
+        phases.record = millisSince(recordStart);
         vkCmdEndRendering(command);
         // Outside the render pass, which is where the profiler may write to its
         // query pool.
@@ -1946,7 +1971,9 @@ int main(int argc, char **argv)
         vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &toPresent);
 
+        const auto presentStart = std::chrono::steady_clock::now();
         device.endFrame();
+        phases.present = millisSince(presentStart);
         G3_FRAME_MARK;
 
         if (benchFrames > 0)
@@ -1954,7 +1981,9 @@ int main(int argc, char **argv)
             frameTimes.push_back(
                 std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - now).count());
             frameWork.push_back(workThisFrame);
+            framePhases.push_back(phases);
             workThisFrame = 0;
+            phases = FramePhases{};
             if (int(frameTimes.size()) >= benchFrames)
             {
                 // The first frames pay for pipeline warm-up and uploads, so they
@@ -1978,6 +2007,17 @@ int main(int argc, char **argv)
                 for (std::size_t at = skip; at < frameTimes.size(); ++at)
                     if (frameTimes[at] > frameTimes[worst])
                         worst = at;
+                if (worst < framePhases.size())
+                {
+                    const FramePhases &split = framePhases[worst];
+                    std::printf("that frame went: %.1f input, %.1f streaming, %.1f waiting to begin, %.1f cull, "
+                                "%.1f recording, %.1f presenting - %.1f of %.1f accounted\n",
+                                split.input, split.streaming, split.begin, split.cull, split.record, split.present,
+                                split.total(), frameTimes[worst]);
+                    std::printf("and the waiting was: %.1f retiring transfers, %.1f on our own fence, "
+                                "%.1f acquiring an image\n",
+                                split.retire, split.fence, split.acquire);
+                }
                 const std::uint8_t did = worst < frameWork.size() ? frameWork[worst] : 0;
                 std::printf("the worst frame was number %zu of %zu at %.2f ms, and it %s\n", worst,
                             frameTimes.size(), frameTimes[worst],
