@@ -243,6 +243,10 @@ class WorldRenderer
     std::size_t m_instanceCount = 0;
     std::size_t m_rangeCount = 0;
     std::size_t m_bakedInstances = 0;
+    // Where addSector's time goes. Building a mesh's arrays and rebuilding the
+    // derived views are both plain CPU work sitting on the render thread, and
+    // whether they dominate decides what is worth moving.
+    double m_secondsPlacing = 0.0, m_secondsRebuilding = 0.0, m_secondsFlushing = 0.0;
 
     // Where a mesh sits in the arenas, and how many batches are relying on it.
     // Meshes are shared between sectors - a crate is a crate everywhere - so

@@ -1398,6 +1398,11 @@ int main(int argc, char **argv)
     std::vector<std::string> arriving;
     std::size_t sectorsArrived = 0, sectorsDeparted = 0;
     float worstArrival = 0.0f, totalArrival = 0.0f;
+    // What an arrival is actually made of. The accumulators that time the
+    // startup load are the same code, so snapshotting them either side of one
+    // arrival splits it for nothing; only the GPU half needs its own clock.
+    double arrivalRead = 0.0, arrivalMeshes = 0.0, arrivalLight = 0.0, arrivalTrees = 0.0;
+    double arrivalTextures = 0.0, arrivalUpload = 0.0, arrivalPatches = 0.0;
 
     while (window.pump())
     {
@@ -1507,6 +1512,8 @@ int main(int argc, char **argv)
                 if (entry)
                 {
                     const auto arrivalStart = std::chrono::steady_clock::now();
+                    const double wasRead = timeReadingSectors, wasMeshes = timeMeshes;
+                    const double wasLight = timeLightmaps, wasTrees = timeTrees, wasTextures = timeTextures;
                     SectorContent content;
                     content.name = path;
                     content.id = nextSectorId++;
@@ -1516,6 +1523,7 @@ int main(int argc, char **argv)
                         content.tiles = std::move(patchAtlas.sectorTiles);
                         resolveTextures(content.batches);
                         attachBillboards(content);
+                        const auto uploadStart = std::chrono::steady_clock::now();
                         if (!renderer.addSector(device, content.id, content.batches, content.lighting, &error))
                             std::printf("warning: %s did not fit: %s\n", path.c_str(), error.c_str());
                         else
@@ -1523,6 +1531,8 @@ int main(int argc, char **argv)
                             // The patches it brought, tile by tile. The atlas
                             // and its descriptor do not change - only texels
                             // inside tiles nothing was reading.
+                            arrivalUpload += since(uploadStart);
+                            const auto patchStart = std::chrono::steady_clock::now();
                             std::vector<std::uint8_t> tile(std::size_t(PatchAtlas::c_Tile) * PatchAtlas::c_Tile * 4);
                             for (std::uint32_t index : content.tiles)
                             {
@@ -1536,10 +1546,16 @@ int main(int argc, char **argv)
                                 renderer.updatePatchAtlas(device, tx, ty, PatchAtlas::c_Tile, PatchAtlas::c_Tile,
                                                           tile.data(), &error);
                             }
+                            arrivalPatches += since(patchStart);
                             residentSectors.push_back(std::move(content));
                             ++sectorsArrived;
                         }
                     }
+                    arrivalRead += timeReadingSectors - wasRead;
+                    arrivalMeshes += timeMeshes - wasMeshes;
+                    arrivalLight += timeLightmaps - wasLight;
+                    arrivalTrees += timeTrees - wasTrees;
+                    arrivalTextures += timeTextures - wasTextures;
                     const float cost = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
                                                                                 arrivalStart).count();
                     worstArrival = std::max(worstArrival, cost);
@@ -1666,6 +1682,16 @@ int main(int argc, char **argv)
                     if (sectorsArrived != 0)
                         std::printf("arrivals cost %.0f ms at worst and %.0f ms on average, %.0f ms in all\n",
                                     worstArrival, totalArrival / float(sectorsArrived), totalArrival);
+                    if (sectorsArrived != 0)
+                    {
+                        const double accounted = (arrivalRead + arrivalMeshes + arrivalLight + arrivalTrees +
+                                                  arrivalTextures + arrivalUpload + arrivalPatches) * 1000.0;
+                        std::printf("of that: %.0f ms reading sectors, %.0f meshes, %.0f lightmaps, %.0f trees, "
+                                    "%.0f textures, %.0f uploading, %.0f patches, %.0f unaccounted\n",
+                                    arrivalRead * 1000.0, arrivalMeshes * 1000.0, arrivalLight * 1000.0,
+                                    arrivalTrees * 1000.0, arrivalTextures * 1000.0, arrivalUpload * 1000.0,
+                                    arrivalPatches * 1000.0, double(totalArrival) - accounted);
+                    }
                     if (billboardsMissed != 0)
                         std::printf("%zu tree kinds arrived after the billboard atlas was baked and have none\n",
                                     billboardsMissed);

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <chrono>
 #include <map>
 #include <set>
 #include <tuple>
@@ -213,6 +214,14 @@ VkDescriptorSet WorldRenderer::descriptorFor(Device &device, const genome::Image
 // parameters rather than working them out again.
 bool WorldRenderer::placeMesh(Device &device, const genome::Mesh &mesh, MeshGeometry *&out, std::string *error)
 {
+    const auto started = std::chrono::steady_clock::now();
+    struct Timed
+    {
+        double &into;
+        std::chrono::steady_clock::time_point start;
+        ~Timed() { into += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); }
+    } timed{m_secondsPlacing, started};
+
     const auto existing = m_geometry.find(&mesh);
     if (existing != m_geometry.end())
     {
@@ -481,11 +490,15 @@ bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::v
         }
     }
 
+    const auto flushStart = std::chrono::steady_clock::now();
     if (!m_uploader.flush(device, error))
         return false;
+    m_secondsFlushing += std::chrono::duration<double>(std::chrono::steady_clock::now() - flushStart).count();
 
     m_sectors.push_back(held);
+    const auto rebuildStart = std::chrono::steady_clock::now();
     rebuildDerived();
+    m_secondsRebuilding += std::chrono::duration<double>(std::chrono::steady_clock::now() - rebuildStart).count();
 
     if (m_instanceCount > m_budget.instances)
     {
@@ -691,6 +704,8 @@ void WorldRenderer::reportArenas() const
     std::printf("%zu sectors resident, %zu batches, %zu instances of which %zu carry baked light\n",
                 m_sectors.size(), m_batches.size(), m_instanceCount, m_bakedInstances);
     std::printf("%zu occluders, %zu large enough but foliage\n", m_occluders.size(), m_foliageSkipped);
+    std::printf("addSector spent %.0f ms building mesh arrays, %.0f ms rebuilding the grid, %.0f ms in the queue\n",
+                m_secondsPlacing * 1000.0, m_secondsRebuilding * 1000.0, m_secondsFlushing * 1000.0);
 }
 
 bool WorldRenderer::createPipeline(Device &device, std::string *error)
