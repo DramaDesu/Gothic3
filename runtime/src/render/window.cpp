@@ -78,7 +78,14 @@ Window::Window(const std::string &title, int width, int height) : m_width(width)
                                CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top, nullptr, nullptr,
                                m_instance, nullptr);
     SetWindowLongPtrW(m_handle, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&g_state));
-    ShowWindow(m_handle, SW_SHOW);
+
+    // Shown without being activated: the viewer is started from a terminal,
+    // often several times in a row while something is being measured, and
+    // taking the keyboard away each time is worse than useless. Clicking it
+    // still brings it forward. Input does not need focus - movement and look
+    // are read through GetAsyncKeyState and GetCursorPos, which are global.
+    ShowWindow(m_handle, SW_SHOWNOACTIVATE);
+    SetWindowPos(m_handle, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 Window::~Window()
