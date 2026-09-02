@@ -207,6 +207,14 @@ int main(int argc, char **argv)
     PatchAtlas patchAtlas;
     std::size_t patchedVertices = 0, sizeMatches = 0, sizeMismatches = 0;
     std::unique_ptr<genome::PakArchive> lightmapArchive;
+    // Where the loading time actually goes, so streaming is designed against
+    // numbers rather than against a guess about which part is slow.
+    double timeReadingSectors = 0.0, timeMeshes = 0.0, timeLightmaps = 0.0, timeTrees = 0.0;
+    double timeTextures = 0.0, timeRenderer = 0.0;
+    const auto now = [] { return std::chrono::steady_clock::now(); };
+    const auto since = [](std::chrono::steady_clock::time_point start) {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    };
     std::size_t lightmapsFound = 0, lightmapsMissing = 0;
     static const genome::WorldMatrix c_Identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
@@ -351,7 +359,10 @@ int main(int argc, char **argv)
 
                 genome::WorldLayer layer;
                 std::string ignored;
-                if (!genome::loadWorldNode(world->read(entry, &ignored), layer, &ignored))
+                const auto sectorStart = now();
+                const bool read = genome::loadWorldNode(world->read(entry, &ignored), layer, &ignored);
+                timeReadingSectors += since(sectorStart);
+                if (!read)
                     continue;
                 ++sectors;
 
@@ -364,6 +375,18 @@ int main(int argc, char **argv)
                     // mesh is known: the charts that address the patches are in
                     // the mesh, not in the lightmap.
                     const auto attachLightmap = [&](const genome::Mesh *lit) {
+                        const auto lightmapStart = now();
+                        struct Timed
+                        {
+                            double &into;
+                            std::chrono::steady_clock::time_point start;
+                            ~Timed()
+                            {
+                                into += std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+                                            .count();
+                            }
+                        } timed{timeLightmaps, lightmapStart};
+
         // The baked lighting of this instance, found by the mesh it
         // places and its own identifier - which is exactly how the
         // archive names its files.
@@ -474,7 +497,11 @@ int main(int argc, char **argv)
                     }
 
                     auto mesh = std::make_unique<genome::Mesh>();
-                    if (!genome::loadMesh(archive->read(placement.meshName, &ignored), *mesh, &ignored))
+                    const auto meshStart = now();
+                    const bool loaded =
+                        genome::loadMesh(archive->read(placement.meshName, &ignored), *mesh, &ignored);
+                    timeMeshes += since(meshStart);
+                    if (!loaded)
                     {
                         ++missing;
                         batchOf.emplace(placement.meshName, std::size_t(-1));
@@ -527,6 +554,7 @@ int main(int argc, char **argv)
                             // them in view at once, which is where the frame
                             // goes; a distant one covering a few pixels must not
                             // cost the same as one filling the screen.
+                            const auto treeStart = now();
                             const std::uint32_t seed = definition.seed + variant * 7919u;
                             for (int level = 0; level < 2; ++level)
                             {
@@ -550,6 +578,7 @@ int main(int argc, char **argv)
                                 batches.push_back(std::move(batch));
                                 ownedMeshes.push_back(std::move(mesh));
                             }
+                            timeTrees += since(treeStart);
                         }
                         else
                             ++missingTrees;
@@ -666,7 +695,17 @@ int main(int argc, char **argv)
         const genome::Image *waterImage = water.get();
         images.push_back(std::move(water));
 
+        const auto textureStart = now();
         std::map<std::string, const genome::Image *> cache;
+        struct TimeTextures
+        {
+            double &into;
+            std::chrono::steady_clock::time_point start;
+            ~TimeTextures()
+            {
+                into += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            }
+        } timeTexturesGuard{timeTextures, textureStart};
         // Which materials throw away transparent pixels, remembered per name so
         // the answer survives the texture cache.
         std::map<std::string, bool> masked;
@@ -854,6 +893,8 @@ int main(int argc, char **argv)
         baker.destroy(device);
     }
 
+    std::printf("loading: %.1fs reading sectors, %.1fs meshes, %.1fs lightmaps, %.1fs growing trees\n",
+                timeReadingSectors, timeMeshes, timeLightmaps, timeTrees);
     std::printf("%zu instances lit by a baked lightmap, %zu without one, %zu colours, %zu direction floats\n",
                 lightmapsFound, lightmapsMissing, lightmapColours.size(), lightmapIncident.size());
     std::printf("%zu baked patches packed, %zu refused, %zu vertices given one; sizes match the charts %zu to %zu\n",
@@ -875,6 +916,7 @@ int main(int argc, char **argv)
     renderer.setLightmapCoords(std::move(lightmapCoords));
     renderer.setLightmapAtlas(&patchAtlas.image);
 
+    const auto rendererStart = now();
     if (!renderer.create(device, batches, &error))
     {
         std::cerr << "renderer: " << error << "\n";
@@ -897,6 +939,9 @@ int main(int argc, char **argv)
             std::printf("wrote the patch atlas to %s\n", dump);
         }
     }
+
+    timeRenderer = since(rendererStart);
+    std::printf("loading: %.1fs textures, %.1fs uploading to the card\n", timeTextures, timeRenderer);
 
     // Before the loop: setting this up records and submits a command buffer of
     // its own to calibrate the card's clock against ours, which cannot happen
