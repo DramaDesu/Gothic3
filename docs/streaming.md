@@ -208,12 +208,68 @@ textures - none of it on the frame.
 The world it builds is identical, not merely equivalent: the screenshot after a
 threaded flight matches the synchronous one byte for byte.
 
+## Textures: where the wall was not
+
+The plan was to make textures come and go with their sectors, because they are
+created when first seen and never released, each takes a VkDeviceMemory of its
+own, and the descriptor pool is a fixed number of sets. Measuring it took the
+reason away.
+
+```
+maxMemoryAllocationCount   4294967295 on this driver
+allocations                203 live, 208 at peak
+memory                     599 MB live, 616 MB at peak
+textures                   184 at load, 192 after 127 arrivals
+```
+
+The allocation count is not a limit here at all. The whole game ships 1897
+images and the pool holds 8192 sets, so every image in it could be resident at
+once and still fit. What is left is 599 MB, which is a memory question to be
+decided against a budget, not a lifetime one to be forced by a limit.
+
+The counter that says so was wrong the first time and the mistake is worth
+keeping: createBuffer and the depth image call vkAllocateMemory directly rather
+than through Device::allocate, so buffers decremented a count they had never
+incremented and it sat at zero - 9 at peak with 210 textures live.
+
+What the audit did find was one live bug and one piece of waste.
+
+**A stale index.** dropSector erases from m_batches, shifting every later index,
+and marks the derived views stale without touching m_batchOf; addSector reads
+m_batchOf first and rebuilds last. A sector arriving on a frame another leaves
+therefore indexed m_batches with pre-erase indices. Counting what the lookup
+would have returned: at 2500 units a second it never happened, and at 12000 one
+arrival landed on such a frame and 92 lookups would have named the wrong batch
+with 19 one past the end. `ensureDerived()` at the top of addSector closes it.
+
+**One file, one image.** The image cache was keyed by material name rather than
+by the file the material resolves to, so materials sharing a diffuse map each
+loaded their own copy and got their own image, allocation and descriptor set.
+Archive-wide, 913 materials resolve to 634 distinct files, one named twenty-five
+times. On the fixed flight: 211 textures at load became 184, 235 allocations
+became 203, and 633 MB became 599 MB.
+
+Three quiet failure paths went with it. findMemoryType returned 0 when nothing
+matched, and 0 is a real memory type - on this device host memory that is still
+usable for optimally tiled colour images, so a mask miss would have put a
+texture meant for the card into system RAM and said nothing. createTexture
+leaked a VkImage on exactly the failures memory pressure produces, and never
+checked whether the image view was made before writing it into a descriptor set.
+
+Over 4000 frames at 3500 units a second - 127 arrivals, 154 departures - the
+worst frame is 12.8 ms and an arrival costs 1 ms on the frame.
+
 ## What it still does not do
 
-- **Textures are still allocated one VkDeviceMemory each and never freed**, and
-  the image cache is keyed by material name rather than by the resolved file, so
-  two materials sharing a diffuse map each get their own image, their own
-  allocation and their own descriptor set.
+- **Textures are still never freed.** Not a wall, as above, but 599 MB. If they
+  are ever evicted the descriptor pool needs
+  VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, the sets have to wait out
+  the frames in flight the way arena ranges do, and there is currently no route
+  from a genome::Image to its Texture to free.
+- **addSector has no unwind.** If it fails part way - which the texture path can
+  make it do - the sector's lightmap range is allocated and unreachable, its
+  transforms are appended to batches that no dropSector will find, and the
+  caller drops its atlas tiles without giving them back.
 - **Billboard cells are not suballocated.** The atlas is baked once, from the
   kinds the first resident set happened to use. A fixed cell grid with cells
   handed out as kinds appear is the same trick used everywhere else here.
