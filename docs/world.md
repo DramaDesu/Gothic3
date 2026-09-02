@@ -263,6 +263,29 @@ screen, which was the first thing tried. It does reduce the cost - the cull goes
 because nearly everything occlusion rejects is small. That is the measurement
 that turned "make the test cheaper" into "do not run the test".
 
+## Comparing two versions
+
+Two runs of identical code, twenty minutes apart, read 0.91 ms and 1.05 ms a
+frame. That drift is larger than most changes worth making, so a comparison
+taken as "measure A, change the code, measure B" measures the afternoon.
+
+Alternate instead: A, B, A, B, back to back, and compare medians. The median
+matters because the mean is polluted by the occasional quarter-second frame the
+machine produces, which has been chased and is not ours.
+
+One result that came out of not doing this. Of 68061 instances the size test
+rejects 33478, and it is a squared distance against a squared radius where the
+frustum test is six planes - so asking the cheap one first looked obviously
+right. Measured, the cull did not move at all: 0.66, 0.67, 0.70 ms against 0.67,
+0.66, 0.65. The frame looked worse, but that was the drift above, not the
+change.
+
+The reason it does not help is worth keeping: the frustum test is first because
+it rejects more, not because it is cheaper. Asking the size test first asks it of
+everything, including all the instances behind the camera the frustum would have
+thrown away for the same price. Reverted - it changes what the counters mean for
+no measured gain.
+
 ## Not yet established
 
 Whether the terrain proper is meshes or a height field, what `.lrgeodat` holds,
