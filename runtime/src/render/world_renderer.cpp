@@ -9,6 +9,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <set>
 #include <tuple>
 
 namespace render
@@ -90,36 +91,231 @@ genome::Image solidImage(std::uint8_t r, std::uint8_t g, std::uint8_t b, std::ui
 
 } // namespace
 
-bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &batches, std::string *error)
+bool WorldRenderer::create(Device &device, const Budget &budget, std::string *error)
 {
-    std::vector<WorldVertex> vertices;
-    std::vector<std::uint32_t> indices;
-    std::vector<genome::WorldMatrix> instances;
+    m_budget = budget;
 
     m_boundsMin = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
                    std::numeric_limits<float>::max()};
     m_boundsMax = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
                    std::numeric_limits<float>::lowest()};
 
+    if (!m_vertices.create(device, sizeof(WorldVertex), budget.vertices, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, error))
+        return false;
+    if (!m_indices.create(device, sizeof(std::uint32_t), budget.indices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, error))
+        return false;
+
+    // The three lighting arenas are read as buffer[base + index], so they
+    // suballocate exactly as the geometry does. Incident is three floats a
+    // vertex and the patch coordinate two, both kept in floats so that neither
+    // depends on the other being the length it should be.
+    if (!m_lightmapArena.create(device, sizeof(std::uint32_t), budget.lightVertices,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, error))
+        return false;
+    if (!m_incidentArena.create(device, sizeof(float), 3 * budget.lightVertices, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                error))
+        return false;
+    if (!m_coordArena.create(device, sizeof(float), 2 * budget.lightVertices, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                             error))
+        return false;
+
+    if (!m_uploader.create(device, budget.staging, error))
+        return false;
+
+    // One buffer per frame in flight: culling rewrites it every frame.
+    for (Buffer &buffer : m_instanceBuffer)
+    {
+        buffer = device.createBuffer(sizeof(genome::WorldMatrix) * budget.instances,
+                                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true, error);
+        if (!buffer.handle)
+            return false;
+    }
+    m_visible.reserve(budget.instances);
+
+    const genome::Image white = solidImage(255, 255, 255, 255);
+    if (!createTexture(device, white, true, m_white, error))
+        return false;
+
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &binding;
+    vkCreateDescriptorSetLayout(device.device(), &layoutInfo, nullptr, &m_descriptorLayout);
+
+    // Sets are handed out as textures turn up rather than counted first, so the
+    // pool is sized by the budget.
+    const std::uint32_t setCount = budget.textures + 1;
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, setCount};
+    VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = setCount;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    vkCreateDescriptorPool(device.device(), &poolInfo, nullptr, &m_descriptorPool);
+
+    m_whiteSet = descriptorFor(device, nullptr, error);
+    if (!m_whiteSet)
+        return false;
+
+    return createPipeline(device, error);
+}
+
+VkDescriptorSet WorldRenderer::descriptorFor(Device &device, const genome::Image *image, std::string *error)
+{
+    if (image)
+    {
+        const auto existing = m_textureSets.find(image);
+        if (existing != m_textureSets.end())
+            return existing->second;
+    }
+    else if (m_whiteSet)
+        return m_whiteSet;
+
+    Texture texture = m_white;
+    if (image && !createTexture(device, *image, true, texture, error))
+        return VK_NULL_HANDLE;
+
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocate.descriptorPool = m_descriptorPool;
+    allocate.descriptorSetCount = 1;
+    allocate.pSetLayouts = &m_descriptorLayout;
+    if (vkAllocateDescriptorSets(device.device(), &allocate, &set) != VK_SUCCESS)
+    {
+        if (error)
+            *error = "the descriptor pool is out of sets; raise Budget::textures";
+        return VK_NULL_HANDLE;
+    }
+
+    VkDescriptorImageInfo imageInfo{texture.sampler, texture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = set;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
+
+    if (image)
+    {
+        m_textures.push_back(texture);
+        m_textureSets.emplace(image, set);
+    }
+    return set;
+}
+
+// Puts a mesh in the arenas, or finds the copy already there. The element table
+// is rebased once here, so every batch drawing this mesh reuses the same draw
+// parameters rather than working them out again.
+bool WorldRenderer::placeMesh(Device &device, const genome::Mesh &mesh, MeshGeometry *&out, std::string *error)
+{
+    const auto existing = m_geometry.find(&mesh);
+    if (existing != m_geometry.end())
+    {
+        ++existing->second.refs;
+        out = &existing->second;
+        return true;
+    }
+
+    std::size_t vertexCount = 0, indexCount = 0;
+    for (const genome::MeshElement &element : mesh.elements)
+    {
+        if (element.positions.empty() || element.indices.empty())
+            continue;
+        vertexCount += element.positions.size();
+        indexCount += element.indices.size();
+    }
+    if (vertexCount == 0)
+    {
+        out = nullptr;
+        return true;
+    }
+
+    MeshGeometry geometry;
+    geometry.refs = 1;
+    geometry.vertexCount = vertexCount;
+    geometry.indexCount = indexCount;
+    geometry.vertexOffset = m_vertices.allocate(vertexCount);
+    geometry.indexOffset = m_indices.allocate(indexCount);
+    if (geometry.vertexOffset == GpuArena::npos || geometry.indexOffset == GpuArena::npos)
+    {
+        if (error)
+            *error = "the geometry arena is full; raise Budget::vertices or Budget::indices";
+        return false;
+    }
+
+    // Built once and handed over together, so a mesh is one staged copy of
+    // vertices and one of indices however many elements it has.
+    std::vector<WorldVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    vertices.reserve(vertexCount);
+    indices.reserve(indexCount);
+
+    for (const genome::MeshElement &element : mesh.elements)
+    {
+        if (element.positions.empty() || element.indices.empty())
+            continue;
+
+        MeshGeometry::Element out{};
+        out.firstIndex = std::uint32_t(geometry.indexOffset + indices.size());
+        out.indexCount = std::uint32_t(element.indices.size());
+        out.vertexOffset = std::int32_t(geometry.vertexOffset + vertices.size());
+        geometry.elements.push_back(out);
+
+        // Indices stay local to their element; vertexOffset does the rebasing
+        // at draw time, so a mesh is stored once however often it is placed.
+        indices.insert(indices.end(), element.indices.begin(), element.indices.end());
+
+        for (std::size_t index = 0; index < element.positions.size(); ++index)
+        {
+            WorldVertex vertex{};
+            vertex.position = element.positions[index];
+            vertex.normal =
+                index < element.normals.size() ? element.normals[index] : std::array<float, 3>{0.0f, 1.0f, 0.0f};
+            vertex.texCoord =
+                index < element.texCoords.size() ? element.texCoords[index] : std::array<float, 2>{0.0f, 0.0f};
+            vertices.push_back(vertex);
+        }
+    }
+
+    if (!m_uploader.write(device, m_vertices, geometry.vertexOffset, vertices.data(), vertices.size(), error))
+        return false;
+    if (!m_uploader.write(device, m_indices, geometry.indexOffset, indices.data(), indices.size(), error))
+        return false;
+
+    m_vertexCount += vertexCount;
+    m_indexCount += indexCount;
+    out = &m_geometry.emplace(&mesh, std::move(geometry)).first->second;
+    return true;
+}
+
+bool WorldRenderer::addBatches(Device &device, const std::vector<MeshInstances> &batches, std::string *error)
+{
     std::size_t litInstances = 0;
-    std::map<const genome::Image *, std::size_t> uploaded;
-    std::vector<std::size_t> textureForRange;
 
     for (const MeshInstances &batch : batches)
     {
         if (!batch.mesh || batch.transforms.empty())
             continue;
 
-        const std::uint32_t firstInstance = static_cast<std::uint32_t>(instances.size());
-        instances.insert(instances.end(), batch.transforms.begin(), batch.transforms.end());
+        MeshGeometry *geometry = nullptr;
+        if (!placeMesh(device, *batch.mesh, geometry, error))
+            return false;
+        if (!geometry)
+            continue;
 
         Batch kept;
+        kept.mesh = batch.mesh;
         kept.transforms = batch.transforms;
 
-        // Where this mesh's vertices begin in the shared buffer. The shader
-        // indexes its lighting with gl_VertexIndex, which counts from the start
-        // of that buffer rather than from the start of the mesh.
-        const std::int32_t meshFirstVertex = static_cast<std::int32_t>(vertices.size());
+        // Where this mesh's vertices begin in the arena. The shader indexes its
+        // lighting with gl_VertexIndex, which counts from the start of the
+        // buffer rather than from the start of the mesh.
+        const std::int32_t meshFirstVertex = std::int32_t(geometry->vertexOffset);
 
         // Two unused corners of the transform carry it: the first row's w holds
         // the bias, which may be negative, and the second row's w says whether
@@ -156,64 +352,37 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
         kept.lodFar = batch.lodFar;
         kept.faceCamera = batch.faceCamera;
 
-        std::size_t elementIndex = 0;
-        for (const genome::MeshElement &element : batch.mesh->elements)
+        // The world's extent, for whoever wants to point a camera at it. Where
+        // the instances brought their own bounds those are exact; where they did
+        // not, the mesh's own box is taken through each transform by its eight
+        // corners, which is a superset of the vertices and vastly cheaper than
+        // walking every vertex through every transform.
+        if (kept.hasExtent)
         {
-            if (element.positions.empty() || element.indices.empty())
+            for (int axis = 0; axis < 3; ++axis)
             {
-                ++elementIndex;
-                continue;
+                m_boundsMin[axis] = std::min(m_boundsMin[axis], kept.extent[axis]);
+                m_boundsMax[axis] = std::max(m_boundsMax[axis], kept.extent[axis + 3]);
             }
+        }
+        else
+        {
+            std::array<float, 6> local{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                                       std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
+                                       std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+            for (const genome::MeshElement &element : batch.mesh->elements)
+                for (const std::array<float, 3> &position : element.positions)
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        local[axis] = std::min(local[axis], position[axis]);
+                        local[axis + 3] = std::max(local[axis + 3], position[axis]);
+                    }
 
-            Range range;
-            range.firstIndex = static_cast<std::uint32_t>(indices.size());
-            range.indexCount = static_cast<std::uint32_t>(element.indices.size());
-            range.vertexOffset = static_cast<std::int32_t>(vertices.size());
-            range.firstInstance = firstInstance;
-            range.instanceCount = static_cast<std::uint32_t>(batch.transforms.size());
-            range.alphaTested = elementIndex < batch.alphaTested.size() && batch.alphaTested[elementIndex] != 0;
-            kept.ranges.push_back(m_ranges.size());
-            m_ranges.push_back(range);
-
-            const genome::Image *image =
-                elementIndex < batch.textures.size() ? batch.textures[elementIndex] : nullptr;
-            std::size_t texture = std::size_t(-1);
-            if (image)
-            {
-                const auto existing = uploaded.find(image);
-                if (existing != uploaded.end())
-                    texture = existing->second;
-                else
+            for (const genome::WorldMatrix &m : kept.transforms)
+                for (int corner = 0; corner < 8; ++corner)
                 {
-                    Texture created;
-                    if (!createTexture(device, *image, true, created, error))
-                        return false;
-                    texture = m_textures.size();
-                    uploaded.emplace(image, texture);
-                    m_textures.push_back(created);
-                }
-            }
-            textureForRange.push_back(texture);
-
-            // Indices stay local to their mesh; vertexOffset does the rebasing at
-            // draw time, so a mesh is stored once however often it is placed.
-            indices.insert(indices.end(), element.indices.begin(), element.indices.end());
-
-            for (std::size_t index = 0; index < element.positions.size(); ++index)
-            {
-                WorldVertex vertex{};
-                vertex.position = element.positions[index];
-                vertex.normal = index < element.normals.size() ? element.normals[index]
-                                                               : std::array<float, 3>{0.0f, 1.0f, 0.0f};
-                vertex.texCoord = index < element.texCoords.size() ? element.texCoords[index]
-                                                                   : std::array<float, 2>{0.0f, 0.0f};
-                vertices.push_back(vertex);
-
-                // Vertices are in object space now, so the bounds have to be
-                // taken through every transform the mesh is placed with.
-                for (const genome::WorldMatrix &m : batch.transforms)
-                {
-                    const std::array<float, 3> &v = vertex.position;
+                    const std::array<float, 3> v{local[(corner & 1) ? 3 : 0], local[(corner & 2) ? 4 : 1],
+                                                 local[(corner & 4) ? 5 : 2]};
                     const std::array<float, 3> world{v[0] * m[0] + v[1] * m[4] + v[2] * m[8] + m[12],
                                                      v[0] * m[1] + v[1] * m[5] + v[2] * m[9] + m[13],
                                                      v[0] * m[2] + v[1] * m[6] + v[2] * m[10] + m[14]};
@@ -223,114 +392,122 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
                         m_boundsMax[axis] = std::max(m_boundsMax[axis], world[axis]);
                     }
                 }
+        }
+
+        std::size_t elementIndex = 0, drawable = 0;
+        for (const genome::MeshElement &element : batch.mesh->elements)
+        {
+            if (element.positions.empty() || element.indices.empty())
+            {
+                ++elementIndex;
+                continue;
             }
+
+            const MeshGeometry::Element &placed = geometry->elements[drawable++];
+            Range range;
+            range.firstIndex = placed.firstIndex;
+            range.indexCount = placed.indexCount;
+            range.vertexOffset = placed.vertexOffset;
+            range.firstInstance = 0;
+            range.instanceCount = std::uint32_t(batch.transforms.size());
+            range.alphaTested = elementIndex < batch.alphaTested.size() && batch.alphaTested[elementIndex] != 0;
+
+            const genome::Image *image =
+                elementIndex < batch.textures.size() ? batch.textures[elementIndex] : nullptr;
+            range.descriptor = descriptorFor(device, image, error);
+            if (!range.descriptor)
+                return false;
+
+            kept.ranges.push_back(range);
+            ++m_rangeCount;
             ++elementIndex;
         }
-        m_batches.push_back(std::move(kept));
-    }
 
-    std::printf("%zu instances carry baked lighting into the shader\n", litInstances);
-    buildGrid();
-
-    // Anything spanning more than about ten metres is worth rasterising as an
-    // occluder: houses, cliffs and the landscape itself, not barrels.
-    std::size_t foliageSkipped = 0;
-    for (std::size_t batch = 0; batch < m_batches.size(); ++batch)
-    {
-        const Batch &current = m_batches[batch];
-        for (std::size_t instance = 0; instance < current.bounds.size(); ++instance)
+        // Anything spanning more than about ten metres is worth rasterising as
+        // an occluder: houses, cliffs and the landscape itself, not barrels.
+        const std::size_t batchIndex = m_batches.size();
+        for (std::size_t instance = 0; instance < kept.bounds.size(); ++instance)
         {
-            const std::array<float, 6> &box = current.bounds[instance];
+            const std::array<float, 6> &box = kept.bounds[instance];
             const float extent = std::max({box[3] - box[0], box[4] - box[1], box[5] - box[2]});
             if (extent < 1000.0f)
                 continue;
-            if (current.occludes)
-                m_occluders.push_back({batch, instance});
+            if (kept.occludes)
+                m_occluders.push_back({batchIndex, instance});
             else
-                ++foliageSkipped;
+                ++m_foliageSkipped;
+        }
+
+        m_instanceCount += kept.transforms.size();
+        m_batches.push_back(std::move(kept));
+    }
+
+    if (!m_uploader.flush(device, error))
+        return false;
+
+    if (m_instanceCount > m_budget.instances)
+    {
+        if (error)
+            *error = "more instances than the buffer holds; raise Budget::instances";
+        return false;
+    }
+
+    if (litInstances != 0)
+        std::printf("%zu instances carry baked lighting into the shader\n", litInstances);
+    buildGrid();
+    return true;
+}
+
+bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &batches, std::string *error)
+{
+    // A fixed set that will never be added to, so the budget is exactly what it
+    // needs plus a little slack rather than a guess.
+    std::size_t vertices = 0, indices = 0, instances = 0;
+    std::set<const genome::Mesh *> seen;
+    for (const MeshInstances &batch : batches)
+    {
+        instances += batch.transforms.size();
+        if (!batch.mesh || !seen.insert(batch.mesh).second)
+            continue;
+        for (const genome::MeshElement &element : batch.mesh->elements)
+        {
+            if (element.positions.empty() || element.indices.empty())
+                continue;
+            vertices += element.positions.size();
+            indices += element.indices.size();
         }
     }
-    std::printf("%zu occluders, %zu large enough but foliage\n", m_occluders.size(), foliageSkipped);
 
-    if (vertices.empty() || instances.empty())
+    Budget budget;
+    budget.vertices = vertices + 1024;
+    budget.indices = indices + 1024;
+    budget.lightVertices = std::max<std::size_t>(m_lightmapColours.size(), 1024);
+    budget.instances = instances + 1024;
+    budget.staging = std::min<VkDeviceSize>(64u << 20, sizeof(WorldVertex) * budget.vertices + (1u << 20));
+
+    if (!create(device, budget, error))
+        return false;
+    if (!addBatches(device, batches, error))
+        return false;
+
+    if (m_vertexCount == 0 || m_instanceCount == 0)
     {
         if (error)
             *error = "no geometry to draw";
         return false;
     }
+    std::printf("%zu occluders, %zu large enough but foliage\n", m_occluders.size(), m_foliageSkipped);
+    return true;
+}
 
-    m_vertexCount = vertices.size();
-    m_indexCount = indices.size();
-    m_instanceCount = instances.size();
-
-    if (!uploadDeviceLocal(device, vertices.data(), sizeof(WorldVertex) * vertices.size(),
-                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, m_vertexBuffer, error))
-        return false;
-    if (!uploadDeviceLocal(device, indices.data(), sizeof(std::uint32_t) * indices.size(),
-                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT, m_indexBuffer, error))
-        return false;
-
-    // One buffer per frame in flight: culling rewrites it every frame.
-    for (Buffer &buffer : m_instanceBuffer)
-    {
-        buffer = device.createBuffer(sizeof(genome::WorldMatrix) * instances.size(),
-                                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true, error);
-        if (!buffer.handle)
-            return false;
-        std::memcpy(buffer.mapped, instances.data(), sizeof(genome::WorldMatrix) * instances.size());
-    }
-    m_visible.reserve(instances.size());
-
-    const genome::Image white = solidImage(255, 255, 255, 255);
-    if (!createTexture(device, white, true, m_white, error))
-        return false;
-
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-    VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &binding;
-    vkCreateDescriptorSetLayout(device.device(), &layoutInfo, nullptr, &m_descriptorLayout);
-
-    const std::uint32_t setCount = static_cast<std::uint32_t>(m_textures.size() + 1);
-    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, setCount};
-    VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    poolInfo.maxSets = setCount;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
-    vkCreateDescriptorPool(device.device(), &poolInfo, nullptr, &m_descriptorPool);
-
-    std::vector<VkDescriptorSet> sets(setCount, VK_NULL_HANDLE);
-    for (std::uint32_t index = 0; index < setCount; ++index)
-    {
-        VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        allocate.descriptorPool = m_descriptorPool;
-        allocate.descriptorSetCount = 1;
-        allocate.pSetLayouts = &m_descriptorLayout;
-        vkAllocateDescriptorSets(device.device(), &allocate, &sets[index]);
-
-        const Texture &texture = index < m_textures.size() ? m_textures[index] : m_white;
-        VkDescriptorImageInfo imageInfo{texture.sampler, texture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        write.dstSet = sets[index];
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.pImageInfo = &imageInfo;
-        vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
-    }
-
-    for (std::size_t range = 0; range < m_ranges.size(); ++range)
-    {
-        const std::size_t texture = textureForRange[range];
-        m_ranges[range].descriptor = sets[texture == std::size_t(-1) ? m_textures.size() : texture];
-    }
-
-    return createPipeline(device, error);
+void WorldRenderer::reportArenas() const
+{
+    std::printf("arenas: %.0f%% of %zuM vertices, %.0f%% of %zuM indices, %.0f%% of %zuM lit vertices, "
+                "%zu textures, %zu staging submits\n",
+                100.0 * double(m_vertices.highWater()) / double(m_vertices.capacity()), m_vertices.capacity() >> 20,
+                100.0 * double(m_indices.highWater()) / double(m_indices.capacity()), m_indices.capacity() >> 20,
+                100.0 * double(m_lightmapArena.highWater()) / double(m_lightmapArena.capacity()),
+                m_lightmapArena.capacity() >> 20, m_textureSets.size(), m_uploader.submits());
 }
 
 bool WorldRenderer::createPipeline(Device &device, std::string *error)
@@ -352,20 +529,43 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
     // uniform block may hold - a single sector runs to hundreds of thousands.
     if (m_lightmapColours.empty())
         m_lightmapColours.push_back(0xFFFFFFFF);
-    if (!uploadDeviceLocal(device, m_lightmapColours.data(), sizeof(std::uint32_t) * m_lightmapColours.size(),
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, m_lightmapBuffer, error))
-        return false;
-
     if (m_lightmapIncident.empty())
         m_lightmapIncident.assign(3, 0.0f);
-    if (!uploadDeviceLocal(device, m_lightmapIncident.data(), sizeof(float) * m_lightmapIncident.size(),
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, m_incidentBuffer, error))
-        return false;
-
     if (m_lightmapCoords.empty())
         m_lightmapCoords.assign(2, -1.0f);
-    if (!uploadDeviceLocal(device, m_lightmapCoords.data(), sizeof(float) * m_lightmapCoords.size(),
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, m_coordBuffer, error))
+
+    struct Upload
+    {
+        GpuArena *arena;
+        const void *data;
+        std::size_t count;
+        const char *what;
+    };
+    const Upload uploads[3] = {{&m_lightmapArena, m_lightmapColours.data(), m_lightmapColours.size(), "colours"},
+                               {&m_incidentArena, m_lightmapIncident.data(), m_lightmapIncident.size(), "directions"},
+                               {&m_coordArena, m_lightmapCoords.data(), m_lightmapCoords.size(), "patch coordinates"}};
+    for (const Upload &upload : uploads)
+    {
+        // Allocated rather than assumed to start at zero: the base a transform
+        // carries is an index into the arena, not into the array it came from.
+        const std::size_t base = upload.arena->allocate(upload.count);
+        if (base == GpuArena::npos)
+        {
+            if (error)
+                *error = std::string("the lighting arena has no room for the baked ") + upload.what +
+                         "; raise Budget::lightVertices";
+            return false;
+        }
+        if (base != 0)
+        {
+            if (error)
+                *error = "the baked lighting was not the first thing into its arena";
+            return false;
+        }
+        if (!m_uploader.write(device, *upload.arena, base, upload.data, upload.count, error))
+            return false;
+    }
+    if (!m_uploader.flush(device, error))
         return false;
 
     // The atlas the patches were packed into. Without one, a single white texel
@@ -439,10 +639,10 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
         vkAllocateDescriptorSets(device.device(), &allocate, &m_lightSet[frame]);
 
         VkDescriptorBufferInfo bufferInfo{m_lightBuffer[frame].handle, 0, lightBytes};
-        VkDescriptorBufferInfo lightmapInfo{m_lightmapBuffer.handle, 0, VK_WHOLE_SIZE};
+        VkDescriptorBufferInfo lightmapInfo{m_lightmapArena.handle(), 0, VK_WHOLE_SIZE};
 
-        VkDescriptorBufferInfo incidentInfo{m_incidentBuffer.handle, 0, VK_WHOLE_SIZE};
-        VkDescriptorBufferInfo coordInfo{m_coordBuffer.handle, 0, VK_WHOLE_SIZE};
+        VkDescriptorBufferInfo incidentInfo{m_incidentArena.handle(), 0, VK_WHOLE_SIZE};
+        VkDescriptorBufferInfo coordInfo{m_coordArena.handle(), 0, VK_WHOLE_SIZE};
         VkDescriptorImageInfo atlasInfo{m_lightmapTexture.sampler, m_lightmapTexture.view,
                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkWriteDescriptorSet writes[5]{};
@@ -708,10 +908,10 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
             // Rejected whole. Its instances still have to be accounted for, or
             // the counts stop adding up to what was loaded.
             m_tooSmall += batch.transforms.size();
-            for (std::size_t range : batch.ranges)
+            for (Range &range : batch.ranges)
             {
-                m_ranges[range].firstInstance = firstInstance;
-                m_ranges[range].instanceCount = 0;
+                range.firstInstance = firstInstance;
+                range.instanceCount = 0;
             }
             continue;
         }
@@ -813,14 +1013,14 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
             ++visible;
         }
 
-        for (std::size_t range : batch.ranges)
+        for (Range &range : batch.ranges)
         {
-            m_ranges[range].firstInstance = firstInstance;
-            m_ranges[range].instanceCount = visible;
+            range.firstInstance = firstInstance;
+            range.instanceCount = visible;
             if (visible != 0)
             {
                 ++m_submittedDraws;
-                m_submittedTriangles += std::size_t(m_ranges[range].indexCount / 3) * visible;
+                m_submittedTriangles += std::size_t(range.indexCount / 3) * visible;
             }
         }
     }
@@ -986,10 +1186,10 @@ void WorldRenderer::prepareAll(Device &device)
         const std::uint32_t firstInstance = static_cast<std::uint32_t>(m_visible.size());
         for (const genome::WorldMatrix &transform : batch.transforms)
             m_visible.push_back(transform);
-        for (std::size_t range : batch.ranges)
+        for (Range &range : batch.ranges)
         {
-            m_ranges[range].firstInstance = firstInstance;
-            m_ranges[range].instanceCount = static_cast<std::uint32_t>(batch.transforms.size());
+            range.firstInstance = firstInstance;
+            range.instanceCount = static_cast<std::uint32_t>(batch.transforms.size());
         }
     }
     if (!m_visible.empty())
@@ -1016,13 +1216,12 @@ void WorldRenderer::drawBatch(Device &device, std::size_t batch, const std::arra
                        &push);
 
     const VkDeviceSize offsets[2] = {0, 0};
-    const VkBuffer buffers[2] = {m_vertexBuffer.handle, m_instanceBuffer[device.frameIndex()].handle};
+    const VkBuffer buffers[2] = {m_vertices.handle(), m_instanceBuffer[device.frameIndex()].handle};
     vkCmdBindVertexBuffers(command, 0, 2, buffers, offsets);
-    vkCmdBindIndexBuffer(command, m_indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindIndexBuffer(command, m_indices.handle(), 0, VK_INDEX_TYPE_UINT32);
 
-    for (std::size_t index : m_batches[batch].ranges)
+    for (const Range &range : m_batches[batch].ranges)
     {
-        const Range &range = m_ranges[index];
         if (range.instanceCount == 0)
             continue;
 
@@ -1054,15 +1253,16 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
                             &m_lightSet[device.frameIndex()], 0, nullptr);
 
     const VkDeviceSize offsets[2] = {0, 0};
-    const VkBuffer buffers[2] = {m_vertexBuffer.handle, m_instanceBuffer[device.frameIndex()].handle};
+    const VkBuffer buffers[2] = {m_vertices.handle(), m_instanceBuffer[device.frameIndex()].handle};
     vkCmdBindVertexBuffers(command, 0, 2, buffers, offsets);
-    vkCmdBindIndexBuffer(command, m_indexBuffer.handle, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindIndexBuffer(command, m_indices.handle(), 0, VK_INDEX_TYPE_UINT32);
 
     // One draw per range: tiles sharing a regional material share a descriptor,
     // so this is a handful of texture binds rather than one per tile.
     VkDescriptorSet bound = VK_NULL_HANDLE;
     float boundAlphaTest = -1.0f;
-    for (const Range &range : m_ranges)
+    for (const Batch &batch : m_batches)
+        for (const Range &range : batch.ranges)
     {
         if (range.instanceCount == 0)
             continue;
@@ -1095,9 +1295,10 @@ void WorldRenderer::destroy(Device &device)
     destroyTexture(device, m_white);
     for (std::uint32_t frame = 0; frame < Device::c_FramesInFlight; ++frame)
         device.destroyBuffer(m_lightBuffer[frame]);
-    device.destroyBuffer(m_lightmapBuffer);
-    device.destroyBuffer(m_incidentBuffer);
-    device.destroyBuffer(m_coordBuffer);
+    m_coordArena.destroy(device);
+    m_lightmapArena.destroy(device);
+    m_incidentArena.destroy(device);
+    m_uploader.destroy(device);
     destroyTexture(device, m_lightmapTexture);
     if (m_lightPool)
         vkDestroyDescriptorPool(device.device(), m_lightPool, nullptr);
@@ -1111,8 +1312,8 @@ void WorldRenderer::destroy(Device &device)
     if (m_descriptorLayout)
         vkDestroyDescriptorSetLayout(device.device(), m_descriptorLayout, nullptr);
 
-    device.destroyBuffer(m_vertexBuffer);
-    device.destroyBuffer(m_indexBuffer);
+    m_vertices.destroy(device);
+    m_indices.destroy(device);
     for (Buffer &buffer : m_instanceBuffer)
         device.destroyBuffer(buffer);
     if (m_pipeline)

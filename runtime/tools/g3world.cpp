@@ -985,6 +985,7 @@ int main(int argc, char **argv)
         std::cerr << "renderer: " << error << "\n";
         return 1;
     }
+    renderer.reportArenas();
     if (const char *dump = std::getenv("G3_DUMP_ATLAS"))
     {
         // The packed patches, so the packing can be looked at rather than

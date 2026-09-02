@@ -4,6 +4,7 @@
 // once in their own object space and repeated through instance transforms - a
 // world of a hundred thousand objects only has a few thousand distinct meshes.
 
+#include "arena.h"
 #include "genome/image.h"
 #include "genome/mesh.h"
 #include "genome/world.h"
@@ -13,6 +14,7 @@
 #include "vulkan.h"
 
 #include <array>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -71,14 +73,43 @@ struct MeshInstances
 class WorldRenderer
 {
   public:
+    // What the arenas are built to hold. Fixed on purpose: a buffer that cannot
+    // grow says at load time that the budget is wrong, instead of saying it at
+    // run time by hitching. Every count is in elements.
+    struct Budget
+    {
+        std::size_t vertices = 8u << 20;
+        std::size_t indices = 16u << 20;
+        // Vertices carrying baked light. The three lighting arenas are one
+        // colour, three floats of incident direction and two of patch
+        // coordinate per vertex, so this one number sizes all three.
+        std::size_t lightVertices = 4u << 20;
+        std::size_t instances = 512u << 10;
+        std::uint32_t textures = 8192;
+        VkDeviceSize staging = 64u << 20;
+    };
     // Timestamps around the drawing, collected by the profiler. Call collect
     // once a frame, outside a render pass.
     void startProfiling(Device &device);
     void collectProfiling(Device &device);
     void stopProfiling();
 
+    // An empty world of a fixed size, ready to be filled.
+    bool create(Device &device, const Budget &budget, std::string *error);
+
+    // Everything at once, for the tools that load a fixed set and never add to
+    // it: the budget is measured from what is handed over.
     bool create(Device &device, const std::vector<MeshInstances> &batches, std::string *error);
+
+    // Puts geometry in. A mesh already present is not uploaded twice - it is
+    // shared and counted - so a sector arriving next to one already loaded pays
+    // only for what is new to it.
+    bool addBatches(Device &device, const std::vector<MeshInstances> &batches, std::string *error);
+
     void destroy(Device &device);
+
+    // How much of each arena is spoken for, for whoever set the budget.
+    void reportArenas() const;
 
     // Rebuilds this frame's instance buffer from what the camera can see.
     // `eye` and `pixelsPerRadian` let small distant objects be dropped: a fork
@@ -126,7 +157,7 @@ class WorldRenderer
     std::size_t vertexCount() const { return m_vertexCount; }
     std::size_t triangleCount() const { return m_indexCount / 3; }
     std::size_t instanceCount() const { return m_instanceCount; }
-    std::size_t drawCount() const { return m_ranges.size(); }
+    std::size_t drawCount() const { return m_rangeCount; }
 
     // What the last cull actually handed the card: triangles times instances,
     // which is the number that decides a GPU-bound frame rather than the
@@ -166,9 +197,9 @@ class WorldRenderer
     std::vector<float> m_lightmapCoords;
     const genome::Image *m_lightmapAtlas = nullptr;
     Texture m_lightmapTexture{};
-    Buffer m_coordBuffer{};
-    Buffer m_lightmapBuffer{};
-    Buffer m_incidentBuffer{};
+    GpuArena m_coordArena;
+    GpuArena m_lightmapArena;
+    GpuArena m_incidentArena;
     std::size_t m_litLights = 0;
     Buffer m_lightBuffer[Device::c_FramesInFlight]{};
     VkDescriptorSetLayout m_lightLayout = VK_NULL_HANDLE;
@@ -179,13 +210,42 @@ class WorldRenderer
     VkPipelineLayout m_layout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
 
-    Buffer m_vertexBuffer{};
-    Buffer m_indexBuffer{};
+    GpuArena m_vertices;
+    GpuArena m_indices;
+    ArenaUploader m_uploader;
+    Budget m_budget;
     Buffer m_instanceBuffer[Device::c_FramesInFlight]{};
     std::size_t m_vertexCount = 0;
     std::size_t m_indexCount = 0;
     std::size_t m_instanceCount = 0;
-    std::vector<Range> m_ranges;
+    std::size_t m_rangeCount = 0;
+
+    // Where a mesh sits in the arenas, and how many batches are relying on it.
+    // Meshes are shared between sectors - a crate is a crate everywhere - so
+    // the geometry is uploaded once and only given back when the last batch
+    // using it goes.
+    struct MeshGeometry
+    {
+        std::size_t refs = 0;
+        std::size_t vertexOffset = 0, vertexCount = 0;
+        std::size_t indexOffset = 0, indexCount = 0;
+
+        // One per drawable element, already rebased onto the arena.
+        struct Element
+        {
+            std::uint32_t firstIndex = 0;
+            std::uint32_t indexCount = 0;
+            std::int32_t vertexOffset = 0;
+        };
+        std::vector<Element> elements;
+    };
+    std::map<const genome::Mesh *, MeshGeometry> m_geometry;
+    bool placeMesh(Device &device, const genome::Mesh &mesh, MeshGeometry *&out, std::string *error);
+
+    // One descriptor set per texture, made when the texture is first seen.
+    std::map<const genome::Image *, VkDescriptorSet> m_textureSets;
+    VkDescriptorSet m_whiteSet = VK_NULL_HANDLE;
+    VkDescriptorSet descriptorFor(Device &device, const genome::Image *image, std::string *error);
 
     // Per batch: the transforms and their bounds, kept so each frame can pick
     // the visible subset.
@@ -193,7 +253,10 @@ class WorldRenderer
     {
         std::vector<genome::WorldMatrix> transforms;
         std::vector<std::array<float, 6>> bounds;
-        std::vector<std::size_t> ranges; // indices into m_ranges
+        // The draws this batch makes, by value: a batch that leaves takes its
+        // draws with it, which an index into a shared list cannot do.
+        std::vector<Range> ranges;
+        const genome::Mesh *mesh = nullptr;
         bool occludes = true;
 
         // Everything this batch's instances cover. A grass patch or a tree
@@ -241,6 +304,7 @@ class WorldRenderer
         std::size_t instance = 0;
     };
     std::vector<Occluder> m_occluders;
+    std::size_t m_foliageSkipped = 0;
 
     VkDescriptorSetLayout m_descriptorLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
