@@ -570,6 +570,9 @@ int main(int argc, char **argv)
     // Runs the cull several times a frame. The cost of the extra passes is the
     // warm-cache cost; the difference from the first is what the memory costs.
     int cullRepeat = 1;
+    // The card is the bottleneck now, so the pixel count is a first-class
+    // parameter rather than a constant.
+    int windowWidth = 1280, windowHeight = 720;
     // Residency is decided against a far plane of its own, not the one the
     // camera draws with: it is the game's number, and what made 36 sectors the
     // answer rather than some other count.
@@ -626,6 +629,11 @@ int main(int argc, char **argv)
             uncapped = true;
         if (std::string(argv[index]) == "--no-occlusion")
             startWithOcclusion = false;
+        if (std::string(argv[index]) == "--size" && index + 2 < argc)
+        {
+            windowWidth = std::atoi(argv[index + 1]);
+            windowHeight = std::atoi(argv[index + 2]);
+        }
         if (std::string(argv[index]) == "--cull-repeat" && hasValue)
             cullRepeat = std::max(1, std::atoi(argv[index + 1]));
         if (std::string(argv[index]) == "--occlusion-pixels" && hasValue)
@@ -1337,7 +1345,7 @@ int main(int argc, char **argv)
         });
     }
 
-    render::Window window("Genome runtime - world", 1280, 720);
+    render::Window window("Genome runtime - world", windowWidth, windowHeight);
     render::Device device;
     if (!device.create(window, &error, validation, uncapped))
     {
@@ -2031,7 +2039,11 @@ int main(int argc, char **argv)
                                 total / float(kept.size()), kept[kept.size() / 2],
                                 kept[std::size_t(float(kept.size()) * 0.95f)], kept.back());
                 };
-                std::printf("presenting %s\n", device.presentModeName());
+                // The extent the swapchain really got, not the one asked for:
+                // a window larger than the desktop is clamped, and a number
+                // measured at a size that was never used is worse than none.
+                std::printf("drawing %ux%u, presenting %s\n", device.extent().width, device.extent().height,
+                            device.presentModeName());
                 report(frameTimes, "frame");
                 report(cullTimes, "cull");
                 {
