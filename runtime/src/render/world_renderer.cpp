@@ -519,10 +519,11 @@ bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::v
     m_secondsFlushing += std::chrono::duration<double>(std::chrono::steady_clock::now() - flushStart).count();
 
     m_sectors.push_back(held);
-    const auto rebuildStart = std::chrono::steady_clock::now();
-    rebuildDerived();
-    m_secondsRebuilding += std::chrono::duration<double>(std::chrono::steady_clock::now() - rebuildStart).count();
+    m_derivedStale = true;
 
+    // The instance count is one of the things the rebuild works out, so the
+    // check that the buffer can hold them has to happen after one.
+    ensureDerived();
     if (m_instanceCount > m_budget.instances)
     {
         if (error)
@@ -592,7 +593,20 @@ void WorldRenderer::dropSector(Device &device, std::uint32_t sector)
         m_batches.erase(m_batches.begin() + std::ptrdiff_t(index));
     }
 
+    m_derivedStale = true;
+}
+
+// Rebuilds them if anything moved. Called before every cull, and by anything
+// that needs a number the rebuild produces.
+void WorldRenderer::ensureDerived()
+{
+    if (!m_derivedStale)
+        return;
+    m_derivedStale = false;
+
+    const auto started = std::chrono::steady_clock::now();
     rebuildDerived();
+    m_secondsRebuilding += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 }
 
 // Extents, world bounds, occluders, the grid and the mesh-to-batch map are all
@@ -982,6 +996,7 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                          bool useOcclusion)
 {
     retireReleases(device.frameCounter());
+    ensureDerived();
 
     G3_ZONE("cull");
 

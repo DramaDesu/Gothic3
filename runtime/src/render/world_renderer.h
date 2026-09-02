@@ -300,8 +300,12 @@ class WorldRenderer
     std::vector<Sector> m_sectors;
 
     // Extents, occluders, the grid and the mesh-to-batch map, all of which are
-    // views of the batch list and are worked out again whenever it changes.
+    // views of the batch list. Marked stale when it changes and rebuilt once,
+    // before the cull that reads them - a burst of departures would otherwise
+    // pay for a full rebuild each.
     void rebuildDerived();
+    void ensureDerived();
+    bool m_derivedStale = false;
 
     // One descriptor set per texture, made when the texture is first seen.
     std::map<const genome::Image *, VkDescriptorSet> m_textureSets;

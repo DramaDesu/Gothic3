@@ -33,9 +33,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <set>
 
 namespace
@@ -290,6 +294,144 @@ struct SectorContent
     std::vector<std::pair<std::string, std::size_t>> treeSlots;
     // The atlas tiles its baked patches went into.
     std::vector<std::uint32_t> tiles;
+};
+
+// What the loader hands back. The tile pixels travel with it because the atlas
+// belongs to the loader's thread and the main thread must not read from it.
+struct LoadedSector
+{
+    SectorContent content;
+    std::vector<std::uint8_t> tilePixels;
+    bool ok = false;
+};
+
+// One thread owns every archive and every cache a load touches, and nothing
+// else calls in. There is no version of this that shares them: PakArchive::read
+// seeks a FILE* it holds, and the caches are plain maps. The main thread posts
+// a path and takes back a finished sector.
+class SectorLoader
+{
+  public:
+    using Load = std::function<void(const genome::PakEntry &, std::uint32_t, LoadedSector &)>;
+    using GiveBack = std::function<void(const std::vector<std::uint32_t> &)>;
+
+    void start(Load load, GiveBack giveBack)
+    {
+        m_load = std::move(load);
+        m_giveBack = std::move(giveBack);
+        m_thread = std::thread([this] { run(); });
+    }
+
+    void stop()
+    {
+        if (!m_thread.joinable())
+            return;
+        {
+            std::lock_guard<std::mutex> guard(m_mutex);
+            m_stopping = true;
+        }
+        m_wake.notify_all();
+        m_thread.join();
+    }
+
+    // True while a sector is queued or being loaded. One at a time: the point
+    // is to keep the frame free, not to load faster.
+    bool busy() const
+    {
+        std::lock_guard<std::mutex> guard(m_mutex);
+        return m_working || !m_queue.empty();
+    }
+
+    void request(const genome::PakEntry &entry, std::uint32_t id)
+    {
+        {
+            std::lock_guard<std::mutex> guard(m_mutex);
+            m_queue.push_back({&entry, id});
+        }
+        m_wake.notify_one();
+    }
+
+    // Tiles a departed sector gave back. Freed on the loader's thread, since
+    // the atlas is its own.
+    void giveBackTiles(std::vector<std::uint32_t> tiles)
+    {
+        if (tiles.empty())
+            return;
+        {
+            std::lock_guard<std::mutex> guard(m_mutex);
+            m_returning.push_back(std::move(tiles));
+        }
+        m_wake.notify_one();
+    }
+
+    bool take(LoadedSector &out)
+    {
+        std::lock_guard<std::mutex> guard(m_mutex);
+        if (m_done.empty())
+            return false;
+        out = std::move(m_done.front());
+        m_done.pop_front();
+        return true;
+    }
+
+  private:
+    struct Request
+    {
+        const genome::PakEntry *entry = nullptr;
+        std::uint32_t id = 0;
+    };
+
+    void run()
+    {
+        for (;;)
+        {
+            Request request;
+            std::vector<std::uint32_t> returning;
+            {
+                std::unique_lock<std::mutex> guard(m_mutex);
+                m_wake.wait(guard, [this] { return m_stopping || !m_queue.empty() || !m_returning.empty(); });
+                if (m_stopping && m_queue.empty() && m_returning.empty())
+                    return;
+                if (!m_returning.empty())
+                {
+                    returning = std::move(m_returning.front());
+                    m_returning.pop_front();
+                }
+                else
+                {
+                    request = m_queue.front();
+                    m_queue.pop_front();
+                    m_working = true;
+                }
+            }
+
+            if (!returning.empty())
+            {
+                m_giveBack(returning);
+                continue;
+            }
+
+            LoadedSector loaded;
+            m_load(*request.entry, request.id, loaded);
+
+            {
+                std::lock_guard<std::mutex> guard(m_mutex);
+                m_done.push_back(std::move(loaded));
+                m_working = false;
+            }
+        }
+    }
+
+    mutable std::mutex m_mutex;
+    std::condition_variable m_wake;
+    std::thread m_thread;
+    std::deque<Request> m_queue;
+    std::deque<LoadedSector> m_done;
+    std::deque<std::vector<std::uint32_t>> m_returning;
+    bool m_working = false;
+    bool m_stopping = false;
+    Load m_load;
+    GiveBack m_giveBack;
 };
 
 } // namespace
@@ -1409,13 +1551,48 @@ int main(int argc, char **argv)
     // can still be sampling them. The next arrival would otherwise take one and
     // paint over it mid-frame.
     std::vector<std::pair<std::uint64_t, std::vector<std::uint32_t>>> freedTiles;
-    std::size_t sectorsArrived = 0, sectorsDeparted = 0;
+    std::size_t sectorsArrived = 0, sectorsDeparted = 0, sectorsUnwanted = 0;
     float worstArrival = 0.0f, totalArrival = 0.0f;
-    // What an arrival is actually made of. The accumulators that time the
-    // startup load are the same code, so snapshotting them either side of one
-    // arrival splits it for nothing; only the GPU half needs its own clock.
-    double arrivalRead = 0.0, arrivalMeshes = 0.0, arrivalLight = 0.0, arrivalTrees = 0.0;
-    double arrivalTextures = 0.0, arrivalUpload = 0.0, arrivalPatches = 0.0;
+
+    // Everything a sector needs read and parsed, on the loader's thread. Its
+    // timing accumulators are written here too, and read only after the loader
+    // has stopped.
+    SectorLoader loader;
+    loader.start(
+        [&](const genome::PakEntry &entry, std::uint32_t id, LoadedSector &out) {
+            out.content.name = entry.path;
+            out.content.id = id;
+            patchAtlas.beginSector();
+            if (!loadSector(entry, out.content))
+                return;
+            out.content.tiles = std::move(patchAtlas.sectorTiles);
+            resolveTextures(out.content.batches);
+            attachBillboards(out.content);
+
+            // Gathered here rather than on the frame, because a tile is a
+            // window into a 4096-wide image and the image is ours.
+            const std::size_t tileBytes = std::size_t(PatchAtlas::c_Tile) * PatchAtlas::c_Tile * 4;
+            out.tilePixels.resize(tileBytes * out.content.tiles.size());
+            for (std::size_t which = 0; which < out.content.tiles.size(); ++which)
+            {
+                const std::uint32_t index = out.content.tiles[which];
+                const std::uint32_t tx = (index % PatchAtlas::c_Grid) * PatchAtlas::c_Tile;
+                const std::uint32_t ty = (index / PatchAtlas::c_Grid) * PatchAtlas::c_Tile;
+                std::uint8_t *into = out.tilePixels.data() + which * tileBytes;
+                for (std::uint32_t row = 0; row < PatchAtlas::c_Tile; ++row)
+                    std::memcpy(into + std::size_t(row) * PatchAtlas::c_Tile * 4,
+                                &patchAtlas.image.data[(std::size_t(ty + row) * PatchAtlas::c_Size + tx) * 4],
+                                std::size_t(PatchAtlas::c_Tile) * 4);
+            }
+            out.ok = true;
+        },
+        [&](const std::vector<std::uint32_t> &tiles) { patchAtlas.freeTiles(tiles); });
+    // What an arrival is made of, split by which thread pays for it. The
+    // loading accumulators belong to the loader's thread now, so they are read
+    // once, after it has stopped, as deltas from where they stood at startup.
+    const double startRead = timeReadingSectors, startMeshes = timeMeshes;
+    const double startLight = timeLightmaps, startTrees = timeTrees, startTextures = timeTextures;
+    double arrivalUpload = 0.0, arrivalPatches = 0.0;
 
     while (window.pump())
     {
@@ -1482,7 +1659,7 @@ int main(int argc, char **argv)
                     ++index;
                     continue;
                 }
-                patchAtlas.freeTiles(freedTiles[index].second);
+                loader.giveBackTiles(std::move(freedTiles[index].second));
                 freedTiles.erase(freedTiles.begin() + std::ptrdiff_t(index));
             }
 
@@ -1525,73 +1702,63 @@ int main(int argc, char **argv)
                 }
             }
 
-            // One a frame. A sector is tens of milliseconds of work, and doing
-            // several would turn a hitch into a stall.
-            if (!arriving.empty())
+            // One at a time, and not on this thread. The loader owns the
+            // archives and the caches, so it takes a path and gives back a
+            // finished sector; the frame does the Vulkan half only.
+            if (!arriving.empty() && !loader.busy())
             {
                 const std::string path = arriving.back();
                 arriving.pop_back();
-
-                const genome::PakEntry *entry = nullptr;
                 for (const genome::PakEntry &one : world->entries())
                     if (!one.deleted && one.path == path)
-                        entry = &one;
+                    {
+                        loader.request(one, nextSectorId++);
+                        break;
+                    }
+            }
 
-                if (entry)
+            LoadedSector loaded;
+            if (loader.take(loaded) && loaded.ok)
+            {
+                // It may no longer be wanted: the camera can turn round while a
+                // sector is being read. Giving the tiles back is all the
+                // undoing needed, since nothing else reached the card yet.
+                const auto box = boundsOf.find(sectorKey(loaded.content.name));
+                const bool wanted = box != boundsOf.end() && genome::overlaps(box->second, heldCells);
+                if (!wanted)
+                {
+                    loader.giveBackTiles(std::move(loaded.content.tiles));
+                    ++sectorsUnwanted;
+                }
+                else
                 {
                     const auto arrivalStart = std::chrono::steady_clock::now();
-                    const double wasRead = timeReadingSectors, wasMeshes = timeMeshes;
-                    const double wasLight = timeLightmaps, wasTrees = timeTrees, wasTextures = timeTextures;
-                    SectorContent content;
-                    content.name = path;
-                    content.id = nextSectorId++;
-                    patchAtlas.beginSector();
-                    if (loadSector(*entry, content))
+                    SectorContent &content = loaded.content;
+                    if (!renderer.addSector(device, content.id, content.batches, content.lighting, &error))
+                        std::printf("warning: %s did not fit: %s\n", content.name.c_str(), error.c_str());
+                    else
                     {
-                        content.tiles = std::move(patchAtlas.sectorTiles);
-                        resolveTextures(content.batches);
-                        attachBillboards(content);
-                        const auto uploadStart = std::chrono::steady_clock::now();
-                        if (!renderer.addSector(device, content.id, content.batches, content.lighting, &error))
-                            std::printf("warning: %s did not fit: %s\n", path.c_str(), error.c_str());
-                        else
+                        arrivalUpload += since(arrivalStart);
+                        const auto patchStart = std::chrono::steady_clock::now();
+
+                        // The tiles it brought, in one submit. The pixels came
+                        // with it: the atlas belongs to the loader's thread.
+                        const std::size_t tileBytes = std::size_t(PatchAtlas::c_Tile) * PatchAtlas::c_Tile * 4;
+                        std::vector<render::TextureRegion> regions;
+                        regions.reserve(content.tiles.size());
+                        for (std::size_t which = 0; which < content.tiles.size(); ++which)
                         {
-                            // The patches it brought, tile by tile. The atlas
-                            // and its descriptor do not change - only texels
-                            // inside tiles nothing was reading.
-                            arrivalUpload += since(uploadStart);
-                            const auto patchStart = std::chrono::steady_clock::now();
-                            // Every tile it brought, in one submit. Gathered out
-                            // of the atlas row by row because a tile is a window
-                            // into a 4096-wide image, not a run of bytes.
-                            const std::size_t tileBytes = std::size_t(PatchAtlas::c_Tile) * PatchAtlas::c_Tile * 4;
-                            std::vector<std::uint8_t> pixels(tileBytes * content.tiles.size());
-                            std::vector<render::TextureRegion> regions;
-                            regions.reserve(content.tiles.size());
-                            for (std::size_t which = 0; which < content.tiles.size(); ++which)
-                            {
-                                const std::uint32_t index = content.tiles[which];
-                                const std::uint32_t tx = (index % PatchAtlas::c_Grid) * PatchAtlas::c_Tile;
-                                const std::uint32_t ty = (index / PatchAtlas::c_Grid) * PatchAtlas::c_Tile;
-                                std::uint8_t *into = pixels.data() + which * tileBytes;
-                                for (std::uint32_t row = 0; row < PatchAtlas::c_Tile; ++row)
-                                    std::memcpy(into + std::size_t(row) * PatchAtlas::c_Tile * 4,
-                                                &patchAtlas.image.data[(std::size_t(ty + row) * PatchAtlas::c_Size +
-                                                                        tx) * 4],
-                                                std::size_t(PatchAtlas::c_Tile) * 4);
-                                regions.push_back({tx, ty, PatchAtlas::c_Tile, PatchAtlas::c_Tile, into});
-                            }
-                            renderer.updatePatchAtlas(device, regions, &error);
-                            arrivalPatches += since(patchStart);
-                            residentSectors.push_back(std::move(content));
-                            ++sectorsArrived;
+                            const std::uint32_t index = content.tiles[which];
+                            const std::uint32_t tx = (index % PatchAtlas::c_Grid) * PatchAtlas::c_Tile;
+                            const std::uint32_t ty = (index / PatchAtlas::c_Grid) * PatchAtlas::c_Tile;
+                            regions.push_back({tx, ty, PatchAtlas::c_Tile, PatchAtlas::c_Tile,
+                                               loaded.tilePixels.data() + which * tileBytes});
                         }
+                        renderer.updatePatchAtlas(device, regions, &error);
+                        arrivalPatches += since(patchStart);
+                        residentSectors.push_back(std::move(content));
+                        ++sectorsArrived;
                     }
-                    arrivalRead += timeReadingSectors - wasRead;
-                    arrivalMeshes += timeMeshes - wasMeshes;
-                    arrivalLight += timeLightmaps - wasLight;
-                    arrivalTrees += timeTrees - wasTrees;
-                    arrivalTextures += timeTextures - wasTextures;
                     const float cost = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
                                                                                 arrivalStart).count();
                     worstArrival = std::max(worstArrival, cost);
@@ -1718,16 +1885,23 @@ int main(int argc, char **argv)
                     if (sectorsArrived != 0)
                         std::printf("arrivals cost %.0f ms at worst and %.0f ms on average, %.0f ms in all\n",
                                     worstArrival, totalArrival / float(sectorsArrived), totalArrival);
+                    // Nothing is loading any more, so its accumulators can be
+                    // read.
+                    loader.stop();
                     if (sectorsArrived != 0)
                     {
-                        const double accounted = (arrivalRead + arrivalMeshes + arrivalLight + arrivalTrees +
-                                                  arrivalTextures + arrivalUpload + arrivalPatches) * 1000.0;
-                        std::printf("of that: %.0f ms reading sectors, %.0f meshes, %.0f lightmaps, %.0f trees, "
-                                    "%.0f textures, %.0f uploading, %.0f patches, %.0f unaccounted\n",
-                                    arrivalRead * 1000.0, arrivalMeshes * 1000.0, arrivalLight * 1000.0,
-                                    arrivalTrees * 1000.0, arrivalTextures * 1000.0, arrivalUpload * 1000.0,
-                                    arrivalPatches * 1000.0, double(totalArrival) - accounted);
+                        std::printf("on the frame: %.0f ms uploading, %.0f ms patches, %.0f ms unaccounted\n",
+                                    arrivalUpload * 1000.0, arrivalPatches * 1000.0,
+                                    double(totalArrival) - (arrivalUpload + arrivalPatches) * 1000.0);
+                        std::printf("on the loader: %.0f ms reading sectors, %.0f meshes, %.0f lightmaps, "
+                                    "%.0f trees, %.0f textures\n",
+                                    (timeReadingSectors - startRead) * 1000.0, (timeMeshes - startMeshes) * 1000.0,
+                                    (timeLightmaps - startLight) * 1000.0, (timeTrees - startTrees) * 1000.0,
+                                    (timeTextures - startTextures) * 1000.0);
                     }
+                    if (sectorsUnwanted != 0)
+                        std::printf("%zu sectors finished loading after the camera had left them\n",
+                                    sectorsUnwanted);
                     std::printf("%zu transfers still in flight, %zu drains paid to keep the bound\n",
                                 device.transfersInFlight(), device.transferStalls());
                     if (billboardsMissed != 0)
@@ -1747,6 +1921,7 @@ int main(int argc, char **argv)
             // a capture is worth nothing without the numbers behind it.
             std::printf("visible %zu of %zu (%zu too small, %zu occluded)\n", renderer.visibleInstances(),
                         renderer.instanceCount(), renderer.tooSmallInstances(), renderer.occludedInstances());
+            loader.stop();
             std::printf("shot from %.0f %.0f %.0f looking %.2f %.2f radians\n", eye[0], eye[1], eye[2], yaw,
                         pitch);
             if (streaming)
@@ -1762,6 +1937,7 @@ int main(int argc, char **argv)
     }
 
     vkDeviceWaitIdle(device.device());
+    loader.stop();
     renderer.stopProfiling();
     renderer.destroy(device);
     render::destroyTreeAtlas(device, treeAtlas);
