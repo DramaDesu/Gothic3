@@ -1407,7 +1407,11 @@ int main(int argc, char **argv)
     while (window.pump())
     {
         const auto now = std::chrono::steady_clock::now();
-        const float delta = std::min(std::chrono::duration<float>(now - previous).count(), 0.1f);
+        // A benched flight uses a fixed step rather than the real frame time, so
+        // that the same command flies the same path every run and two
+        // measurements can be compared at all.
+        const float delta = benchFrames > 0 ? 1.0f / 60.0f
+                                            : std::min(std::chrono::duration<float>(now - previous).count(), 0.1f);
         previous = now;
 
         const bool wantsLook = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
