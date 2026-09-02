@@ -266,10 +266,9 @@ worst frame is 12.8 ms and an arrival costs 1 ms on the frame.
   VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, the sets have to wait out
   the frames in flight the way arena ranges do, and there is currently no route
   from a genome::Image to its Texture to free.
-- **addSector has no unwind.** If it fails part way - which the texture path can
-  make it do - the sector's lightmap range is allocated and unreachable, its
-  transforms are appended to batches that no dropSector will find, and the
-  caller drops its atlas tiles without giving them back.
+- **A refused sector is retried every time the rectangle changes**, and fails
+  again for the same reason. Harmless, since the unwind is clean, but it is
+  work done for nothing.
 - **Billboard cells are not suballocated.** The atlas is baked once, from the
   kinds the first resident set happened to use. A fixed cell grid with cells
   handed out as kinds appear is the same trick used everywhere else here.

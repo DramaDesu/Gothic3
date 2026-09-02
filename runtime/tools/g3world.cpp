@@ -562,6 +562,10 @@ int main(int argc, char **argv)
     // rectangle of 10000-unit cells around the camera. Off by default so the
     // whole-world runs still work.
     bool streaming = false;
+    // How much room the arenas get beyond what the first resident set needs.
+    // Below 1 the arenas cannot hold what arrives and addSector starts
+    // refusing sectors, which is the only way to exercise its unwind.
+    double budgetRoom = 0.0;
     // A baked patch stands in for the daylight on the surface it covers, rather
     // than adding to it: the bake already accounted for the sun that reached
     // there, and adding both counts the same light twice. Measured - replacing
@@ -598,6 +602,8 @@ int main(int argc, char **argv)
             validation = true;
         if (std::string(argv[index]) == "--stream")
             streaming = true;
+        if (std::string(argv[index]) == "--squeeze" && hasValue)
+            budgetRoom = std::atof(argv[index + 1]);
         if (std::string(argv[index]) == "--fly" && hasValue)
             flySpeed = float(std::atof(argv[index + 1]));
         if (std::string(argv[index]) == "--baked-adds")
@@ -1475,7 +1481,9 @@ int main(int argc, char **argv)
         for (const SectorContent &content : residentSectors)
             budgetLit += content.lighting.colours.size();
 
-        const double room = streaming ? 2.0 : 1.02;
+        const double room = budgetRoom > 0.0 ? budgetRoom : (streaming ? 2.0 : 1.02);
+        if (budgetRoom > 0.0)
+            std::printf("squeezed: the arenas get %.2f times what the first resident set needs\n", budgetRoom);
         budget.vertices = std::size_t(double(budgetVertices) * room) + 4096;
         budget.indices = std::size_t(double(budgetIndices) * room) + 4096;
         budget.lightVertices = std::size_t(double(budgetLit) * room) + 4096;
@@ -1578,7 +1586,7 @@ int main(int argc, char **argv)
     // can still be sampling them. The next arrival would otherwise take one and
     // paint over it mid-frame.
     std::vector<std::pair<std::uint64_t, std::vector<std::uint32_t>>> freedTiles;
-    std::size_t sectorsArrived = 0, sectorsDeparted = 0, sectorsUnwanted = 0;
+    std::size_t sectorsArrived = 0, sectorsDeparted = 0, sectorsUnwanted = 0, sectorsRefused = 0;
     float worstArrival = 0.0f, totalArrival = 0.0f;
 
     // Everything a sector needs read and parsed, on the loader's thread. Its
@@ -1762,7 +1770,13 @@ int main(int argc, char **argv)
                     const auto arrivalStart = std::chrono::steady_clock::now();
                     SectorContent &content = loaded.content;
                     if (!renderer.addSector(device, content.id, content.batches, content.lighting, &error))
+                    {
+                        // It put itself back, so the tiles have to go back too -
+                        // otherwise they are held by a sector that is not there.
                         std::printf("warning: %s did not fit: %s\n", content.name.c_str(), error.c_str());
+                        loader.giveBackTiles(std::move(content.tiles));
+                        ++sectorsRefused;
+                    }
                     else
                     {
                         arrivalUpload += since(arrivalStart);
@@ -1929,6 +1943,8 @@ int main(int argc, char **argv)
                     if (sectorsUnwanted != 0)
                         std::printf("%zu sectors finished loading after the camera had left them\n",
                                     sectorsUnwanted);
+                    if (sectorsRefused != 0)
+                        std::printf("%zu sectors did not fit and were put back\n", sectorsRefused);
                     std::printf("%zu transfers still in flight, %zu drains paid to keep the bound\n",
                                 device.transfersInFlight(), device.transferStalls());
                     if (renderer.staleArrivals() != 0)

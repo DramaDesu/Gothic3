@@ -124,6 +124,12 @@ bool ArenaUploader::write(Device &device, GpuArena &arena, std::size_t offset, c
     return true;
 }
 
+void ArenaUploader::discard()
+{
+    m_pending.clear();
+    m_scratch.clear();
+}
+
 bool ArenaUploader::flush(Device &device, std::string *error)
 {
     if (m_pending.empty())

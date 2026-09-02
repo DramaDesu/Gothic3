@@ -90,6 +90,11 @@ class ArenaUploader
                std::string *error);
     bool flush(Device &device, std::string *error);
 
+    // Throws away what has been staged and not yet sent. Used when the work
+    // that staged it is being undone: flushing then would write into arena
+    // ranges that are on their way back to the free list.
+    void discard();
+
     std::size_t submits() const { return m_submits; }
 
   private:

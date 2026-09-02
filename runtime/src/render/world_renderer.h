@@ -313,6 +313,9 @@ class WorldRenderer
     void rebuildDerived();
     void ensureDerived();
     bool m_derivedStale = false;
+    // The grid says its size once. Saying it on every rebuild means saying it
+    // in the middle of a frame, to an unbuffered stdout.
+    bool m_reportedGrid = false;
     std::size_t m_staleArrivals = 0;
     std::size_t m_staleLookups = 0;
     std::size_t m_staleOutOfRange = 0;

@@ -252,6 +252,14 @@ bool WorldRenderer::placeMesh(Device &device, const genome::Mesh &mesh, MeshGeom
     geometry.indexOffset = m_indices.allocate(indexCount);
     if (geometry.vertexOffset == GpuArena::npos || geometry.indexOffset == GpuArena::npos)
     {
+        // One of the two may have succeeded, and nothing else knows about it -
+        // this mesh never reaches m_geometry, so no later release can find it.
+        // Straight back to the free list rather than through queueRelease: no
+        // frame can be reading a range that was never uploaded to.
+        if (geometry.vertexOffset != GpuArena::npos)
+            m_vertices.release(geometry.vertexOffset, vertexCount);
+        if (geometry.indexOffset != GpuArena::npos)
+            m_indices.release(geometry.indexOffset, indexCount);
         if (error)
             *error = "the geometry arena is full; raise Budget::vertices or Budget::indices";
         return false;
@@ -291,10 +299,13 @@ bool WorldRenderer::placeMesh(Device &device, const genome::Mesh &mesh, MeshGeom
         }
     }
 
-    if (!m_uploader.write(device, m_vertices, geometry.vertexOffset, vertices.data(), vertices.size(), error))
+    if (!m_uploader.write(device, m_vertices, geometry.vertexOffset, vertices.data(), vertices.size(), error) ||
+        !m_uploader.write(device, m_indices, geometry.indexOffset, indices.data(), indices.size(), error))
+    {
+        m_vertices.release(geometry.vertexOffset, vertexCount);
+        m_indices.release(geometry.indexOffset, indexCount);
         return false;
-    if (!m_uploader.write(device, m_indices, geometry.indexOffset, indices.data(), indices.size(), error))
-        return false;
+    }
 
     m_vertexCount += vertexCount;
     m_indexCount += indexCount;
@@ -446,17 +457,32 @@ bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::v
                 *error = "the lighting arena is full; raise Budget::lightVertices";
             return false;
         }
+    }
+
+    // From here the sector is a thing that can be dropped, so every failure
+    // below undoes itself by dropping it rather than by unwinding by hand. The
+    // staged copies go too: flushing them afterwards would write into ranges
+    // that are on their way back to the free list.
+    m_sectors.push_back(held);
+    const auto giveUp = [&]() {
+        m_uploader.discard();
+        dropSector(device, sector);
+        return false;
+    };
+
+    if (held.colourCount != 0)
+    {
         if (!m_uploader.write(device, m_lightmapArena, held.colourBase, lighting.colours.data(), held.colourCount,
                               error))
-            return false;
+            return giveUp();
         if (!lighting.incident.empty() &&
             !m_uploader.write(device, m_incidentArena, 3 * held.colourBase, lighting.incident.data(),
                               std::min(lighting.incident.size(), 3 * held.colourCount), error))
-            return false;
+            return giveUp();
         if (!lighting.coords.empty() &&
             !m_uploader.write(device, m_coordArena, 2 * held.colourBase, lighting.coords.data(),
                               std::min(lighting.coords.size(), 2 * held.colourCount), error))
-            return false;
+            return giveUp();
     }
 
     for (const MeshInstances &incoming : batches)
@@ -472,7 +498,7 @@ bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::v
         {
             MeshGeometry *geometry = nullptr;
             if (!placeMesh(device, *incoming.mesh, geometry, error))
-                return false;
+                return giveUp();
             if (!geometry)
                 continue;
 
@@ -505,7 +531,13 @@ bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::v
                     elementIndex < incoming.textures.size() ? incoming.textures[elementIndex] : nullptr;
                 range.descriptor = descriptorFor(device, image, error);
                 if (!range.descriptor)
-                    return false;
+                {
+                    // This batch was never pushed, so dropSector cannot see it:
+                    // its ranges and its hold on the mesh are undone here.
+                    m_rangeCount -= fresh.ranges.size();
+                    releaseMesh(device, incoming.mesh);
+                    return giveUp();
+                }
 
                 fresh.ranges.push_back(range);
                 ++m_rangeCount;
@@ -539,19 +571,21 @@ bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::v
 
     const auto flushStart = std::chrono::steady_clock::now();
     if (!m_uploader.flush(device, error))
-        return false;
+        return giveUp();
     m_secondsFlushing += std::chrono::duration<double>(std::chrono::steady_clock::now() - flushStart).count();
 
-    m_sectors.push_back(held);
     m_derivedStale = true;
 
     // The instance count is one of the things the rebuild works out, so the
-    // check that the buffer can hold them has to happen after one.
+    // check that the buffer can hold them has to happen after one. The copies
+    // are already sent by now, so there is nothing left to discard - but the
+    // sector still has to come back out.
     ensureDerived();
     if (m_instanceCount > m_budget.instances)
     {
         if (error)
             *error = "more instances than the buffer holds; raise Budget::instances";
+        dropSector(device, sector);
         return false;
     }
     return true;
@@ -584,6 +618,9 @@ void WorldRenderer::dropSector(Device &device, std::uint32_t sector)
             if (batch.sectorOf[at] == sector)
             {
                 removedAny = true;
+                // row1.w is the has-lighting flag the shader reads, so it is
+                // also what says whether this instance was counted as lit.
+                m_bakedInstances -= (batch.transforms[at][7] != 0.0f && m_bakedInstances != 0) ? 1 : 0;
                 continue;
             }
             batch.transforms[write] = batch.transforms[at];
@@ -1391,8 +1428,10 @@ void WorldRenderer::buildGrid()
         cell.largestRadius = std::max(cell.largestRadius, largest);
     }
 
-    std::printf("%zu grid cells hold %zu batches, %zu tested on their own\n", m_cells.size(),
-                m_batches.size() - m_looseBatches.size(), m_looseBatches.size());
+    if (!m_reportedGrid)
+        std::printf("%zu grid cells hold %zu batches, %zu tested on their own\n", m_cells.size(),
+                    m_batches.size() - m_looseBatches.size(), m_looseBatches.size());
+    m_reportedGrid = true;
 }
 
 const std::array<float, 6> *WorldRenderer::batchExtent(std::size_t batch) const
