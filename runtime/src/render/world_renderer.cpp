@@ -868,6 +868,26 @@ void WorldRenderer::reportArenas() const
     std::printf("%zu sectors resident, %zu batches, %zu instances of which %zu carry baked light\n",
                 m_sectors.size(), m_batches.size(), m_instanceCount, m_bakedInstances);
     std::printf("%zu occluders, %zu large enough but foliage\n", m_occluders.size(), m_foliageSkipped);
+    // How the work the cull walks is distributed, which is what decides
+    // whether dividing it by batch balances at all.
+    {
+        std::vector<std::size_t> sizes;
+        std::size_t total = 0;
+        for (const Batch &batch : m_batches)
+        {
+            sizes.push_back(batch.transforms.size());
+            total += batch.transforms.size();
+        }
+        std::sort(sizes.begin(), sizes.end(), std::greater<std::size_t>());
+        std::size_t biggestTen = 0;
+        for (std::size_t at = 0; at < sizes.size() && at < 10; ++at)
+            biggestTen += sizes[at];
+        std::printf("%zu batches hold %zu instances: biggest %zu, median %zu, the ten biggest are %.0f%%\n",
+                    sizes.size(), total, sizes.empty() ? std::size_t(0) : sizes.front(),
+                    sizes.empty() ? std::size_t(0) : sizes[sizes.size() / 2],
+                    total != 0 ? 100.0 * double(biggestTen) / double(total) : 0.0);
+    }
+
     std::printf("addSector spent %.0f ms building mesh arrays, %.0f ms rebuilding the grid, %.0f ms in the queue\n",
                 m_secondsPlacing * 1000.0, m_secondsRebuilding * 1000.0, m_secondsFlushing * 1000.0);
 }
