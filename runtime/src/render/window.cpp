@@ -79,13 +79,15 @@ Window::Window(const std::string &title, int width, int height) : m_width(width)
                                m_instance, nullptr);
     SetWindowLongPtrW(m_handle, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&g_state));
 
-    // Shown without being activated: the viewer is started from a terminal,
-    // often several times in a row while something is being measured, and
-    // taking the keyboard away each time is worse than useless. Clicking it
-    // still brings it forward. Input does not need focus - movement and look
-    // are read through GetAsyncKeyState and GetCursorPos, which are global.
+    // Shown without being activated, and placed at the bottom of the stack
+    // rather than over whatever is in front. The viewer is started from a
+    // terminal, often several times in a row while something is being measured,
+    // and a window that jumps in front and takes the keyboard each time is
+    // worse than useless. Click it, or its taskbar button, to bring it up.
+    // Input does not need focus - movement and look are read through
+    // GetAsyncKeyState and GetCursorPos, which are global.
     ShowWindow(m_handle, SW_SHOWNOACTIVATE);
-    SetWindowPos(m_handle, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetWindowPos(m_handle, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 Window::~Window()
