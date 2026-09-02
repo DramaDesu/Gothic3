@@ -128,6 +128,8 @@ struct PatchAtlas
     genome::Image image;
     std::vector<char> taken = std::vector<char>(std::size_t(c_Grid) * c_Grid, 0);
     std::size_t tilesTaken = 0;
+    // Which tiles the sector being loaded has taken, so it can give them back.
+    std::vector<std::uint32_t> sectorTiles;
     std::size_t packed = 0, refused = 0;
     std::size_t texels = 0, widest = 0, tallest = 0;
 
@@ -163,13 +165,29 @@ struct PatchAtlas
                     continue;
                 for (std::uint32_t dy = 0; dy < tall; ++dy)
                     for (std::uint32_t dx = 0; dx < wide; ++dx)
+                    {
                         taken[std::size_t(y + dy) * c_Grid + x + dx] = 1;
+                        sectorTiles.push_back((y + dy) * c_Grid + x + dx);
+                    }
                 tilesTaken += std::size_t(wide) * tall;
                 outX = x;
                 outY = y;
                 return true;
             }
         return false;
+    }
+
+    // A sector leaving hands its tiles back. Nothing is cleared: the
+    // coordinates that pointed at them left with it.
+    void freeTiles(const std::vector<std::uint32_t> &tiles)
+    {
+        for (std::uint32_t tile : tiles)
+            if (tile < taken.size() && taken[tile])
+            {
+                taken[tile] = 0;
+                --tilesTaken;
+            }
+        hasTile = false;
     }
 
     void blit(const genome::LightmapBitmap &bitmap, std::uint32_t x, std::uint32_t y)
@@ -261,6 +279,8 @@ struct SectorContent
     // Which of its batches is the full-detail form of which tree, so that a
     // billboard can be given the same instances once the atlas is baked.
     std::vector<std::pair<std::string, std::size_t>> treeSlots;
+    // The atlas tiles its baked patches went into.
+    std::vector<std::uint32_t> tiles;
 };
 
 } // namespace
@@ -309,6 +329,14 @@ int main(int argc, char **argv)
     std::unique_ptr<genome::PakArchive> world;
     std::map<std::string, genome::SectorBounds> boundsOf;
     std::string sectorFilter = "_cstat.node";
+    // A sector's box is filed under its path without the extension.
+    const auto sectorKey = [](const std::string &path) {
+        const std::size_t dot = path.find_last_of('.');
+        return dot == std::string::npos ? path : path.substr(0, dot);
+    };
+    genome::ResidentCells heldCells;
+    std::array<float, 3> residencyEye{};
+    std::uint32_t nextSectorId = 1;
     std::map<std::string, genome::Mesh *> meshOf;
 
     // Tree kinds in the order they were grown - the billboard atlas is baked
@@ -369,6 +397,16 @@ int main(int argc, char **argv)
     int cameraArgument = 0;
     int treeArgument = 0;
     bool validation = false;
+    // Residency is decided against a far plane of its own, not the one the
+    // camera draws with: it is the game's number, and what made 36 sectors the
+    // answer rather than some other count.
+    constexpr float c_ResidencyFar = 10000.0f;
+    // Fly forward at this many units a second, so that arrivals and departures
+    // can be measured without a hand on the keyboard.
+    float flySpeed = 0.0f;
+    // The angles above are degrees for a person; --radians takes them as the
+    // shot line prints them, so a flight can be reproduced exactly.
+    bool cameraInRadians = false;
     // Load only what is close enough to matter, the way the game does: a
     // rectangle of 10000-unit cells around the camera. Off by default so the
     // whole-world runs still work.
@@ -401,12 +439,16 @@ int main(int argc, char **argv)
             benchFrames = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--camera" && index + 5 < argc)
             cameraArgument = index + 1;
+        if (std::string(argv[index]) == "--radians")
+            cameraInRadians = true;
         if (std::string(argv[index]) == "--tree" && hasValue)
             treeArgument = index + 1;
         if (std::string(argv[index]) == "--validate")
             validation = true;
         if (std::string(argv[index]) == "--stream")
             streaming = true;
+        if (std::string(argv[index]) == "--fly" && hasValue)
+            flySpeed = float(std::atof(argv[index + 1]));
         if (std::string(argv[index]) == "--baked-adds")
             lightmapReplaces = 0.0f;
     }
@@ -506,7 +548,9 @@ int main(int argc, char **argv)
                 eye = {float(std::atof(argv[cameraArgument])), float(std::atof(argv[cameraArgument + 1])),
                        float(std::atof(argv[cameraArgument + 2]))};
 
-            const genome::ResidentCells resident = genome::residentCells(eye, 10000.0f);
+            const genome::ResidentCells resident = genome::residentCells(eye, c_ResidencyFar);
+            heldCells = resident;
+            residencyEye = eye;
             if (streaming)
                 std::printf("resident cells x %d..%d, z %d..%d around (%.0f, %.0f)\n", resident.left,
                             resident.right, resident.top, resident.bottom, eye[0], eye[2]);
@@ -709,8 +753,20 @@ int main(int argc, char **argv)
                         break;
 
                     // A handful of seeds per definition, so a wood is not one
-                    // tree repeated, and the mesh for each is grown once.
-                    const std::uint32_t variant = std::uint32_t(planted) % c_TreeVariants;
+                    // tree repeated, and the mesh for each is grown once. The
+                    // variant comes from where the tree stands rather than from
+                    // how many were planted before it: a running count makes
+                    // the forest depend on the order sectors happened to be
+                    // read, so flying in would grow a different wood from
+                    // arriving cold.
+                    std::uint32_t scatter = 2166136261u;
+                    for (int axis = 12; axis < 15; ++axis)
+                    {
+                        std::uint32_t bits = 0;
+                        std::memcpy(&bits, &tree.world[axis], sizeof(bits));
+                        scatter = (scatter ^ bits) * 16777619u;
+                    }
+                    const std::uint32_t variant = (scatter >> 8) % c_TreeVariants;
                     std::string key = tree.resource;
                     for (char &c : key)
                         c = char(std::tolower(static_cast<unsigned char>(c)));
@@ -867,9 +923,11 @@ int main(int argc, char **argv)
 
                 SectorContent content;
                 content.name = entry.path;
-                content.id = std::uint32_t(residentSectors.size() + 1);
+                content.id = nextSectorId++;
+                patchAtlas.sectorTiles.clear();
                 if (!loadSector(entry, content))
                     continue;
+                content.tiles = std::move(patchAtlas.sectorTiles);
                 ++sectors;
                 residentSectors.push_back(std::move(content));
             }
@@ -1081,6 +1139,44 @@ int main(int argc, char **argv)
     render::TreeAtlas treeAtlas;
     genome::Image treeAtlasImage;
     std::vector<std::unique_ptr<genome::Mesh>> billboardMeshes;
+    std::map<std::string, genome::Mesh *> cardOf;
+    std::size_t billboardsMissed = 0;
+
+    // A sector's trees get their third detail level: the same instances as the
+    // full-detail form, drawn as a quad sampling that kind's cell. A kind first
+    // seen after the atlas was baked has no cell, so its trees keep the thinned
+    // mesh all the way out - which is worse to look at and correct to draw.
+    const auto attachBillboards = [&](SectorContent &content) {
+        std::size_t added = 0;
+        const std::size_t before = content.batches.size();
+        for (const auto &[kind, slot] : content.treeSlots)
+        {
+            const auto card = cardOf.find(kind);
+            if (card == cardOf.end() || slot >= before)
+            {
+                billboardsMissed += card == cardOf.end() ? 1 : 0;
+                continue;
+            }
+
+            render::MeshInstances billboard;
+            billboard.mesh = card->second;
+            billboard.textures.push_back(&treeAtlasImage);
+            billboard.alphaTested.push_back(1);
+            billboard.faceCamera = true;
+            billboard.occludes = false;
+            billboard.lodNear = treeBillboardDistance;
+            billboard.transforms = content.batches[slot].transforms;
+            billboard.bounds = content.batches[slot].bounds;
+            added += billboard.transforms.size();
+            content.batches.push_back(std::move(billboard));
+
+            // The thinned tree now ends where the billboard begins.
+            if (slot + 1 < before)
+                content.batches[slot + 1].lodFar = treeBillboardDistance;
+        }
+        return added;
+    };
+
     if (!treeKinds.empty())
     {
         std::vector<render::MeshInstances> bakeBatches;
@@ -1116,7 +1212,6 @@ int main(int argc, char **argv)
             // One quad per kind, with that kind's cell baked into its texture
             // coordinates. Every sector that planted this kind of tree points
             // at the same quad, so the renderer keeps them in one batch.
-            std::map<std::string, genome::Mesh *> cardOf;
             for (std::size_t index = 0; index < treeKinds.size() && index < treeAtlas.cells.size(); ++index)
             {
                 const std::array<float, 4> &cell = treeAtlas.cells[index];
@@ -1134,31 +1229,7 @@ int main(int argc, char **argv)
 
             std::size_t billboardInstances = 0;
             for (SectorContent &content : residentSectors)
-            {
-                const std::size_t before = content.batches.size();
-                for (const auto &[kind, slot] : content.treeSlots)
-                {
-                    const auto card = cardOf.find(kind);
-                    if (card == cardOf.end() || slot >= before)
-                        continue;
-
-                    render::MeshInstances billboard;
-                    billboard.mesh = card->second;
-                    billboard.textures.push_back(&treeAtlasImage);
-                    billboard.alphaTested.push_back(1);
-                    billboard.faceCamera = true;
-                    billboard.occludes = false;
-                    billboard.lodNear = treeBillboardDistance;
-                    billboard.transforms = content.batches[slot].transforms;
-                    billboard.bounds = content.batches[slot].bounds;
-                    billboardInstances += billboard.transforms.size();
-                    content.batches.push_back(std::move(billboard));
-
-                    // The thinned tree now ends where the billboard begins.
-                    if (slot + 1 < before)
-                        content.batches[slot + 1].lodFar = treeBillboardDistance;
-                }
-            }
+                billboardInstances += attachBillboards(content);
             std::printf("billboards cover %zu tree instances beyond %.0f units\n", billboardInstances,
                         treeBillboardDistance);
         }
@@ -1306,8 +1377,8 @@ int main(int argc, char **argv)
     {
         eye = {float(std::atof(argv[cameraArgument])), float(std::atof(argv[cameraArgument + 1])),
                float(std::atof(argv[cameraArgument + 2]))};
-        yaw = float(std::atof(argv[cameraArgument + 3])) * 3.14159265f / 180.0f;
-        pitch = float(std::atof(argv[cameraArgument + 4])) * 3.14159265f / 180.0f;
+        yaw = float(std::atof(argv[cameraArgument + 3])) * (cameraInRadians ? 1.0f : 3.14159265f / 180.0f);
+        pitch = float(std::atof(argv[cameraArgument + 4])) * (cameraInRadians ? 1.0f : 3.14159265f / 180.0f);
         std::printf("camera at %.0f %.0f %.0f looking %s %s degrees\n", eye[0], eye[1], eye[2],
                     argv[cameraArgument + 3], argv[cameraArgument + 4]);
     }
@@ -1324,6 +1395,10 @@ int main(int argc, char **argv)
 
     auto previous = std::chrono::steady_clock::now();
     std::size_t frames = 0;
+    std::vector<std::string> arriving;
+    std::size_t sectorsArrived = 0, sectorsDeparted = 0;
+    float worstArrival = 0.0f, totalArrival = 0.0f;
+
     while (window.pump())
     {
         const auto now = std::chrono::steady_clock::now();
@@ -1369,6 +1444,109 @@ int main(int argc, char **argv)
             eye[1] -= speed;
         if (window.keyPressed('O'))
             occlusion = !occlusion;
+        if (flySpeed != 0.0f)
+            move(forward, flySpeed * delta);
+
+        // Sectors arrive and leave as the camera moves. The rectangle changing
+        // is the cheap test; the distance is what stops a camera sitting on a
+        // cell boundary from thrashing one sector in and out, and both are the
+        // game's own conditions.
+        if (streaming && world)
+        {
+            const genome::ResidentCells want = genome::residentCells(eye, c_ResidencyFar);
+            const float dx = eye[0] - residencyEye[0], dz = eye[2] - residencyEye[2];
+            const float gate = std::max(1300.0f, c_ResidencyFar * 0.2f);
+            if (!(want == heldCells) && dx * dx + dz * dz >= gate * gate)
+            {
+                heldCells = want;
+                residencyEye = eye;
+
+                // Departures first: they are what makes room for the arrivals.
+                for (std::size_t index = 0; index < residentSectors.size();)
+                {
+                    const auto box = boundsOf.find(sectorKey(residentSectors[index].name));
+                    if (box != boundsOf.end() && genome::overlaps(box->second, heldCells))
+                    {
+                        ++index;
+                        continue;
+                    }
+                    renderer.dropSector(device, residentSectors[index].id);
+                    patchAtlas.freeTiles(residentSectors[index].tiles);
+                    residentSectors.erase(residentSectors.begin() + std::ptrdiff_t(index));
+                    ++sectorsDeparted;
+                }
+
+                arriving.clear();
+                for (const genome::PakEntry &entry : world->entries())
+                {
+                    if (entry.deleted || entry.path.find(sectorFilter) == std::string::npos)
+                        continue;
+                    const auto box = boundsOf.find(sectorKey(entry.path));
+                    if (box == boundsOf.end() || !genome::overlaps(box->second, heldCells))
+                        continue;
+                    bool alreadyHere = false;
+                    for (const SectorContent &content : residentSectors)
+                        alreadyHere = alreadyHere || content.name == entry.path;
+                    if (!alreadyHere)
+                        arriving.push_back(entry.path);
+                }
+            }
+
+            // One a frame. A sector is tens of milliseconds of work, and doing
+            // several would turn a hitch into a stall.
+            if (!arriving.empty())
+            {
+                const std::string path = arriving.back();
+                arriving.pop_back();
+
+                const genome::PakEntry *entry = nullptr;
+                for (const genome::PakEntry &one : world->entries())
+                    if (!one.deleted && one.path == path)
+                        entry = &one;
+
+                if (entry)
+                {
+                    const auto arrivalStart = std::chrono::steady_clock::now();
+                    SectorContent content;
+                    content.name = path;
+                    content.id = nextSectorId++;
+                    patchAtlas.sectorTiles.clear();
+                    if (loadSector(*entry, content))
+                    {
+                        content.tiles = std::move(patchAtlas.sectorTiles);
+                        resolveTextures(content.batches);
+                        attachBillboards(content);
+                        if (!renderer.addSector(device, content.id, content.batches, content.lighting, &error))
+                            std::printf("warning: %s did not fit: %s\n", path.c_str(), error.c_str());
+                        else
+                        {
+                            // The patches it brought, tile by tile. The atlas
+                            // and its descriptor do not change - only texels
+                            // inside tiles nothing was reading.
+                            std::vector<std::uint8_t> tile(std::size_t(PatchAtlas::c_Tile) * PatchAtlas::c_Tile * 4);
+                            for (std::uint32_t index : content.tiles)
+                            {
+                                const std::uint32_t tx = (index % PatchAtlas::c_Grid) * PatchAtlas::c_Tile;
+                                const std::uint32_t ty = (index / PatchAtlas::c_Grid) * PatchAtlas::c_Tile;
+                                for (std::uint32_t row = 0; row < PatchAtlas::c_Tile; ++row)
+                                    std::memcpy(&tile[std::size_t(row) * PatchAtlas::c_Tile * 4],
+                                                &patchAtlas.image.data[(std::size_t(ty + row) * PatchAtlas::c_Size +
+                                                                        tx) * 4],
+                                                std::size_t(PatchAtlas::c_Tile) * 4);
+                                renderer.updatePatchAtlas(device, tx, ty, PatchAtlas::c_Tile, PatchAtlas::c_Tile,
+                                                          tile.data(), &error);
+                            }
+                            residentSectors.push_back(std::move(content));
+                            ++sectorsArrived;
+                        }
+                    }
+                    const float cost = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
+                                                                                arrivalStart).count();
+                    worstArrival = std::max(worstArrival, cost);
+                    totalArrival += cost;
+                }
+            }
+        }
 
         const std::array<float, 3> target{eye[0] + forward[0], eye[1] + forward[1], eye[2] + forward[2]};
 
@@ -1481,18 +1659,36 @@ int main(int argc, char **argv)
                             double(renderer.submittedTriangles()) / 1e6);
                 std::printf("%zu of %zu instances drawn\n", renderer.visibleInstances(),
                             renderer.instanceCount());
+                if (streaming)
+                {
+                    std::printf("%zu sectors arrived and %zu left while flying; %zu resident now\n", sectorsArrived,
+                                sectorsDeparted, renderer.sectorCount());
+                    if (sectorsArrived != 0)
+                        std::printf("arrivals cost %.0f ms at worst and %.0f ms on average, %.0f ms in all\n",
+                                    worstArrival, totalArrival / float(sectorsArrived), totalArrival);
+                    if (billboardsMissed != 0)
+                        std::printf("%zu tree kinds arrived after the billboard atlas was baked and have none\n",
+                                    billboardsMissed);
+                    renderer.reportArenas();
+                }
                 break;
             }
         }
 
         // Give the view a few frames to settle, then take the picture and go.
-        if (shotPath && ++frames == 5)
+        if (shotPath && ++frames == (benchFrames > 0 ? benchFrames - 1 : 5))
         {
             std::string shotError;
             // The per-second report has not had a chance to fire this early, and
             // a capture is worth nothing without the numbers behind it.
             std::printf("visible %zu of %zu (%zu too small, %zu occluded)\n", renderer.visibleInstances(),
                         renderer.instanceCount(), renderer.tooSmallInstances(), renderer.occludedInstances());
+            std::printf("shot from %.0f %.0f %.0f looking %.2f %.2f radians\n", eye[0], eye[1], eye[2], yaw,
+                        pitch);
+            if (streaming)
+                std::printf("%zu sectors arrived and %zu left; %zu tree kinds arrived after the billboard atlas "
+                            "was baked and have none\n",
+                            sectorsArrived, sectorsDeparted, billboardsMissed);
             if (device.capture(shotPath, &shotError))
                 std::printf("wrote %s\n", shotPath);
             else

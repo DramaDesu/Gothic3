@@ -88,26 +88,80 @@ It also lifted a limit the whole-world load could not meet: the baked-light
 atlas took 8701 patches of 124940 and refused 116239. The resident set packs all
 19046 and refuses none.
 
-## What this is not
+## What it does now
 
-This is residency chosen **once**, at startup. Nothing arrives or leaves while
-flying, because the vertex and index buffers are still built once in `create()`.
-The design for making geometry come and go:
+Sectors arrive and leave while flying. The rectangle changing is the cheap test;
+the distance gate is what stops a camera sitting on a cell boundary from
+thrashing one sector in and out. Departures go first, because they are what
+makes room for the arrivals, and then one sector arrives per frame.
 
-- **Fixed-capacity device-local buffers with free-list suballocation.** Vertices
-  and indices are addressed by element offset - `vertexOffset` and `firstIndex`
-  in the draw command - so a suballocation inside a buffer that never changes
-  needs no descriptor at all. The lighting buffers are read as
-  `buffer[base + gl_VertexIndex]`, so they suballocate the same way. Nothing is
-  ever rewritten while a frame in flight may be reading it, because nothing is
-  ever rewritten.
-- **A sector id on every batch and range**, so a whole sector's draws unlink in
-  one step rather than being searched for.
-- **An incremental grid**, since rebuilding the spatial index from scratch on
-  every arrival would cost more than the arrival.
-- **One sector a frame, with a time slice**, which is what the game does.
+Flying 600 frames from the fortress:
+
+```
+22 sectors arrived and 24 left while flying; 35 resident now
+arrivals cost 141 ms at worst and 29 ms on average, 645 ms in all
+arenas: 48% -> 49% of 5M vertices, 48% -> 49% of 10M indices
+```
+
+Over a longer run - 147 arrivals and 151 departures - the geometry arenas stay
+at 48%. That is the free lists doing their job: what a sector took it gave back,
+and nothing crept.
+
+### It has to land where a cold load would
+
+Flying into a place and loading it there must give the same world. Measured at
+one spot, reached by flying 300 frames and then loaded from cold at the same
+camera: 71842 instances against 71860, and the same forest tree for tree.
+
+Getting the trees to match took a fix. A tree's variant - one of three seeds per
+definition, so that a wood is not one tree repeated - was chosen by a running
+count of trees planted, which makes the forest depend on the order sectors
+happened to be read. It comes from a hash of the tree's position now, so the
+same tree stands in the same place however it was reached.
+
+The 18 instances still missing are billboards: 13 tree kinds first appeared
+after the billboard atlas had been baked, and a kind with no cell in that atlas
+keeps its thinned mesh all the way out instead. Worse to look at, correct to
+draw, and counted out loud rather than left to be noticed.
+
+## What it still does not do
+
+- **An arrival is synchronous.** 29 ms on average and 141 ms at worst, on the
+  frame it lands. That is a hitch. The game gave itself a five millisecond
+  slice; the work wants splitting across frames, or moving off the main thread
+  as far as the Vulkan upload.
+- **Textures are never released.** The cache grows monotonically - 210 to 337
+  across 147 arrivals - and the descriptor pool is fixed at 8192 sets, so a long
+  enough flight will reach that wall.
+- **Billboard cells are not suballocated.** The atlas is baked once, from the
+  kinds the first resident set happened to use. A fixed cell grid with cells
+  handed out as kinds appear is the same trick used everywhere else here.
+- **Lights are gathered once.** 588 across the world, so nothing is visibly
+  wrong yet, but they should come and go with their sectors.
+
+## How the pieces sit
+
+- **Geometry** lives in fixed-capacity device-local buffers, suballocated per
+  mesh and refcounted, because a crate is a crate in every sector. Vertices and
+  indices are addressed by element offset in the draw command, so nothing points
+  at them that would have to be rewritten.
+- **A batch is keyed by mesh, and an instance carries its sector.** Keying
+  batches by sector was the obvious move and the wrong one: fifty sectors
+  holding the same crate would mean fifty draws for something that was one.
+- **Baked light** goes into one allocator serving three buffers, because the
+  shader reads colour, incident direction and patch coordinate from the single
+  base an instance carries.
+- **Baked patches** go into atlas tiles of 128, which is the unit a sector hands
+  back. Arrivals write their tiles into the atlas texture directly; the image
+  and its descriptor never change.
 
 ## Files
 
 - `src/genome/residency.h`, `.cpp` - the rule, and the `.lrgeodat` reader.
 - `tools/g3world.cpp` - `--stream` filters the load through it.
+
+## The two shots
+
+`docs/world-streamed.png` was flown to; `docs/world-cold.png` was loaded there.
+Same trees, same trunks, same rocks, same fern. The slight shift is the camera:
+the flight prints its angles to two decimals and the cold run was given those.
