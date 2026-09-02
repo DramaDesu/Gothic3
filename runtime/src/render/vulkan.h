@@ -29,6 +29,10 @@ class Device
   public:
     static constexpr std::uint32_t c_FramesInFlight = 2;
 
+    // What findMemoryType says when nothing matches. Not zero: zero is a real
+    // memory type, and on this device it is host memory.
+    static constexpr std::uint32_t c_NoMemoryType = 0xFFFFFFFFu;
+
     bool create(Window &window, std::string *error, bool validation = false);
     void destroy();
 

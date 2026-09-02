@@ -180,6 +180,13 @@ class WorldRenderer
     void retireReleases(std::uint64_t frame);
     std::size_t pendingReleases() const { return m_pendingReleases.size(); }
 
+    // How many arrivals landed while a departure had already shifted the batch
+    // indices, and how many lookups that would actually have got wrong - the
+    // second is the one that says the bug was real rather than possible.
+    std::size_t staleArrivals() const { return m_staleArrivals; }
+    std::size_t staleLookups() const { return m_staleLookups; }
+    std::size_t staleOutOfRange() const { return m_staleOutOfRange; }
+
     std::size_t vertexCount() const { return m_vertexCount; }
     std::size_t triangleCount() const { return m_indexCount / 3; }
     std::size_t instanceCount() const { return m_instanceCount; }
@@ -306,6 +313,9 @@ class WorldRenderer
     void rebuildDerived();
     void ensureDerived();
     bool m_derivedStale = false;
+    std::size_t m_staleArrivals = 0;
+    std::size_t m_staleLookups = 0;
+    std::size_t m_staleOutOfRange = 0;
 
     // One descriptor set per texture, made when the texture is first seen.
     std::map<const genome::Image *, VkDescriptorSet> m_textureSets;

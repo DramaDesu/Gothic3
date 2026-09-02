@@ -59,13 +59,21 @@ bool createTexture(Device &device, const genome::Image &source, bool srgb, Textu
     VkMemoryRequirements requirements{};
     vkGetImageMemoryRequirements(device.device(), texture.image, &requirements);
     if (!device.allocate(requirements, false, texture.memory, error))
+    {
+        // The image is already made by this point, and the caller drops the
+        // Texture on the floor, so nothing else can ever free it.
+        destroyTexture(device, texture);
         return false;
+    }
     vkBindImageMemory(device.device(), texture.image, texture.memory, 0);
 
     // One staging buffer for the whole chain, then a copy per level.
     Buffer staging = device.createBuffer(source.data.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, error);
     if (!staging.handle)
+    {
+        destroyTexture(device, texture);
         return false;
+    }
     std::memcpy(staging.mapped, source.data.data(), source.data.size());
 
     VkCommandBuffer command = device.beginOneShot();
@@ -109,7 +117,15 @@ bool createTexture(Device &device, const genome::Image &source, bool srgb, Textu
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = format;
     viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipCount, 0, 1};
-    vkCreateImageView(device.device(), &viewInfo, nullptr, &texture.view);
+    if (vkCreateImageView(device.device(), &viewInfo, nullptr, &texture.view) != VK_SUCCESS)
+    {
+        // Unchecked, this returned true with a null view, which then went into
+        // a descriptor set - invalid use rather than a reported failure.
+        if (error)
+            *error = "vkCreateImageView failed for a texture";
+        destroyTexture(device, texture);
+        return false;
+    }
 
     // The game's UVs run far outside [0,1], so wrapping is not optional. The
     // sampler belongs to the device and is shared: it is the same for every

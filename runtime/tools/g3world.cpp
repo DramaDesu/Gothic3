@@ -1163,6 +1163,12 @@ int main(int argc, char **argv)
     images.push_back(std::move(water));
 
     std::map<std::string, const genome::Image *> cache;
+    // And a second cache on the file the material resolves to. Without it every
+    // material sharing a diffuse map loads its own copy of the same pixels and
+    // gets its own image, its own allocation and its own descriptor set: 913
+    // materials in the shipping data resolve to 634 distinct files, one of them
+    // named twenty-five times.
+    std::map<std::string, const genome::Image *> imageOfFile;
     // Which materials throw away transparent pixels, remembered per name so
     // the answer survives the texture cache.
     std::map<std::string, bool> masked;
@@ -1180,6 +1186,13 @@ int main(int argc, char **argv)
     } timeTexturesGuard{timeTextures, textureStart};
     for (render::MeshInstances &batch : list)
     {
+        if (!batch.mesh)
+            continue;
+        // Assigned rather than appended: this pass runs once per arriving
+        // sector, and running it twice over one list would double both vectors
+        // and misalign every element index against the mesh.
+        batch.textures.clear();
+        batch.alphaTested.clear();
         for (const genome::MeshElement &element : batch.mesh->elements)
         {
             const genome::Image *loaded = nullptr;
@@ -1197,12 +1210,19 @@ int main(int argc, char **argv)
                     c = char(std::tolower(static_cast<unsigned char>(c)));
 
                 std::string ignored;
-                auto image = std::make_unique<genome::Image>();
-                if (exists(base) && genome::loadImage(imageArchive->read(base + ".ximg", &ignored), *image,
-                                                      &ignored))
+                const auto already = imageOfFile.find(base);
+                if (already != imageOfFile.end())
+                    loaded = already->second;
+                else
                 {
-                    loaded = image.get();
-                    images.push_back(std::move(image));
+                    auto image = std::make_unique<genome::Image>();
+                    if (exists(base) && genome::loadImage(imageArchive->read(base + ".ximg", &ignored), *image,
+                                                          &ignored))
+                    {
+                        loaded = image.get();
+                        images.push_back(std::move(image));
+                    }
+                    imageOfFile.emplace(base, loaded);
                 }
                 cache.emplace(element.materialName, loaded);
                 // Our own foliage - grass patches, leaves and fronds - is
@@ -1225,12 +1245,19 @@ int main(int argc, char **argv)
                         const genome::TextureResolution resolved = genome::resolveTexture(*sampler, 0, exists);
                         if (!resolved.fileName.empty())
                         {
-                            auto image = std::make_unique<genome::Image>();
-                            if (genome::loadImage(imageArchive->read(resolved.fileName, &ignored), *image,
-                                                  &ignored))
+                            const auto already = imageOfFile.find(resolved.fileName);
+                            if (already != imageOfFile.end())
+                                loaded = already->second;
+                            else
                             {
-                                loaded = image.get();
-                                images.push_back(std::move(image));
+                                auto image = std::make_unique<genome::Image>();
+                                if (genome::loadImage(imageArchive->read(resolved.fileName, &ignored), *image,
+                                                      &ignored))
+                                {
+                                    loaded = image.get();
+                                    images.push_back(std::move(image));
+                                }
+                                imageOfFile.emplace(resolved.fileName, loaded);
                             }
                         }
                     }
@@ -1904,6 +1931,11 @@ int main(int argc, char **argv)
                                     sectorsUnwanted);
                     std::printf("%zu transfers still in flight, %zu drains paid to keep the bound\n",
                                 device.transfersInFlight(), device.transferStalls());
+                    if (renderer.staleArrivals() != 0)
+                        std::printf("%zu arrivals landed on a frame that had already dropped a sector; "
+                                    "%zu lookups would have named the wrong batch and %zu one past the end\n",
+                                    renderer.staleArrivals(), renderer.staleLookups(),
+                                    renderer.staleOutOfRange());
                     std::printf("%zu device allocations live holding %.0f MB, %zu and %.0f MB at peak, "
                                 "of %u allocations the driver allows\n",
                                 device.liveAllocations(), double(device.liveBytes()) / 1048576.0,

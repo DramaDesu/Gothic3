@@ -445,7 +445,11 @@ std::uint32_t Device::findMemoryType(std::uint32_t mask, VkMemoryPropertyFlags p
         if ((mask & (1u << index)) && (memory.memoryTypes[index].propertyFlags & properties) == properties)
             return index;
     }
-    return 0;
+    // Zero is a memory type, not a sentinel. On this device type 0 is host
+    // memory that is nonetheless usable for optimally tiled colour images, so
+    // returning it on a miss puts a texture meant for the card into system RAM
+    // and says nothing about it.
+    return c_NoMemoryType;
 }
 
 void Device::noteAllocation(VkDeviceSize bytes)
@@ -466,6 +470,12 @@ bool Device::allocate(const VkMemoryRequirements &requirements, bool hostVisible
     VkMemoryAllocateInfo info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     info.allocationSize = requirements.size;
     info.memoryTypeIndex = findMemoryType(requirements.memoryTypeBits, properties);
+    if (info.memoryTypeIndex == c_NoMemoryType)
+    {
+        if (error)
+            *error = "no memory type on this device has what was asked for";
+        return false;
+    }
     if (!check(vkAllocateMemory(m_device, &info, nullptr, &memory), error, "vkAllocateMemory"))
         return false;
     noteAllocation(info.allocationSize);
@@ -669,6 +679,14 @@ Buffer Device::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool ho
     VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocate.allocationSize = requirements.size;
     allocate.memoryTypeIndex = findMemoryType(requirements.memoryTypeBits, properties);
+    if (allocate.memoryTypeIndex == c_NoMemoryType)
+    {
+        if (error)
+            *error = "no memory type on this device has what a buffer asked for";
+        vkDestroyBuffer(m_device, buffer.handle, nullptr);
+        buffer = {};
+        return buffer;
+    }
     if (!check(vkAllocateMemory(m_device, &allocate, nullptr, &buffer.memory), error, "vkAllocateMemory"))
         return buffer;
     noteAllocation(allocate.allocationSize);

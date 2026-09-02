@@ -404,6 +404,30 @@ std::array<float, 6> worldBox(const std::array<float, 6> &local, const genome::W
 bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::vector<MeshInstances> &batches,
                               const SectorLighting &lighting, std::string *error)
 {
+    // m_batchOf indexes m_batches, and a departure earlier in this same frame
+    // erased from it - which shifts every later index and leaves the map
+    // pointing at the wrong batch, or past the end. The cull that would have
+    // rebuilt it does not run until after this.
+    if (m_derivedStale)
+    {
+        // What the lookup would have returned had the rebuild not happened:
+        // an index past the end, or the wrong mesh's batch.
+        ++m_staleArrivals;
+        for (const MeshInstances &incoming : batches)
+        {
+            if (!incoming.mesh)
+                continue;
+            const auto stale = m_batchOf.find(incoming.mesh);
+            if (stale == m_batchOf.end())
+                continue;
+            if (stale->second >= m_batches.size())
+                ++m_staleOutOfRange;
+            else if (m_batches[stale->second].mesh != incoming.mesh)
+                ++m_staleLookups;
+        }
+    }
+    ensureDerived();
+
     Sector held;
     held.id = sector;
     held.colourCount = lighting.colours.size();
