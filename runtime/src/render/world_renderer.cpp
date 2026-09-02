@@ -1282,15 +1282,20 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
         const float nearSquared = batch.lodNear * batch.lodNear;
         const float farSquared = batch.lodFar * batch.lodFar;
 
+        // Asked once. A batch either has a box for every instance or none at
+        // all, but the loop used to re-load the size and compare it six times
+        // an instance, once before each test that wants one.
+        const std::size_t boxCount = batch.bounds.size();
         for (std::size_t instance = 0; instance < batch.transforms.size(); ++instance)
         {
-            if (instance < batch.bounds.size() && outsideFrustum(batch.bounds[instance]))
+            const bool hasBox = instance < boxCount;
+            if (hasBox && outsideFrustum(batch.bounds[instance]))
                 continue;
 
             // Which detail level draws this one. Measured to the nearest face of
             // the box rather than its centre, so a tall tree does not switch
             // early just because its middle is far away.
-            if ((nearSquared > 0.0f || farSquared > 0.0f) && instance < batch.bounds.size())
+            if ((nearSquared > 0.0f || farSquared > 0.0f) && hasBox)
             {
                 const std::array<float, 6> &box = batch.bounds[instance];
                 float distanceSquared = 0.0f;
@@ -1307,13 +1312,13 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                     continue;
             }
 
-            if (instance < batch.bounds.size() && tooSmallOnScreen(batch.bounds[instance]))
+            if (hasBox && tooSmallOnScreen(batch.bounds[instance]))
             {
                 ++m_tooSmall;
                 continue;
             }
 
-            if (useOcclusion && instance < batch.bounds.size())
+            if (useOcclusion && hasBox)
             {
                 const std::array<float, 6> &box = batch.bounds[instance];
                 const float extent = std::max({box[3] - box[0], box[4] - box[1], box[5] - box[2]});
@@ -1348,7 +1353,7 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                 }
             }
 
-            if (batch.faceCamera && instance < batch.bounds.size())
+            if (batch.faceCamera && hasBox)
             {
                 // A quad standing on the ground where the tree stands, as wide
                 // and as tall as the tree was, turned to face the camera about
