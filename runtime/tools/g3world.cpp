@@ -1904,6 +1904,11 @@ int main(int argc, char **argv)
                                     sectorsUnwanted);
                     std::printf("%zu transfers still in flight, %zu drains paid to keep the bound\n",
                                 device.transfersInFlight(), device.transferStalls());
+                    std::printf("%zu device allocations live holding %.0f MB, %zu and %.0f MB at peak, "
+                                "of %u allocations the driver allows\n",
+                                device.liveAllocations(), double(device.liveBytes()) / 1048576.0,
+                                device.peakAllocations(), double(device.peakBytes()) / 1048576.0,
+                                device.allocationLimit());
                     if (billboardsMissed != 0)
                         std::printf("%zu tree kinds arrived after the billboard atlas was baked and have none\n",
                                     billboardsMissed);

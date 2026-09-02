@@ -5,6 +5,7 @@
 // framebuffer objects to carry around.
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -61,6 +62,10 @@ class Device
     bool allocate(const VkMemoryRequirements &requirements, bool hostVisible, VkDeviceMemory &memory,
                   std::string *error);
 
+    // Everything allocated above comes back through here, so that what is live
+    // is actually known rather than assumed.
+    void freeAllocation(VkDeviceMemory &memory);
+
     // Records and runs a command buffer immediately, for uploads at load time.
     // Writes the frame that was just presented to a binary PPM. Screen grabs
     // need the window in front, which is rude and unreliable while the machine
@@ -97,12 +102,26 @@ class Device
     std::size_t transfersInFlight() const { return m_retiring.size(); }
     std::size_t transferStalls() const { return m_transferStalls; }
 
+    // Every image and every buffer takes a VkDeviceMemory of its own, and the
+    // driver gives out a fixed number of them. Nothing here had ever asked how
+    // many, which is how a wall stays invisible until you hit it.
+    std::size_t liveAllocations() const { return m_liveAllocations; }
+    std::size_t peakAllocations() const { return m_peakAllocations; }
+    std::uint32_t allocationLimit() const { return m_allocationLimit; }
+    VkDeviceSize liveBytes() const { return m_liveBytes; }
+    VkDeviceSize peakBytes() const { return m_peakBytes; }
+
   private:
     bool pickPhysicalDevice(std::string *error);
     bool createSwapchain(std::string *error);
     void destroySwapchain();
     bool createDepth(std::string *error);
     std::uint32_t findMemoryType(std::uint32_t mask, VkMemoryPropertyFlags properties) const;
+
+    // Every vkAllocateMemory in the program goes past here. There are three of
+    // them and they are easy to add a fourth to, which is exactly how the count
+    // was wrong the first time.
+    void noteAllocation(VkDeviceSize bytes);
 
     Window *m_window = nullptr;
     VkInstance m_instance = VK_NULL_HANDLE;
@@ -145,6 +164,14 @@ class Device
     std::vector<Retiring> m_retiring;
     std::vector<VkFence> m_spareFences;
     std::size_t m_transferStalls = 0;
+    std::size_t m_liveAllocations = 0;
+    std::size_t m_peakAllocations = 0;
+    VkDeviceSize m_liveBytes = 0;
+    VkDeviceSize m_peakBytes = 0;
+    // What each allocation was worth, so giving it back subtracts the right
+    // amount rather than an average.
+    std::map<VkDeviceMemory, VkDeviceSize> m_allocationBytes;
+    std::uint32_t m_allocationLimit = 0;
 
     std::uint32_t m_frame = 0;
     std::uint32_t m_imageIndex = 0;

@@ -139,6 +139,10 @@ bool Device::create(Window &window, std::string *error, bool validation)
 
     vkGetDeviceQueue(m_device, m_queueFamily, 0, &m_queue);
 
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
+    m_allocationLimit = properties.limits.maxMemoryAllocationCount;
+
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = m_queueFamily;
@@ -287,6 +291,8 @@ bool Device::createDepth(std::string *error)
     allocate.memoryTypeIndex = findMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (!check(vkAllocateMemory(m_device, &allocate, nullptr, &m_depthMemory), error, "vkAllocateMemory(depth)"))
         return false;
+    noteAllocation(allocate.allocationSize);
+    m_allocationBytes.emplace(m_depthMemory, allocate.allocationSize);
     vkBindImageMemory(m_device, m_depthImage, m_depthMemory, 0);
 
     VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -311,7 +317,7 @@ void Device::destroySwapchain()
     if (m_depthImage)
         vkDestroyImage(m_device, m_depthImage, nullptr);
     if (m_depthMemory)
-        vkFreeMemory(m_device, m_depthMemory, nullptr);
+        freeAllocation(m_depthMemory);
     m_depthView = VK_NULL_HANDLE;
     m_depthImage = VK_NULL_HANDLE;
     m_depthMemory = VK_NULL_HANDLE;
@@ -442,6 +448,14 @@ std::uint32_t Device::findMemoryType(std::uint32_t mask, VkMemoryPropertyFlags p
     return 0;
 }
 
+void Device::noteAllocation(VkDeviceSize bytes)
+{
+    ++m_liveAllocations;
+    m_peakAllocations = std::max(m_peakAllocations, m_liveAllocations);
+    m_liveBytes += bytes;
+    m_peakBytes = std::max(m_peakBytes, m_liveBytes);
+}
+
 bool Device::allocate(const VkMemoryRequirements &requirements, bool hostVisible, VkDeviceMemory &memory,
                       std::string *error)
 {
@@ -452,7 +466,11 @@ bool Device::allocate(const VkMemoryRequirements &requirements, bool hostVisible
     VkMemoryAllocateInfo info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     info.allocationSize = requirements.size;
     info.memoryTypeIndex = findMemoryType(requirements.memoryTypeBits, properties);
-    return check(vkAllocateMemory(m_device, &info, nullptr, &memory), error, "vkAllocateMemory");
+    if (!check(vkAllocateMemory(m_device, &info, nullptr, &memory), error, "vkAllocateMemory"))
+        return false;
+    noteAllocation(info.allocationSize);
+    m_allocationBytes.emplace(memory, info.allocationSize);
+    return true;
 }
 
 bool Device::capture(const char *path, std::string *error)
@@ -653,6 +671,8 @@ Buffer Device::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool ho
     allocate.memoryTypeIndex = findMemoryType(requirements.memoryTypeBits, properties);
     if (!check(vkAllocateMemory(m_device, &allocate, nullptr, &buffer.memory), error, "vkAllocateMemory"))
         return buffer;
+    noteAllocation(allocate.allocationSize);
+    m_allocationBytes.emplace(buffer.memory, allocate.allocationSize);
     vkBindBufferMemory(m_device, buffer.handle, buffer.memory, 0);
 
     if (hostVisible)
@@ -660,14 +680,30 @@ Buffer Device::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool ho
     return buffer;
 }
 
+void Device::freeAllocation(VkDeviceMemory &memory)
+{
+    if (memory == VK_NULL_HANDLE)
+        return;
+    const auto known = m_allocationBytes.find(memory);
+    if (known != m_allocationBytes.end())
+    {
+        m_liveBytes -= std::min(m_liveBytes, known->second);
+        m_allocationBytes.erase(known);
+    }
+    vkFreeMemory(m_device, memory, nullptr);
+    memory = VK_NULL_HANDLE;
+    m_liveAllocations -= std::min<std::size_t>(m_liveAllocations, 1);
+}
+
 void Device::destroyBuffer(Buffer &buffer)
 {
+
     if (buffer.mapped)
         vkUnmapMemory(m_device, buffer.memory);
     if (buffer.handle)
         vkDestroyBuffer(m_device, buffer.handle, nullptr);
     if (buffer.memory)
-        vkFreeMemory(m_device, buffer.memory, nullptr);
+        freeAllocation(buffer.memory);
     buffer = {};
 }
 

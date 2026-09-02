@@ -187,7 +187,7 @@ void destroyTexture(Device &device, Texture &texture)
     if (texture.image)
         vkDestroyImage(device.device(), texture.image, nullptr);
     if (texture.memory)
-        vkFreeMemory(device.device(), texture.memory, nullptr);
+        device.freeAllocation(texture.memory);
     texture = {};
 }
 

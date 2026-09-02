@@ -192,7 +192,7 @@ bool bakeTreeAtlas(Device &device, WorldRenderer &source, const std::vector<std:
 
     vkDestroyImageView(device.device(), depthView, nullptr);
     vkDestroyImage(device.device(), depthImage, nullptr);
-    vkFreeMemory(device.device(), depthMemory, nullptr);
+    device.freeAllocation(depthMemory);
     return true;
 }
 
