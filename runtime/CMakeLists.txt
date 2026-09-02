@@ -79,6 +79,7 @@ add_custom_target(shaders DEPENDS ${SHADER_OUTPUTS})
 
 add_library(render STATIC
   src/render/arena.cpp
+  src/render/pool.cpp
   src/render/window.cpp
   src/render/vulkan.cpp
   src/render/renderer.cpp
@@ -115,6 +116,9 @@ target_link_libraries(g3sector PRIVATE genome)
 add_executable(g3world tools/g3world.cpp)
 target_link_libraries(g3world PRIVATE genome render)
 add_dependencies(g3world shaders)
+
+add_executable(g3pool tools/g3pool.cpp)
+target_link_libraries(g3pool PRIVATE render)
 
 add_executable(g3view tools/g3view.cpp)
 target_link_libraries(g3view PRIVATE render)
