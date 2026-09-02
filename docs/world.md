@@ -360,6 +360,35 @@ everything, including all the instances behind the camera the frustum would have
 thrown away for the same price. Reverted - it changes what the counters mean for
 no measured gain.
 
+## Open ends
+
+**The parallel cull has never been attacked by anyone but its author.** Its
+correctness rests on three things: an audit that established the contiguity
+constraint is per batch, a reading of what the loop touches, and seven runs of
+the same flight on 1 to 32 threads producing the same screenshot hash and the
+same counts. All three are the same pair of eyes and the same machine. A review
+whose job was to break it was started and stopped before it finished, so the
+findings are unknown rather than absent. Worth restarting.
+
+**Nothing perturbs the timing.** The thread sweep varies the count, including
+oversubscribing 32 threads onto 16 cores, but every run has the same shape. A
+race needing an unlucky interleaving would not show. Injecting jitter into the
+batch body, or running under a race detector, would say more.
+
+**The card is the bottleneck and its time is geometry.** 2.25 times the pixels
+costs a fifth more frame, so fragments are not the cost - 1.84M triangles in 925
+draws are. That is the number to attack next if the frame matters, and it means
+heavier shading has room while more triangles do not.
+
+**Above the desktop size nothing can be measured.** The window is clamped, and
+the first attempt at 1440p and 4K silently measured 2052x1133 instead. Offscreen
+rendering would fix it.
+
+**Synchronization validation still has never run.** The unwaited uploads are
+correct by a rule in the spec rather than by anything that checked them, and
+deliberately removing the barrier produced no complaint - so the check is off,
+not passed.
+
 ## Not yet established
 
 Whether the terrain proper is meshes or a height field, what `.lrgeodat` holds,
