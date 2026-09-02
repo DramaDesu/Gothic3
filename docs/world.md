@@ -293,9 +293,22 @@ cull, eight threads          0.17 ms      3.6x
 ```
 
 Draw order cannot change, whatever order the threads work in: `draw()` walks
-`m_batches` by index and the cull never reorders it. The picture is byte for
-byte the same across all four combinations of serial/parallel and
-occlusion/none.
+`m_batches` by index and the cull never reorders it.
+
+The check that matters is `--threads N`, which sets how many the cull runs on -
+one meaning the serial path, since the pool with no workers just runs the loop.
+The same flight on 1, 2, 3, 4, 8, 16 and 32 threads produces the same screenshot
+hash and the same counts, too-small and occluded included. Three is in the list
+on purpose: a bug that divides work by a power of two would pass the others.
+
+```bash
+for t in 1 2 3 4 8 16 32; do ./g3world.exe ... --threads  --shot t.ppm; done
+```
+
+That is seven comparisons rather than one, and a race in the block layout or the
+counters would have to survive all of them. It is still not a proof: they all
+ran on one machine, along one camera path, with the same timing. A race that
+needs an unlucky interleaving would not show.
 
 ## The bottleneck moved, and one decision reversed with it
 

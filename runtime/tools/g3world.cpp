@@ -573,6 +573,8 @@ int main(int argc, char **argv)
     // The card is the bottleneck now, so the pixel count is a first-class
     // parameter rather than a constant.
     int windowWidth = 1280, windowHeight = 720;
+    // Threads the cull runs on, the caller included. Zero leaves the default.
+    int cullThreads = 0;
     // Residency is decided against a far plane of its own, not the one the
     // camera draws with: it is the game's number, and what made 36 sectors the
     // answer rather than some other count.
@@ -634,6 +636,8 @@ int main(int argc, char **argv)
             windowWidth = std::atoi(argv[index + 1]);
             windowHeight = std::atoi(argv[index + 2]);
         }
+        if (std::string(argv[index]) == "--threads" && hasValue)
+            cullThreads = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--cull-repeat" && hasValue)
             cullRepeat = std::max(1, std::atoi(argv[index + 1]));
         if (std::string(argv[index]) == "--occlusion-pixels" && hasValue)
@@ -1520,6 +1524,8 @@ int main(int argc, char **argv)
         worldLights.insert(worldLights.end(), content.lights.begin(), content.lights.end());
     renderer.setLights(worldLights);
     renderer.setOcclusionThreshold(occlusionPixels);
+    if (cullThreads > 0)
+        renderer.setCullThreads(unsigned(cullThreads));
     renderer.setLightmaps(std::move(lightmapColours));
     renderer.setLightmapDirections(std::move(lightmapIncident));
     lightmapCoords.resize(std::max<std::size_t>(lightmapCoords.size(), 2), -1.0f);
@@ -2042,8 +2048,8 @@ int main(int argc, char **argv)
                 // The extent the swapchain really got, not the one asked for:
                 // a window larger than the desktop is clamped, and a number
                 // measured at a size that was never used is worse than none.
-                std::printf("drawing %ux%u, presenting %s\n", device.extent().width, device.extent().height,
-                            device.presentModeName());
+                std::printf("drawing %ux%u, presenting %s, culling on %u threads\n", device.extent().width,
+                            device.extent().height, device.presentModeName(), renderer.cullThreads());
                 report(frameTimes, "frame");
                 report(cullTimes, "cull");
                 {

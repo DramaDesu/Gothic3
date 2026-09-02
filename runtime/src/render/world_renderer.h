@@ -16,6 +16,7 @@
 
 #include <array>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -157,6 +158,11 @@ class WorldRenderer
     // How big an instance must be on screen before it is worth asking whether
     // it is hidden. Below this it is cheaper to draw it than to test it.
     void setOcclusionThreshold(float pixels) { m_occlusionPixels = pixels; }
+
+    // Threads the cull runs on, the caller included. One means serial, which is
+    // the comparison every parallel claim here rests on.
+    void setCullThreads(unsigned threads);
+    unsigned cullThreads() const { return m_pool ? m_pool->threads() : 1; }
     std::size_t occlusionTests() const { return m_occlusionTests; }
 
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);
@@ -457,8 +463,10 @@ class WorldRenderer
     CullPhases m_cullPhases;
 
     // The cull runs its batch loop here. Everything before the loop is serial
-    // and measured at 0.04 ms; the loop is the frame.
-    Pool m_pool;
+    // and measured at 0.04 ms; the loop is the frame. Held by pointer so the
+    // count can be set - which is how the parallel version is checked against
+    // the serial one on the same frame.
+    std::unique_ptr<Pool> m_pool;
 
     // One slot per thread, so the counters need no atomic. They are size_t
     // sums, so the total is the same however the threads interleave.

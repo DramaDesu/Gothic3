@@ -730,6 +730,11 @@ void WorldRenderer::ensureDerived()
 // Extents, world bounds, occluders, the grid and the mesh-to-batch map are all
 // views of the batch list, so they are worked out again whenever it changes
 // rather than patched in a dozen places.
+void WorldRenderer::setCullThreads(unsigned threads)
+{
+    m_pool = std::make_unique<Pool>(threads);
+}
+
 void WorldRenderer::rebuildDerived()
 {
     // Each batch's block in the instance buffer, laid out in batch order and
@@ -1273,7 +1278,9 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     // One batch at a time, in any order, on any thread. Nothing in here is
     // shared: the block a batch writes into is its own, its ranges are its
     // own, and the counters are per thread.
-    m_cullCounts.assign(m_pool.threads(), CullCounts{});
+    if (!m_pool)
+        m_pool = std::make_unique<Pool>();
+    m_cullCounts.assign(m_pool->threads(), CullCounts{});
     const auto cullBatch = [&](std::size_t batchIndex, unsigned thread) {
         CullCounts &counts = m_cullCounts[thread];
         Batch &batch = m_batches[batchIndex];
@@ -1434,7 +1441,7 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
 
     // Eight at a time, because a median batch of six instances would
     // otherwise be one atomic increment each.
-    m_pool.forEach(m_batches.size(), 8, cullBatch);
+    m_pool->forEach(m_batches.size(), 8, cullBatch);
 
     std::size_t visibleTotal = 0;
     for (const CullCounts &counts : m_cullCounts)
