@@ -124,20 +124,108 @@ after the billboard atlas had been baked, and a kind with no cell in that atlas
 keeps its thinned mesh all the way out instead. Worse to look at, correct to
 draw, and counted out loud rather than left to be noticed.
 
+## What an arrival costs
+
+It was 29 ms on average and 141 ms at worst, and the plan was to move the load
+off the main thread on the assumption that the load is the expensive part. It
+was half of it. Measured across 44 arrivals, 1107 ms in all:
+
+```
+lightmaps              421 ms   38%   disk and CPU
+waiting on the queue   324 ms   29%   vkQueueWaitIdle in endOneShot
+patch tiles             69 ms    6%   GPU, one submit and one wait per tile
+reading sectors         67 ms    6%
+meshes                  57 ms    5%
+rebuilding the grid     54 ms    5%   CPU, inside addSector
+textures                30 ms    3%
+building vertex arrays  11 ms    1%   CPU, inside addSector
+trees                    6 ms    1%
+```
+
+Neither of the two big numbers would have been guessed right. Half of it was
+loading; a third of it was the queue.
+
+A benched flight uses a fixed sixtieth-of-a-second step so that the same command
+flies the same path every run - the same 28 arrivals and 36 departures every
+time - because two measurements taken at different distances cannot be compared.
+
+## Four things, in the order they were done
+
+**The atlas tiles went across together.** Each was its own staging buffer, its
+own pair of layout transitions, its own submit and its own drain, and a sector
+brings about ten. One command buffer now: one barrier in, N copies, one barrier
+out. 1.6 ms an arrival to 0.3.
+
+**The queue stopped being drained.** `endOneShot` submitted and then called
+`vkQueueWaitIdle`, which waits for everything on the queue - including the frame
+being rendered. There is one queue, so submissions execute in submission order:
+a transfer submitted before the frame's draws runs before them, and a pipeline
+barrier at the end of the transfer command buffer puts those later submissions
+in its second synchronization scope. So nothing needs waiting for. The
+submission is fenced only so the staging buffer can be recycled once the copy
+has really happened, and at most eight are left in flight. The uploader stopped
+keeping a 64 MB staging buffer and now makes one the size of what it holds -
+reusing one is safe only while the copy is waited for.
+
+**Two bugs the audit found, one of them made by the change above.** dropSector
+released arena ranges the instant a sector left, which was safe only because the
+drain covered it; with the drain gone, an arriving sector could overwrite
+vertices a submitted frame was about to draw. Ranges and freed atlas tiles now
+wait out the frames in flight. And PatchAtlas kept its shelf cursor across
+sectors, so an arriving sector could pack into a tile another sector owned:
+those patches never reached the texture, and the tile was freed under the sector
+still sampling it.
+
+**The load moved to a thread of its own.** It cannot be shared:
+`PakArchive::read` seeks a `FILE*` it holds, and every cache is a plain
+`std::map`. So one thread owns all of it - the archives, the mesh and tree
+caches, the images, the patch atlas - and nothing else calls in. The main thread
+posts a path and takes back a finished sector, including the pixels of the atlas
+tiles it filled, and does the Vulkan half only. A sector that finishes after the
+camera has left is dropped; giving its tiles back is all the undoing needed.
+
+Then the spike moved instead of vanishing: with loading off the frame the worst
+frame went UP, 142 ms to 237, because departures arrive in a burst when the
+rectangle changes and each `dropSector` rebuilt the extents, bounds, occluders
+and grid over every batch. Those views are marked stale now and rebuilt once,
+before the cull that reads them.
+
+## Where it ended up
+
+Over the fixed 900-frame flight, 28 arrivals and 36 departures:
+
+|                | before  | after  |
+|----------------|---------|--------|
+| on the frame   | 727 ms  | 78 ms  |
+| an arrival     | 26 ms   | 3 ms   |
+| worst arrival  | 139 ms  | 9 ms   |
+| worst frame    | 142 ms  | 19 ms  |
+
+Against a 16.7 ms refresh, a 19 ms frame is not a hitch. The loader spends 663
+ms of its own - 62 reading sectors, 92 meshes, 462 lightmaps, 8 trees, 39
+textures - none of it on the frame.
+
+The world it builds is identical, not merely equivalent: the screenshot after a
+threaded flight matches the synchronous one byte for byte.
+
 ## What it still does not do
 
-- **An arrival is synchronous.** 29 ms on average and 141 ms at worst, on the
-  frame it lands. That is a hitch. The game gave itself a five millisecond
-  slice; the work wants splitting across frames, or moving off the main thread
-  as far as the Vulkan upload.
-- **Textures are never released.** The cache grows monotonically - 210 to 337
-  across 147 arrivals - and the descriptor pool is fixed at 8192 sets, so a long
-  enough flight will reach that wall.
+- **Textures are still allocated one VkDeviceMemory each and never freed**, and
+  the image cache is keyed by material name rather than by the resolved file, so
+  two materials sharing a diffuse map each get their own image, their own
+  allocation and their own descriptor set.
 - **Billboard cells are not suballocated.** The atlas is baked once, from the
   kinds the first resident set happened to use. A fixed cell grid with cells
   handed out as kinds appear is the same trick used everywhere else here.
 - **Lights are gathered once.** 588 across the world, so nothing is visibly
   wrong yet, but they should come and go with their sectors.
+- **Synchronization validation has never actually run here.** The unwaited
+  uploads are correct by the spec rule that a barrier orders against later
+  submissions on the same queue, and that is an argument rather than a check. It
+  was asked for by name in the instance chain, the environment variable that is
+  supposed to enable it did nothing, and deliberately removing the barrier to
+  see the check fire produced no complaint either - so the check is off, not
+  passed. Getting it to run is worth a session of its own.
 
 ## How the pieces sit
 
