@@ -46,18 +46,20 @@ class Pool
     Pool(const Pool &) = delete;
     Pool &operator=(const Pool &) = delete;
 
-    // Runs body(0..count-1) across the pool and returns when all of it is done.
+    // Runs body(task, thread) for task in 0..count-1 and returns when all of it
+    // is done. The thread index is 0..threads()-1 and is what lets a body keep
+    // a counter without an atomic; the calling thread has the last index.
     // Tasks are taken in runs of `grain`, so a median task of six instances is
     // not one atomic increment each; the run size wants to be large enough that
     // the increment is noise and small enough that the last thread is not left
     // holding a tail.
-    void forEach(std::size_t count, std::size_t grain, const std::function<void(std::size_t)> &body);
+    void forEach(std::size_t count, std::size_t grain, const std::function<void(std::size_t, unsigned)> &body);
 
     unsigned threads() const { return m_workers + 1; }
 
   private:
-    void run();
-    void work();
+    void run(unsigned index);
+    void work(unsigned index);
 
     std::vector<std::thread> m_threads;
     std::mutex m_mutex;
@@ -73,7 +75,7 @@ class Pool
     std::atomic<unsigned> m_done{0};
     std::size_t m_count = 0;
     std::size_t m_grain = 1;
-    const std::function<void(std::size_t)> *m_body = nullptr;
+    const std::function<void(std::size_t, unsigned)> *m_body = nullptr;
 };
 
 } // namespace render

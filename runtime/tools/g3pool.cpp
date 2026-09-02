@@ -53,7 +53,7 @@ int main(int argc, char **argv)
     std::printf("%zu tasks holding %zu instances\n", sizes.size(), instances);
 
     std::vector<float> sink(sizes.size(), 0.0f);
-    const auto body = [&sizes, &sink](std::size_t task) {
+    const auto body = [&sizes, &sink](std::size_t task, unsigned) {
         float total = 0.0f;
         for (std::size_t at = 0; at < sizes[task]; ++at)
         {
@@ -83,7 +83,7 @@ int main(int argc, char **argv)
 
     const double serial = measure("serial", [&] {
         for (std::size_t task = 0; task < sizes.size(); ++task)
-            body(task);
+            body(task, 0);
     });
 
     for (unsigned threads : {2u, 4u, 8u, 16u})
@@ -95,7 +95,7 @@ int main(int argc, char **argv)
     }
 
     // The dispatch on its own: what a loop pays before any work happens.
-    const auto nothing = [](std::size_t) {};
+    const auto nothing = [](std::size_t, unsigned) {};
     for (unsigned threads : {4u, 8u, 16u})
     {
         render::Pool pool(threads);

@@ -9,6 +9,7 @@
 #include "genome/mesh.h"
 #include "genome/world.h"
 #include "occlusion.h"
+#include "pool.h"
 #include "profile.h"
 #include "texture.h"
 #include "vulkan.h"
@@ -396,6 +397,12 @@ class WorldRenderer
         // The draws this batch makes, by value: a batch that leaves takes its
         // draws with it, which an index into a shared list cannot do.
         std::vector<Range> ranges;
+        // Where this batch's instances live in the instance buffer. Fixed when
+        // the batch list changes rather than decided by the cull, so batches
+        // may be culled in any order and by any thread without agreeing about
+        // anything. Big enough for every instance, so a block is never
+        // overrun; the gaps where instances were rejected are read by nothing.
+        std::size_t instanceBase = 0;
         const genome::Mesh *mesh = nullptr;
 
         // Which sector put each instance here, in step with the transforms. A
@@ -448,6 +455,22 @@ class WorldRenderer
     std::size_t m_testedInstances = 0;
     OcclusionBuffer m_occlusion;
     CullPhases m_cullPhases;
+
+    // The cull runs its batch loop here. Everything before the loop is serial
+    // and measured at 0.04 ms; the loop is the frame.
+    Pool m_pool;
+
+    // One slot per thread, so the counters need no atomic. They are size_t
+    // sums, so the total is the same however the threads interleave.
+    struct CullCounts
+    {
+        std::size_t visible = 0, tooSmall = 0, occluded = 0, tested = 0;
+        std::size_t occlusionTests = 0, draws = 0, triangles = 0;
+        // Kept a cache line apart: two threads' counts in one line would be
+        // written by both on every instance.
+        char padding[64 - (7 * sizeof(std::size_t)) % 64]{};
+    };
+    std::vector<CullCounts> m_cullCounts;
     float m_occlusionPixels = 0.0f;
     std::size_t m_occlusionTests = 0;
 

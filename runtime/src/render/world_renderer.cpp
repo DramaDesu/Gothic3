@@ -732,6 +732,18 @@ void WorldRenderer::ensureDerived()
 // rather than patched in a dozen places.
 void WorldRenderer::rebuildDerived()
 {
+    // Each batch's block in the instance buffer, laid out in batch order and
+    // sized for every instance it holds. Done here because this is the one
+    // place the batch list settles.
+    {
+        std::size_t base = 0;
+        for (Batch &batch : m_batches)
+        {
+            batch.instanceBase = base;
+            base += batch.transforms.size();
+        }
+    }
+
     m_batchOf.clear();
     m_occluders.clear();
     m_foliageSkipped = 0;
@@ -1258,27 +1270,33 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                                                                   cellStart).count();
 
     const auto instanceStart = std::chrono::steady_clock::now();
-    for (std::size_t batchIndex = 0; batchIndex < m_batches.size(); ++batchIndex)
-    {
+    // One batch at a time, in any order, on any thread. Nothing in here is
+    // shared: the block a batch writes into is its own, its ranges are its
+    // own, and the counters are per thread.
+    m_cullCounts.assign(m_pool.threads(), CullCounts{});
+    const auto cullBatch = [&](std::size_t batchIndex, unsigned thread) {
+        CullCounts &counts = m_cullCounts[thread];
         Batch &batch = m_batches[batchIndex];
-        const std::uint32_t firstInstance = static_cast<std::uint32_t>(m_visible.size());
+        const std::uint32_t firstInstance = static_cast<std::uint32_t>(batch.instanceBase);
         std::uint32_t visible = 0;
+        genome::WorldMatrix *out =
+            static_cast<genome::WorldMatrix *>(m_instanceBuffer[device.frameIndex()].mapped) + batch.instanceBase;
 
         if (skipBatch[batchIndex] ||
             (batch.hasExtent && (outsideFrustum(batch.extent) || tooSmallOnScreen(batch.extent))))
         {
             // Rejected whole. Its instances still have to be accounted for, or
             // the counts stop adding up to what was loaded.
-            m_tooSmall += batch.transforms.size();
+            counts.tooSmall += batch.transforms.size();
             for (Range &range : batch.ranges)
             {
                 range.firstInstance = firstInstance;
                 range.instanceCount = 0;
             }
-            continue;
+            return;
         }
 
-        m_testedInstances += batch.transforms.size();
+        counts.tested += batch.transforms.size();
         const float nearSquared = batch.lodNear * batch.lodNear;
         const float farSquared = batch.lodFar * batch.lodFar;
 
@@ -1314,7 +1332,7 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
 
             if (hasBox && tooSmallOnScreen(batch.bounds[instance]))
             {
-                ++m_tooSmall;
+                ++counts.tooSmall;
                 continue;
             }
 
@@ -1344,10 +1362,10 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                 // Occluders are not tested against themselves.
                 if (worthAsking && extent < 1000.0f)
                 {
-                    ++m_occlusionTests;
+                    ++counts.occlusionTests;
                     if (m_occlusion.isOccluded(box, viewProjection))
                     {
-                        ++m_occluded;
+                        ++counts.occluded;
                         continue;
                     }
                 }
@@ -1394,25 +1412,40 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                 m[13] = box[1];
                 m[14] = centreZ;
                 m[15] = 1.0f;
-                m_visible.push_back(m);
-                ++visible;
+                out[visible++] = m;
                 continue;
             }
 
-            m_visible.push_back(batch.transforms[instance]);
-            ++visible;
+            out[visible++] = batch.transforms[instance];
         }
 
+        counts.visible += visible;
         for (Range &range : batch.ranges)
         {
             range.firstInstance = firstInstance;
             range.instanceCount = visible;
             if (visible != 0)
             {
-                ++m_submittedDraws;
-                m_submittedTriangles += std::size_t(range.indexCount / 3) * visible;
+                ++counts.draws;
+                counts.triangles += std::size_t(range.indexCount / 3) * visible;
             }
         }
+    };
+
+    // Eight at a time, because a median batch of six instances would
+    // otherwise be one atomic increment each.
+    m_pool.forEach(m_batches.size(), 8, cullBatch);
+
+    std::size_t visibleTotal = 0;
+    for (const CullCounts &counts : m_cullCounts)
+    {
+        visibleTotal += counts.visible;
+        m_tooSmall += counts.tooSmall;
+        m_occluded += counts.occluded;
+        m_testedInstances += counts.tested;
+        m_occlusionTests += counts.occlusionTests;
+        m_submittedDraws += counts.draws;
+        m_submittedTriangles += counts.triangles;
     }
 
     m_cullPhases.instances = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
@@ -1470,14 +1503,13 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
 
     m_cullPhases.lights = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
                                                                    lightStart).count();
-    m_visibleInstances = m_visible.size();
+    m_visibleInstances = visibleTotal;
 
     {
         // Its own scope: a zone names a local, so two in one scope collide.
         G3_ZONE("upload instances");
-        if (!m_visible.empty())
-            std::memcpy(m_instanceBuffer[device.frameIndex()].mapped, m_visible.data(),
-                        sizeof(genome::WorldMatrix) * m_visible.size());
+        // Nothing to copy: the cull wrote straight into the mapped buffer,
+        // each batch into its own block.
     }
 }
 

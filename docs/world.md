@@ -263,6 +263,67 @@ screen, which was the first thing tried. It does reduce the cost - the cull goes
 because nearly everything occlusion rejects is small. That is the measurement
 that turned "make the test cheaper" into "do not run the test".
 
+## Culling on eight threads
+
+The cull was the frame and the cull is one loop over batches, so the loop went
+onto a pool. What made that easy was a fact from reading the code rather than
+anything clever: the contiguity `vkCmdDrawIndexed` needs is **per batch and
+never across batches**, because every `Range` carries its own `firstInstance`.
+Blocks may therefore sit in the instance buffer in any order.
+
+So each batch owns a fixed block, handed out in `rebuildDerived` and sized for
+every instance it holds. The cull writes survivors straight into the mapped
+buffer at that offset, leaving gaps where instances were rejected that nothing
+reads. There is no append, no prefix sum, no per-frame agreement between
+threads, and the 943 KB copy from a staging vector went with it. A transform is
+sixteen floats, exactly one cache line, so the scattered writes into
+write-combined memory are whole lines.
+
+That leaves the counters, which are plain `size_t` accumulators - a slot per
+thread, padded to a cache line, summed once at the join. Bit-identical totals
+whatever order the threads finish in.
+
+Everything before the loop stays serial: retiring handles, rebuilding the
+derived views, rasterising the occluders, resetting the counters, filling the
+cell skip list. Measured together at 0.04 ms.
+
+```
+cull, serial, fixed blocks   0.61 ms
+cull, eight threads          0.17 ms      3.6x
+```
+
+Draw order cannot change, whatever order the threads work in: `draw()` walks
+`m_batches` by index and the cull never reorders it. The picture is byte for
+byte the same across all four combinations of serial/parallel and
+occlusion/none.
+
+## The bottleneck moved, and one decision reversed with it
+
+With the cull at 0.17 ms the median frame is no longer the cull:
+
+```
+a median frame: 0.00 input, 0.00 streaming, 0.66 waiting to begin,
+                0.18 cull, 0.09 recording, 0.07 presenting
+of that wait:   0.00 retiring, 0.66 on our own fence, 0.00 acquiring
+```
+
+The fence is the frame two back finishing on the card. **The card is now the
+bottleneck**, which is exactly the condition written beside the occlusion switch
+when it was turned off - and it fired:
+
+|                | cull | fence wait | frame (median) |
+|----------------|------|-----------|----------------|
+| occlusion off  | 0.18 | 0.66      | 1.05 ms |
+| occlusion on   | 0.49 | 0.15      | **0.92 ms** |
+
+The same feature, the same numbers, the opposite answer. It costs 0.31 ms spread
+over eight threads and saves half a millisecond of waiting. Back on by default.
+
+The wider point is that neither answer was ever about occlusion culling. It was
+about which side of the frame was waiting, and that is a property of the whole
+system rather than of the feature - so it is worth re-asking after any change
+that moves work off the processor.
+
 ## Comparing two versions
 
 Two runs of identical code, twenty minutes apart, read 0.91 ms and 1.05 ms a

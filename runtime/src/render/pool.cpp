@@ -15,7 +15,7 @@ Pool::Pool(unsigned threads)
 
     m_threads.reserve(m_workers);
     for (unsigned index = 0; index < m_workers; ++index)
-        m_threads.emplace_back([this] { run(); });
+        m_threads.emplace_back([this, index] { run(index); });
 }
 
 Pool::~Pool()
@@ -29,14 +29,14 @@ Pool::~Pool()
         thread.join();
 }
 
-void Pool::forEach(std::size_t count, std::size_t grain, const std::function<void(std::size_t)> &body)
+void Pool::forEach(std::size_t count, std::size_t grain, const std::function<void(std::size_t, unsigned)> &body)
 {
     if (count == 0)
         return;
     if (m_workers == 0)
     {
         for (std::size_t at = 0; at < count; ++at)
-            body(at);
+            body(at, 0);
         return;
     }
 
@@ -55,14 +55,14 @@ void Pool::forEach(std::size_t count, std::size_t grain, const std::function<voi
     // The caller is a worker too, which is both one more thread and the reason
     // the common case of a tiny job costs almost nothing: it is finished before
     // the others have woken.
-    work();
+    work(m_workers);
 
     std::unique_lock<std::mutex> guard(m_finishing);
     m_finished.wait(guard, [this] { return m_done.load(std::memory_order_acquire) == m_workers; });
     m_body = nullptr;
 }
 
-void Pool::run()
+void Pool::run(unsigned index)
 {
     std::uint64_t seen = 0;
     for (;;)
@@ -75,7 +75,7 @@ void Pool::run()
             seen = m_epoch;
         }
 
-        work();
+        work(index);
 
         if (m_done.fetch_add(1, std::memory_order_acq_rel) + 1 == m_workers)
         {
@@ -86,7 +86,7 @@ void Pool::run()
     }
 }
 
-void Pool::work()
+void Pool::work(unsigned index)
 {
     for (;;)
     {
@@ -95,7 +95,7 @@ void Pool::work()
             return;
         const std::size_t end = std::min(at + m_grain, m_count);
         for (std::size_t task = at; task < end; ++task)
-            (*m_body)(task);
+            (*m_body)(task, index);
     }
 }
 

@@ -551,15 +551,20 @@ int main(int argc, char **argv)
     // Ask the swapchain not to wait for the display, so a benchmark measures
     // this program instead of the refresh interval.
     bool uncapped = false;
-    // Off by default, and measured rather than assumed. On the dense scene,
-    // uncapped and repeated three times: with occlusion the frame is 2.14 ms
-    // and the cull 1.95; without, 1.09 and 0.71. What it buys is 4365 instances
-    // and 0.54M triangles not drawn - on a card that is never waited for, since
-    // the frame spends 0.0 ms on its fence. It is a processor cost paid to save
-    // work nothing was waiting on. It becomes worth turning on again when the
-    // card is what the frame waits for: higher resolution, heavier shading,
-    // ray tracing.
-    bool startWithOcclusion = false;
+    // On, and the reason is worth keeping because it reversed once. While the
+    // cull was serial it cost 1.24 ms to save 0.54M triangles on a card that
+    // was never waited for, and it was switched off. Making the cull parallel
+    // moved the bottleneck onto the card, which is the condition that was
+    // written down beside this switch at the time - and it fired:
+    //
+    //              cull   fence wait   frame (median)
+    //     off      0.18       0.66          1.05 ms
+    //     on       0.49       0.15          0.92 ms
+    //
+    // It now costs 0.31 ms spread over eight threads and saves half a
+    // millisecond of waiting for the card. The same feature, the same numbers,
+    // opposite answers - because what the frame is waiting for changed.
+    bool startWithOcclusion = true;
     // Below this many pixels an instance is not asked whether it is hidden.
     float occlusionPixels = 0.0f;
     // Runs the cull several times a frame. The cost of the extra passes is the
@@ -619,8 +624,8 @@ int main(int argc, char **argv)
             validation = true;
         if (std::string(argv[index]) == "--uncapped")
             uncapped = true;
-        if (std::string(argv[index]) == "--occlusion")
-            startWithOcclusion = true;
+        if (std::string(argv[index]) == "--no-occlusion")
+            startWithOcclusion = false;
         if (std::string(argv[index]) == "--cull-repeat" && hasValue)
             cullRepeat = std::max(1, std::atoi(argv[index + 1]));
         if (std::string(argv[index]) == "--occlusion-pixels" && hasValue)
@@ -2040,6 +2045,28 @@ int main(int argc, char **argv)
                 for (std::size_t at = skip; at < frameTimes.size(); ++at)
                     if (frameTimes[at] > frameTimes[worst])
                         worst = at;
+                // The median frame, which is what the frame actually costs -
+                // the worst one says where a spike went, not where the time is.
+                if (!framePhases.empty())
+                {
+                    std::vector<FramePhases> ordered(framePhases.begin() + std::ptrdiff_t(skip), framePhases.end());
+                    std::sort(ordered.begin(), ordered.end(),
+                              [](const FramePhases &a, const FramePhases &b) { return a.total() < b.total(); });
+                    const auto pick = [&ordered](float FramePhases::*part) {
+                        std::vector<float> values;
+                        values.reserve(ordered.size());
+                        for (const FramePhases &one : ordered)
+                            values.push_back(one.*part);
+                        std::sort(values.begin(), values.end());
+                        return values[values.size() / 2];
+                    };
+                    std::printf("a median frame goes: %.2f input, %.2f streaming, %.2f waiting to begin, %.2f cull, "
+                                "%.2f recording, %.2f presenting\n",
+                                pick(&FramePhases::input), pick(&FramePhases::streaming), pick(&FramePhases::begin),
+                                pick(&FramePhases::cull), pick(&FramePhases::record), pick(&FramePhases::present));
+                    std::printf("and the median wait was: %.2f retiring, %.2f on our own fence, %.2f acquiring\n",
+                                pick(&FramePhases::retire), pick(&FramePhases::fence), pick(&FramePhases::acquire));
+                }
                 if (worst < framePhases.size())
                 {
                     const FramePhases &split = framePhases[worst];
