@@ -1122,6 +1122,7 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                          const std::array<float, 3> &eye, float pixelsPerRadian, float minimumPixels,
                          bool useOcclusion)
 {
+    const auto cullStarted = std::chrono::steady_clock::now();
     retireReleases(device, device.frameCounter());
     ensureDerived();
 
@@ -1162,6 +1163,10 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     // instance that survives the frustum, so the roots were worth removing.
     const float sizeRatio = minimumPixels / std::max(pixelsPerRadian, 1e-6f);
     const float sizeRatioSquared = sizeRatio * sizeRatio;
+    // The same comparison at a coarser threshold, for deciding whether an
+    // instance is worth an occlusion test at all.
+    const float occlusionRatio = m_occlusionPixels / std::max(pixelsPerRadian, 1e-6f);
+    const float occlusionRatioSquared = occlusionRatio * occlusionRatio;
     // The same question asked of a box with a radius given separately, which is
     // how a cell is judged by the largest thing in it rather than by its own
     // size - a cell is ten metres across whatever stands in it.
@@ -1187,9 +1192,11 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     };
 
     m_occluded = 0;
+    m_occlusionTests = 0;
     if (useOcclusion)
     {
         G3_ZONE("occluders");
+        const auto occluderStart = std::chrono::steady_clock::now();
 
         m_occlusion.clear();
         for (const Occluder &occluder : m_occluders)
@@ -1209,6 +1216,10 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     m_submittedDraws = 0;
     m_testedInstances = 0;
 
+    m_cullPhases.occluders = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
+                                                                      cullStarted).count();
+
+    const auto cellStart = std::chrono::steady_clock::now();
     // Reject whole cells first. From an overview of the map every batch is
     // inside the frustum, so testing them one at a time rejects nothing; a cell
     // takes its hundreds of batches with it. A cell survives if any part of it
@@ -1223,6 +1234,10 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
             skipBatch[index] = 1;
     }
 
+    m_cullPhases.cells = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
+                                                                  cellStart).count();
+
+    const auto instanceStart = std::chrono::steady_clock::now();
     for (std::size_t batchIndex = 0; batchIndex < m_batches.size(); ++batchIndex)
     {
         Batch &batch = m_batches[batchIndex];
@@ -1282,11 +1297,34 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
             {
                 const std::array<float, 6> &box = batch.bounds[instance];
                 const float extent = std::max({box[3] - box[0], box[4] - box[1], box[5] - box[2]});
-                // Occluders are not tested against themselves.
-                if (extent < 1000.0f && m_occlusion.isOccluded(box, viewProjection))
+
+                // Big enough on screen to be worth asking about. The test is
+                // twenty-odd nanoseconds and a small instance costs the card
+                // less than that to draw, so below the threshold the question
+                // can never pay for itself.
+                bool worthAsking = true;
+                if (occlusionRatioSquared > 0.0f)
                 {
-                    ++m_occluded;
-                    continue;
+                    const float radius = 0.5f * std::sqrt((box[3] - box[0]) * (box[3] - box[0]) +
+                                                          (box[4] - box[1]) * (box[4] - box[1]) +
+                                                          (box[5] - box[2]) * (box[5] - box[2]));
+                    const float centre[3] = {0.5f * (box[0] + box[3]), 0.5f * (box[1] + box[4]),
+                                             0.5f * (box[2] + box[5])};
+                    const float distanceSquared = (centre[0] - eye[0]) * (centre[0] - eye[0]) +
+                                                  (centre[1] - eye[1]) * (centre[1] - eye[1]) +
+                                                  (centre[2] - eye[2]) * (centre[2] - eye[2]);
+                    worthAsking = radius * radius >= occlusionRatioSquared * distanceSquared;
+                }
+
+                // Occluders are not tested against themselves.
+                if (worthAsking && extent < 1000.0f)
+                {
+                    ++m_occlusionTests;
+                    if (m_occlusion.isOccluded(box, viewProjection))
+                    {
+                        ++m_occluded;
+                        continue;
+                    }
                 }
             }
 
@@ -1352,6 +1390,10 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
         }
     }
 
+    m_cullPhases.instances = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
+                                                                      instanceStart).count();
+
+    const auto lightStart = std::chrono::steady_clock::now();
     // The lights that reach this frame: nearest first, and only those whose own
     // range still covers the camera's surroundings. 588 in the world, at most
     // sixteen in a frame.
@@ -1401,6 +1443,8 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
         }
     }
 
+    m_cullPhases.lights = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
+                                                                   lightStart).count();
     m_visibleInstances = m_visible.size();
 
     {

@@ -548,6 +548,20 @@ int main(int argc, char **argv)
     int cameraArgument = 0;
     int treeArgument = 0;
     bool validation = false;
+    // Ask the swapchain not to wait for the display, so a benchmark measures
+    // this program instead of the refresh interval.
+    bool uncapped = false;
+    // Off by default, and measured rather than assumed. On the dense scene,
+    // uncapped and repeated three times: with occlusion the frame is 2.14 ms
+    // and the cull 1.95; without, 1.09 and 0.71. What it buys is 4365 instances
+    // and 0.54M triangles not drawn - on a card that is never waited for, since
+    // the frame spends 0.0 ms on its fence. It is a processor cost paid to save
+    // work nothing was waiting on. It becomes worth turning on again when the
+    // card is what the frame waits for: higher resolution, heavier shading,
+    // ray tracing.
+    bool startWithOcclusion = false;
+    // Below this many pixels an instance is not asked whether it is hidden.
+    float occlusionPixels = 0.0f;
     // Residency is decided against a far plane of its own, not the one the
     // camera draws with: it is the game's number, and what made 36 sectors the
     // answer rather than some other count.
@@ -600,6 +614,12 @@ int main(int argc, char **argv)
             treeArgument = index + 1;
         if (std::string(argv[index]) == "--validate")
             validation = true;
+        if (std::string(argv[index]) == "--uncapped")
+            uncapped = true;
+        if (std::string(argv[index]) == "--occlusion")
+            startWithOcclusion = true;
+        if (std::string(argv[index]) == "--occlusion-pixels" && hasValue)
+            occlusionPixels = float(std::atof(argv[index + 1]));
         if (std::string(argv[index]) == "--stream")
             streaming = true;
         if (std::string(argv[index]) == "--squeeze" && hasValue)
@@ -1309,7 +1329,7 @@ int main(int argc, char **argv)
 
     render::Window window("Genome runtime - world", 1280, 720);
     render::Device device;
-    if (!device.create(window, &error, validation))
+    if (!device.create(window, &error, validation, uncapped))
     {
         std::cerr << "vulkan: " << error << "\n";
         return 1;
@@ -1481,6 +1501,7 @@ int main(int argc, char **argv)
     for (const SectorContent &content : residentSectors)
         worldLights.insert(worldLights.end(), content.lights.begin(), content.lights.end());
     renderer.setLights(worldLights);
+    renderer.setOcclusionThreshold(occlusionPixels);
     renderer.setLightmaps(std::move(lightmapColours));
     renderer.setLightmapDirections(std::move(lightmapIncident));
     lightmapCoords.resize(std::max<std::size_t>(lightmapCoords.size(), 2), -1.0f);
@@ -1602,7 +1623,7 @@ int main(int argc, char **argv)
                     argv[cameraArgument + 3], argv[cameraArgument + 4]);
     }
     bool looking = false;
-    bool occlusion = true;
+    bool occlusion = startWithOcclusion;
     POINT lastCursor{};
 
     std::vector<float> frameTimes, cullTimes;
@@ -1999,8 +2020,14 @@ int main(int argc, char **argv)
                                 total / float(kept.size()), kept[kept.size() / 2],
                                 kept[std::size_t(float(kept.size()) * 0.95f)], kept.back());
                 };
+                std::printf("presenting %s\n", device.presentModeName());
                 report(frameTimes, "frame");
                 report(cullTimes, "cull");
+                {
+                    const render::WorldRenderer::CullPhases &split = renderer.cullPhases();
+                    std::printf("the last cull went: %.2f occluders, %.2f cells, %.2f instances, %.2f lights\n",
+                                split.occluders, split.cells, split.instances, split.lights);
+                }
 
                 // Which frame was the worst, and what it was doing.
                 std::size_t worst = skip;

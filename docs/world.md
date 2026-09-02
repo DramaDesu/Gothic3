@@ -208,6 +208,61 @@ The blades are alpha-tested rather than blended, which is what the crossed-quad
 textures want; sorting for real transparency is not needed and would cost more
 than it buys here.
 
+## What a frame actually costs
+
+Every frame time in this document up to here was the monitor. The swapchain is
+FIFO with two images, so the loop blocks until the display is ready and the
+number that comes out is the refresh interval: 16.68 ms on a 60 Hz panel, 10.00
+on a 100 Hz one. The partition makes it plain - the time sits in
+`vkWaitForFences` inside `beginFrame`, waiting for the frame two back, and
+nothing this program computes is in it at all.
+
+`--uncapped` asks for an immediate present mode and three images, and every
+benched run now prints which mode it got. With the display out of the way, the
+dense fortress view - 68061 instances, 925 draws, 1.84M triangles:
+
+```
+frame    2.14 ms
+  cull   1.95      of which 1.9 is the per-instance walk
+  record 0.10
+  present 0.30
+  fence  0.00      the card is never waited for
+```
+
+So the frame is the cull, and the cull is one loop over instances. That is where
+any work on speed goes, and it is processor work rather than anything the card
+does.
+
+## Occlusion culling does not pay for itself
+
+Rasterising the big occluders into a small depth buffer and asking each
+surviving instance whether it is behind them rejects 4365 instances and 0.54M
+triangles in that view. It costs 1.24 ms of the 1.95 ms cull. Measured three
+times over, back to back:
+
+|              | with  | without |
+|--------------|-------|---------|
+| frame        | 2.14 ms | **1.09 ms** |
+| cull         | 1.95 ms | **0.71 ms** |
+| triangles    | 1.84M | 2.38M |
+| instances    | 10365 | 14730 |
+
+The picture is byte for byte identical either way, so the test was rejecting
+only things that really were hidden - it works, it is simply not worth its
+price. The card never being waited for is the whole argument: 0.54M triangles it
+absorbs for free are not worth 1.24 ms of processor.
+
+It is off by default now and `--occlusion` turns it back on. The condition for
+turning it on again is written into the code beside the switch: when the frame
+starts waiting on the fence, which means higher resolution, heavier shading, or
+ray tracing.
+
+`--occlusion-pixels N` skips the test for instances smaller than N pixels on
+screen, which was the first thing tried. It does reduce the cost - the cull goes
+1.97 to 1.25 ms at 24 pixels - but it removes almost all the rejections with it,
+because nearly everything occlusion rejects is small. That is the measurement
+that turned "make the test cheaper" into "do not run the test".
+
 ## Not yet established
 
 Whether the terrain proper is meshes or a height field, what `.lrgeodat` holds,

@@ -153,6 +153,11 @@ class WorldRenderer
     void cull(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 3> &eye,
               float pixelsPerRadian, float minimumPixels, bool useOcclusion);
 
+    // How big an instance must be on screen before it is worth asking whether
+    // it is hidden. Below this it is cheaper to draw it than to test it.
+    void setOcclusionThreshold(float pixels) { m_occlusionPixels = pixels; }
+    std::size_t occlusionTests() const { return m_occlusionTests; }
+
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);
 
     // The world's static point lights. There are 588 of them across the whole
@@ -214,6 +219,14 @@ class WorldRenderer
     // How many instances the last cull actually looked at, as opposed to
     // rejected a whole batch at a time. This is what the cull costs.
     std::size_t testedInstances() const { return m_testedInstances; }
+
+    // What the last cull spent on each of its four parts, in milliseconds.
+    // They add up to the whole of it.
+    struct CullPhases
+    {
+        float occluders = 0.0f, cells = 0.0f, instances = 0.0f, lights = 0.0f;
+    };
+    const CullPhases &cullPhases() const { return m_cullPhases; }
 
     const std::array<float, 3> &boundsMin() const { return m_boundsMin; }
     const std::array<float, 3> &boundsMax() const { return m_boundsMax; }
@@ -434,6 +447,9 @@ class WorldRenderer
     std::size_t m_submittedDraws = 0;
     std::size_t m_testedInstances = 0;
     OcclusionBuffer m_occlusion;
+    CullPhases m_cullPhases;
+    float m_occlusionPixels = 0.0f;
+    std::size_t m_occlusionTests = 0;
 
     // Instances big enough to hide other things: rasterised first, then used to
     // reject the rest.

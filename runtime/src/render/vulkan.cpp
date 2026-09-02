@@ -50,8 +50,22 @@ bool validationAvailable()
 
 } // namespace
 
-bool Device::create(Window &window, std::string *error, bool validation)
+const char *Device::presentModeName() const
 {
+    switch (m_presentMode)
+    {
+    case VK_PRESENT_MODE_IMMEDIATE_KHR:
+        return "immediate";
+    case VK_PRESENT_MODE_MAILBOX_KHR:
+        return "mailbox";
+    default:
+        return "fifo";
+    }
+}
+
+bool Device::create(Window &window, std::string *error, bool validation, bool uncapped)
+{
+    m_uncapped = uncapped;
     m_window = &window;
 
     // Off unless asked for: the layers cost real time, and a machine without the
@@ -239,7 +253,9 @@ bool Device::createSwapchain(std::string *error)
 
     VkSwapchainCreateInfoKHR info{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     info.surface = m_surface;
-    info.minImageCount = std::max(capabilities.minImageCount, 2u);
+    info.minImageCount = std::max(capabilities.minImageCount, m_uncapped ? 3u : 2u);
+    if (capabilities.maxImageCount != 0)
+        info.minImageCount = std::min(info.minImageCount, capabilities.maxImageCount);
     info.imageFormat = m_surfaceFormat.format;
     info.imageColorSpace = m_surfaceFormat.colorSpace;
     info.imageExtent = m_extent;
@@ -248,7 +264,26 @@ bool Device::createSwapchain(std::string *error)
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.preTransform = capabilities.currentTransform;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    // FIFO is the one mode always present. Immediate is preferred when the
+    // cadence is not wanted, because mailbox still paces to the display; and
+    // three images rather than two so the card is not idle while the CPU is
+    // between frames.
+    m_presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    if (m_uncapped)
+    {
+        std::uint32_t modeCount = 0;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(m_physicalDevice, m_surface, &modeCount, nullptr);
+        std::vector<VkPresentModeKHR> modes(modeCount);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(m_physicalDevice, m_surface, &modeCount, modes.data());
+        for (VkPresentModeKHR mode : modes)
+            if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR)
+                m_presentMode = mode;
+        if (m_presentMode == VK_PRESENT_MODE_FIFO_KHR)
+            for (VkPresentModeKHR mode : modes)
+                if (mode == VK_PRESENT_MODE_MAILBOX_KHR)
+                    m_presentMode = mode;
+    }
+    info.presentMode = m_presentMode;
     info.clipped = VK_TRUE;
     if (!check(vkCreateSwapchainKHR(m_device, &info, nullptr, &m_swapchain), error, "vkCreateSwapchainKHR"))
         return false;

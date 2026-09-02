@@ -33,7 +33,13 @@ class Device
     // memory type, and on this device it is host memory.
     static constexpr std::uint32_t c_NoMemoryType = 0xFFFFFFFFu;
 
-    bool create(Window &window, std::string *error, bool validation = false);
+    // uncapped asks for a present mode that does not wait for the display.
+    // Without it every frame time measured is the refresh interval and says
+    // nothing about what this program costs.
+    bool create(Window &window, std::string *error, bool validation = false, bool uncapped = false);
+
+    // What the swapchain actually got, since the mode asked for may not exist.
+    const char *presentModeName() const;
     void destroy();
 
     // Returns false when the swapchain needs rebuilding; the caller should skip
@@ -181,6 +187,8 @@ class Device
     std::size_t m_liveAllocations = 0;
     std::size_t m_peakAllocations = 0;
     std::size_t m_swapchainRebuilds = 0;
+    bool m_uncapped = false;
+    VkPresentModeKHR m_presentMode = VK_PRESENT_MODE_FIFO_KHR;
     float m_lastRetireMillis = 0.0f, m_lastFenceMillis = 0.0f, m_lastAcquireMillis = 0.0f;
     VkDeviceSize m_liveBytes = 0;
     VkDeviceSize m_peakBytes = 0;
