@@ -293,157 +293,199 @@ bool WorldRenderer::placeMesh(Device &device, const genome::Mesh &mesh, MeshGeom
     return true;
 }
 
-bool WorldRenderer::addBatches(Device &device, const std::vector<MeshInstances> &batches, std::string *error)
+void WorldRenderer::releaseMesh(Device &device, const genome::Mesh *mesh)
 {
-    std::size_t litInstances = 0;
+    (void)device;
+    const auto found = m_geometry.find(mesh);
+    if (found == m_geometry.end() || found->second.refs == 0)
+        return;
+    if (--found->second.refs != 0)
+        return;
 
-    for (const MeshInstances &batch : batches)
+    m_vertices.release(found->second.vertexOffset, found->second.vertexCount);
+    m_indices.release(found->second.indexOffset, found->second.indexCount);
+    m_vertexCount -= found->second.vertexCount;
+    m_indexCount -= found->second.indexCount;
+    m_geometry.erase(found);
+}
+
+bool WorldRenderer::sectorResident(std::uint32_t sector) const
+{
+    for (const Sector &held : m_sectors)
+        if (held.id == sector)
+            return true;
+    return false;
+}
+
+bool WorldRenderer::updatePatchAtlas(Device &device, std::uint32_t x, std::uint32_t y, std::uint32_t width,
+                                     std::uint32_t height, const void *bgra, std::string *error)
+{
+    if (!m_lightmapTexture.valid())
+        return true;
+    return updateTextureRegion(device, m_lightmapTexture, x, y, width, height, bgra, error);
+}
+
+namespace
+{
+
+// A mesh's own box, in the space its vertices are stored in.
+std::array<float, 6> objectBox(const genome::Mesh &mesh)
+{
+    std::array<float, 6> box{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                             std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
+                             std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+    for (const genome::MeshElement &element : mesh.elements)
+        for (const std::array<float, 3> &position : element.positions)
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                box[axis] = std::min(box[axis], position[axis]);
+                box[axis + 3] = std::max(box[axis + 3], position[axis]);
+            }
+    return box;
+}
+
+// That box put where the instance is, by its eight corners. A superset of the
+// transformed vertices, and vastly cheaper than walking them.
+std::array<float, 6> worldBox(const std::array<float, 6> &local, const genome::WorldMatrix &m)
+{
+    std::array<float, 6> box{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                             std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
+                             std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+    for (int corner = 0; corner < 8; ++corner)
     {
-        if (!batch.mesh || batch.transforms.empty())
-            continue;
+        const std::array<float, 3> v{local[(corner & 1) ? 3 : 0], local[(corner & 2) ? 4 : 1],
+                                     local[(corner & 4) ? 5 : 2]};
+        const std::array<float, 3> at{v[0] * m[0] + v[1] * m[4] + v[2] * m[8] + m[12],
+                                      v[0] * m[1] + v[1] * m[5] + v[2] * m[9] + m[13],
+                                      v[0] * m[2] + v[1] * m[6] + v[2] * m[10] + m[14]};
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            box[axis] = std::min(box[axis], at[axis]);
+            box[axis + 3] = std::max(box[axis + 3], at[axis]);
+        }
+    }
+    return box;
+}
 
-        MeshGeometry *geometry = nullptr;
-        if (!placeMesh(device, *batch.mesh, geometry, error))
+} // namespace
+
+bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::vector<MeshInstances> &batches,
+                              const SectorLighting &lighting, std::string *error)
+{
+    Sector held;
+    held.id = sector;
+    held.colourCount = lighting.colours.size();
+
+    // One allocator for three buffers. The shader reads the colour, the
+    // direction the light came from and the patch coordinate from the single
+    // base an instance carries, so the other two have to sit at three and two
+    // times the colour offset. Allocating them separately would let them drift
+    // apart, and the shader has no way of being told.
+    if (held.colourCount != 0)
+    {
+        held.colourBase = m_lightmapArena.allocate(held.colourCount);
+        if (held.colourBase == GpuArena::npos)
+        {
+            if (error)
+                *error = "the lighting arena is full; raise Budget::lightVertices";
             return false;
-        if (!geometry)
+        }
+        if (!m_uploader.write(device, m_lightmapArena, held.colourBase, lighting.colours.data(), held.colourCount,
+                              error))
+            return false;
+        if (!lighting.incident.empty() &&
+            !m_uploader.write(device, m_incidentArena, 3 * held.colourBase, lighting.incident.data(),
+                              std::min(lighting.incident.size(), 3 * held.colourCount), error))
+            return false;
+        if (!lighting.coords.empty() &&
+            !m_uploader.write(device, m_coordArena, 2 * held.colourBase, lighting.coords.data(),
+                              std::min(lighting.coords.size(), 2 * held.colourCount), error))
+            return false;
+    }
+
+    for (const MeshInstances &incoming : batches)
+    {
+        if (!incoming.mesh || incoming.transforms.empty())
             continue;
 
-        Batch kept;
-        kept.mesh = batch.mesh;
-        kept.transforms = batch.transforms;
-
-        // Where this mesh's vertices begin in the arena. The shader indexes its
-        // lighting with gl_VertexIndex, which counts from the start of the
-        // buffer rather than from the start of the mesh.
-        const std::int32_t meshFirstVertex = std::int32_t(geometry->vertexOffset);
-
-        // Two unused corners of the transform carry it: the first row's w holds
-        // the bias, which may be negative, and the second row's w says whether
-        // there is any lighting at all - a sentinel in the bias would be
-        // indistinguishable from a legitimate negative one.
-        for (std::size_t index = 0; index < kept.transforms.size(); ++index)
-        {
-            const bool lit = index < batch.lightmapBase.size() && batch.lightmapBase[index] >= 0;
-            kept.transforms[index][3] = lit ? float(batch.lightmapBase[index] - meshFirstVertex) : 0.0f;
-            kept.transforms[index][7] = lit ? 1.0f : 0.0f;
-            litInstances += lit ? 1 : 0;
-        }
-        kept.bounds = batch.bounds;
-
-        for (const std::array<float, 6> &box : kept.bounds)
-        {
-            if (!kept.hasExtent)
-            {
-                kept.extent = box;
-                kept.hasExtent = true;
-                continue;
-            }
-            for (int axis = 0; axis < 3; ++axis)
-            {
-                kept.extent[axis] = std::min(kept.extent[axis], box[axis]);
-                kept.extent[axis + 3] = std::max(kept.extent[axis + 3], box[axis + 3]);
-            }
-        }
-        // Only useful when every instance has bounds; otherwise some are drawn
-        // unconditionally and the batch cannot be rejected as a whole.
-        kept.hasExtent = kept.hasExtent && kept.bounds.size() == kept.transforms.size();
-        kept.occludes = batch.occludes;
-        kept.lodNear = batch.lodNear;
-        kept.lodFar = batch.lodFar;
-        kept.faceCamera = batch.faceCamera;
-
-        // The world's extent, for whoever wants to point a camera at it. Where
-        // the instances brought their own bounds those are exact; where they did
-        // not, the mesh's own box is taken through each transform by its eight
-        // corners, which is a superset of the vertices and vastly cheaper than
-        // walking every vertex through every transform.
-        if (kept.hasExtent)
-        {
-            for (int axis = 0; axis < 3; ++axis)
-            {
-                m_boundsMin[axis] = std::min(m_boundsMin[axis], kept.extent[axis]);
-                m_boundsMax[axis] = std::max(m_boundsMax[axis], kept.extent[axis + 3]);
-            }
-        }
+        Batch *batch = nullptr;
+        const auto known = m_batchOf.find(incoming.mesh);
+        if (known != m_batchOf.end())
+            batch = &m_batches[known->second];
         else
         {
-            std::array<float, 6> local{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
-                                       std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest(),
-                                       std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
-            for (const genome::MeshElement &element : batch.mesh->elements)
-                for (const std::array<float, 3> &position : element.positions)
-                    for (int axis = 0; axis < 3; ++axis)
-                    {
-                        local[axis] = std::min(local[axis], position[axis]);
-                        local[axis + 3] = std::max(local[axis + 3], position[axis]);
-                    }
-
-            for (const genome::WorldMatrix &m : kept.transforms)
-                for (int corner = 0; corner < 8; ++corner)
-                {
-                    const std::array<float, 3> v{local[(corner & 1) ? 3 : 0], local[(corner & 2) ? 4 : 1],
-                                                 local[(corner & 4) ? 5 : 2]};
-                    const std::array<float, 3> world{v[0] * m[0] + v[1] * m[4] + v[2] * m[8] + m[12],
-                                                     v[0] * m[1] + v[1] * m[5] + v[2] * m[9] + m[13],
-                                                     v[0] * m[2] + v[1] * m[6] + v[2] * m[10] + m[14]};
-                    for (int axis = 0; axis < 3; ++axis)
-                    {
-                        m_boundsMin[axis] = std::min(m_boundsMin[axis], world[axis]);
-                        m_boundsMax[axis] = std::max(m_boundsMax[axis], world[axis]);
-                    }
-                }
-        }
-
-        std::size_t elementIndex = 0, drawable = 0;
-        for (const genome::MeshElement &element : batch.mesh->elements)
-        {
-            if (element.positions.empty() || element.indices.empty())
-            {
-                ++elementIndex;
+            MeshGeometry *geometry = nullptr;
+            if (!placeMesh(device, *incoming.mesh, geometry, error))
+                return false;
+            if (!geometry)
                 continue;
+
+            Batch fresh;
+            fresh.mesh = incoming.mesh;
+            fresh.occludes = incoming.occludes;
+            fresh.lodNear = incoming.lodNear;
+            fresh.lodFar = incoming.lodFar;
+            fresh.faceCamera = incoming.faceCamera;
+            fresh.meshFirstVertex = std::int32_t(geometry->vertexOffset);
+            fresh.localBox = objectBox(*incoming.mesh);
+
+            std::size_t elementIndex = 0, drawable = 0;
+            for (const genome::MeshElement &element : incoming.mesh->elements)
+            {
+                if (element.positions.empty() || element.indices.empty())
+                {
+                    ++elementIndex;
+                    continue;
+                }
+
+                const MeshGeometry::Element &placed = geometry->elements[drawable++];
+                Range range;
+                range.firstIndex = placed.firstIndex;
+                range.indexCount = placed.indexCount;
+                range.vertexOffset = placed.vertexOffset;
+                range.alphaTested = elementIndex < incoming.alphaTested.size() && incoming.alphaTested[elementIndex] != 0;
+
+                const genome::Image *image =
+                    elementIndex < incoming.textures.size() ? incoming.textures[elementIndex] : nullptr;
+                range.descriptor = descriptorFor(device, image, error);
+                if (!range.descriptor)
+                    return false;
+
+                fresh.ranges.push_back(range);
+                ++m_rangeCount;
+                ++elementIndex;
             }
 
-            const MeshGeometry::Element &placed = geometry->elements[drawable++];
-            Range range;
-            range.firstIndex = placed.firstIndex;
-            range.indexCount = placed.indexCount;
-            range.vertexOffset = placed.vertexOffset;
-            range.firstInstance = 0;
-            range.instanceCount = std::uint32_t(batch.transforms.size());
-            range.alphaTested = elementIndex < batch.alphaTested.size() && batch.alphaTested[elementIndex] != 0;
-
-            const genome::Image *image =
-                elementIndex < batch.textures.size() ? batch.textures[elementIndex] : nullptr;
-            range.descriptor = descriptorFor(device, image, error);
-            if (!range.descriptor)
-                return false;
-
-            kept.ranges.push_back(range);
-            ++m_rangeCount;
-            ++elementIndex;
+            m_batchOf.emplace(incoming.mesh, m_batches.size());
+            m_batches.push_back(std::move(fresh));
+            batch = &m_batches.back();
         }
 
-        // Anything spanning more than about ten metres is worth rasterising as
-        // an occluder: houses, cliffs and the landscape itself, not barrels.
-        const std::size_t batchIndex = m_batches.size();
-        for (std::size_t instance = 0; instance < kept.bounds.size(); ++instance)
+        for (std::size_t index = 0; index < incoming.transforms.size(); ++index)
         {
-            const std::array<float, 6> &box = kept.bounds[instance];
-            const float extent = std::max({box[3] - box[0], box[4] - box[1], box[5] - box[2]});
-            if (extent < 1000.0f)
-                continue;
-            if (kept.occludes)
-                m_occluders.push_back({batchIndex, instance});
-            else
-                ++m_foliageSkipped;
-        }
+            // Two unused corners of the transform carry the lighting: the first
+            // row's w holds the base, which may be negative, and the second
+            // row's w says whether there is any at all - a sentinel in the base
+            // would be indistinguishable from a legitimate negative one.
+            const bool lit = index < incoming.lightmapBase.size() && incoming.lightmapBase[index] >= 0;
+            genome::WorldMatrix m = incoming.transforms[index];
+            m[3] = lit ? float(std::int64_t(held.colourBase) + incoming.lightmapBase[index] - batch->meshFirstVertex)
+                       : 0.0f;
+            m[7] = lit ? 1.0f : 0.0f;
+            m_bakedInstances += lit ? 1 : 0;
 
-        m_instanceCount += kept.transforms.size();
-        m_batches.push_back(std::move(kept));
+            batch->transforms.push_back(m);
+            batch->sectorOf.push_back(sector);
+            if (index < incoming.bounds.size())
+                batch->bounds.push_back(incoming.bounds[index]);
+        }
     }
 
     if (!m_uploader.flush(device, error))
         return false;
+
+    m_sectors.push_back(held);
+    rebuildDerived();
 
     if (m_instanceCount > m_budget.instances)
     {
@@ -451,11 +493,143 @@ bool WorldRenderer::addBatches(Device &device, const std::vector<MeshInstances> 
             *error = "more instances than the buffer holds; raise Budget::instances";
         return false;
     }
-
-    if (litInstances != 0)
-        std::printf("%zu instances carry baked lighting into the shader\n", litInstances);
-    buildGrid();
     return true;
+}
+
+void WorldRenderer::dropSector(Device &device, std::uint32_t sector)
+{
+    const auto held = std::find_if(m_sectors.begin(), m_sectors.end(),
+                                   [sector](const Sector &one) { return one.id == sector; });
+    if (held == m_sectors.end())
+        return;
+
+    if (held->colourCount != 0)
+        m_lightmapArena.release(held->colourBase, held->colourCount);
+    m_sectors.erase(held);
+
+    for (std::size_t index = 0; index < m_batches.size();)
+    {
+        Batch &batch = m_batches[index];
+
+        // Bounds are meant to run in step with the transforms. Where they do
+        // not - a landscape tile placed once with no box of its own - they
+        // cannot be compacted alongside, so they go, and the batch falls back
+        // to being tested per instance.
+        const bool parallel = batch.bounds.size() == batch.transforms.size();
+        std::size_t write = 0;
+        bool removedAny = false;
+        for (std::size_t at = 0; at < batch.transforms.size(); ++at)
+        {
+            if (batch.sectorOf[at] == sector)
+            {
+                removedAny = true;
+                continue;
+            }
+            batch.transforms[write] = batch.transforms[at];
+            batch.sectorOf[write] = batch.sectorOf[at];
+            if (parallel)
+                batch.bounds[write] = batch.bounds[at];
+            ++write;
+        }
+        if (!removedAny)
+        {
+            ++index;
+            continue;
+        }
+
+        batch.transforms.resize(write);
+        batch.sectorOf.resize(write);
+        if (parallel)
+            batch.bounds.resize(write);
+        else
+            batch.bounds.clear();
+
+        if (!batch.transforms.empty())
+        {
+            ++index;
+            continue;
+        }
+
+        // Nothing is drawing this mesh any more, so the arenas get it back.
+        releaseMesh(device, batch.mesh);
+        m_rangeCount -= batch.ranges.size();
+        m_batches.erase(m_batches.begin() + std::ptrdiff_t(index));
+    }
+
+    rebuildDerived();
+}
+
+// Extents, world bounds, occluders, the grid and the mesh-to-batch map are all
+// views of the batch list, so they are worked out again whenever it changes
+// rather than patched in a dozen places.
+void WorldRenderer::rebuildDerived()
+{
+    m_batchOf.clear();
+    m_occluders.clear();
+    m_foliageSkipped = 0;
+    m_instanceCount = 0;
+    m_boundsMin = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                   std::numeric_limits<float>::max()};
+    m_boundsMax = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
+                   std::numeric_limits<float>::lowest()};
+
+    for (std::size_t index = 0; index < m_batches.size(); ++index)
+    {
+        Batch &batch = m_batches[index];
+        m_batchOf.emplace(batch.mesh, index);
+        m_instanceCount += batch.transforms.size();
+
+        // Only useful for rejecting the batch whole when every instance has
+        // bounds; otherwise some are drawn unconditionally.
+        batch.hasExtent = !batch.bounds.empty() && batch.bounds.size() == batch.transforms.size();
+
+        bool first = true;
+        const auto grow = [&](const std::array<float, 6> &box) {
+            if (first)
+            {
+                batch.extent = box;
+                first = false;
+                return;
+            }
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                batch.extent[axis] = std::min(batch.extent[axis], box[axis]);
+                batch.extent[axis + 3] = std::max(batch.extent[axis + 3], box[axis + 3]);
+            }
+        };
+
+        if (batch.hasExtent)
+            for (const std::array<float, 6> &box : batch.bounds)
+                grow(box);
+        else
+            for (const genome::WorldMatrix &m : batch.transforms)
+                grow(worldBox(batch.localBox, m));
+
+        if (!first)
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                m_boundsMin[axis] = std::min(m_boundsMin[axis], batch.extent[axis]);
+                m_boundsMax[axis] = std::max(m_boundsMax[axis], batch.extent[axis + 3]);
+            }
+
+        // Anything spanning more than about ten metres is worth rasterising as
+        // an occluder: houses, cliffs and the landscape itself, not barrels. A
+        // box is a fair stand-in for a house and a poor one for a tree, whose
+        // box is mostly air, so foliage is drawn but never used to reject.
+        for (std::size_t instance = 0; instance < batch.bounds.size(); ++instance)
+        {
+            const std::array<float, 6> &box = batch.bounds[instance];
+            const float extent = std::max({box[3] - box[0], box[4] - box[1], box[5] - box[2]});
+            if (extent < 1000.0f)
+                continue;
+            if (batch.occludes)
+                m_occluders.push_back({index, instance});
+            else
+                ++m_foliageSkipped;
+        }
+    }
+
+    buildGrid();
 }
 
 bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &batches, std::string *error)
@@ -487,7 +661,14 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
 
     if (!create(device, budget, error))
         return false;
-    if (!addBatches(device, batches, error))
+
+    // Everything at once is one sector, numbered zero. Nothing else knows the
+    // difference, which is the point: there is one path in.
+    SectorLighting lighting;
+    lighting.colours = std::move(m_lightmapColours);
+    lighting.incident = std::move(m_lightmapIncident);
+    lighting.coords = std::move(m_lightmapCoords);
+    if (!addSector(device, 0, batches, lighting, error))
         return false;
 
     if (m_vertexCount == 0 || m_instanceCount == 0)
@@ -508,6 +689,8 @@ void WorldRenderer::reportArenas() const
                 100.0 * double(m_indices.highWater()) / double(m_indices.capacity()), m_indices.capacity() >> 20,
                 100.0 * double(m_lightmapArena.highWater()) / double(m_lightmapArena.capacity()),
                 m_lightmapArena.capacity() >> 20, m_textureSets.size(), m_uploader.submits());
+    std::printf("%zu sectors resident, %zu batches, %zu instances of which %zu carry baked light\n",
+                m_sectors.size(), m_batches.size(), m_instanceCount, m_bakedInstances);
 }
 
 bool WorldRenderer::createPipeline(Device &device, std::string *error)
@@ -527,46 +710,8 @@ bool WorldRenderer::createPipeline(Device &device, std::string *error)
     // The baked lighting: one colour per vertex per instance, indexed by the
     // base the transform carries. A storage buffer because it is far past what a
     // uniform block may hold - a single sector runs to hundreds of thousands.
-    if (m_lightmapColours.empty())
-        m_lightmapColours.push_back(0xFFFFFFFF);
-    if (m_lightmapIncident.empty())
-        m_lightmapIncident.assign(3, 0.0f);
-    if (m_lightmapCoords.empty())
-        m_lightmapCoords.assign(2, -1.0f);
-
-    struct Upload
-    {
-        GpuArena *arena;
-        const void *data;
-        std::size_t count;
-        const char *what;
-    };
-    const Upload uploads[3] = {{&m_lightmapArena, m_lightmapColours.data(), m_lightmapColours.size(), "colours"},
-                               {&m_incidentArena, m_lightmapIncident.data(), m_lightmapIncident.size(), "directions"},
-                               {&m_coordArena, m_lightmapCoords.data(), m_lightmapCoords.size(), "patch coordinates"}};
-    for (const Upload &upload : uploads)
-    {
-        // Allocated rather than assumed to start at zero: the base a transform
-        // carries is an index into the arena, not into the array it came from.
-        const std::size_t base = upload.arena->allocate(upload.count);
-        if (base == GpuArena::npos)
-        {
-            if (error)
-                *error = std::string("the lighting arena has no room for the baked ") + upload.what +
-                         "; raise Budget::lightVertices";
-            return false;
-        }
-        if (base != 0)
-        {
-            if (error)
-                *error = "the baked lighting was not the first thing into its arena";
-            return false;
-        }
-        if (!m_uploader.write(device, *upload.arena, base, upload.data, upload.count, error))
-            return false;
-    }
-    if (!m_uploader.flush(device, error))
-        return false;
+    // The baked light itself arrives with the sectors that carry it; the
+    // pipeline only has to know where to look for it.
 
     // The atlas the patches were packed into. Without one, a single white texel
     // stands in and every lookup returns it.

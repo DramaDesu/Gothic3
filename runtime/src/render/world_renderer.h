@@ -101,10 +101,33 @@ class WorldRenderer
     // it: the budget is measured from what is handed over.
     bool create(Device &device, const std::vector<MeshInstances> &batches, std::string *error);
 
-    // Puts geometry in. A mesh already present is not uploaded twice - it is
-    // shared and counted - so a sector arriving next to one already loaded pays
-    // only for what is new to it.
-    bool addBatches(Device &device, const std::vector<MeshInstances> &batches, std::string *error);
+    // The baked light one sector brought. All three are indexed by the base
+    // an instance carries, so they belong together.
+    struct SectorLighting
+    {
+        std::vector<std::uint32_t> colours;
+        std::vector<float> incident;
+        std::vector<float> coords;
+    };
+
+    // Puts a sector's geometry in. A mesh already present is not uploaded twice
+    // - it is shared and counted - so a sector arriving next to one already
+    // loaded pays only for what is new to it. Instances carry the sector, which
+    // is what lets them be taken out again without giving every sector its own
+    // batches and its own draws.
+    bool addSector(Device &device, std::uint32_t sector, const std::vector<MeshInstances> &batches,
+                   const SectorLighting &lighting, std::string *error);
+
+    // Takes one back. The meshes only nothing else is using go with it.
+    void dropSector(Device &device, std::uint32_t sector);
+
+    bool sectorResident(std::uint32_t sector) const;
+    std::size_t sectorCount() const { return m_sectors.size(); }
+
+    // Writes a rectangle of the baked-patch atlas, for the patches a sector
+    // brings with it. The texture and its descriptor do not change.
+    bool updatePatchAtlas(Device &device, std::uint32_t x, std::uint32_t y, std::uint32_t width,
+                          std::uint32_t height, const void *bgra, std::string *error);
 
     void destroy(Device &device);
 
@@ -219,6 +242,7 @@ class WorldRenderer
     std::size_t m_indexCount = 0;
     std::size_t m_instanceCount = 0;
     std::size_t m_rangeCount = 0;
+    std::size_t m_bakedInstances = 0;
 
     // Where a mesh sits in the arenas, and how many batches are relying on it.
     // Meshes are shared between sectors - a crate is a crate everywhere - so
@@ -241,6 +265,23 @@ class WorldRenderer
     };
     std::map<const genome::Mesh *, MeshGeometry> m_geometry;
     bool placeMesh(Device &device, const genome::Mesh &mesh, MeshGeometry *&out, std::string *error);
+    void releaseMesh(Device &device, const genome::Mesh *mesh);
+
+    // One batch per mesh, whichever sectors placed it.
+    std::map<const genome::Mesh *, std::size_t> m_batchOf;
+
+    // What a sector is holding, so that giving it back is one step.
+    struct Sector
+    {
+        std::uint32_t id = 0;
+        std::size_t colourBase = 0;
+        std::size_t colourCount = 0;
+    };
+    std::vector<Sector> m_sectors;
+
+    // Extents, occluders, the grid and the mesh-to-batch map, all of which are
+    // views of the batch list and are worked out again whenever it changes.
+    void rebuildDerived();
 
     // One descriptor set per texture, made when the texture is first seen.
     std::map<const genome::Image *, VkDescriptorSet> m_textureSets;
@@ -257,6 +298,18 @@ class WorldRenderer
         // draws with it, which an index into a shared list cannot do.
         std::vector<Range> ranges;
         const genome::Mesh *mesh = nullptr;
+
+        // Which sector put each instance here, in step with the transforms. A
+        // sector leaving compacts these lists; nothing on the card moves,
+        // because the instance buffer is rewritten by the cull every frame
+        // regardless.
+        std::vector<std::uint32_t> sectorOf;
+
+        // Where the mesh starts in the vertex arena, needed to rebase an
+        // instance's lighting, and its object-space box, needed to work out the
+        // batch's extent again after instances have gone.
+        std::int32_t meshFirstVertex = 0;
+        std::array<float, 6> localBox{};
         bool occludes = true;
 
         // Everything this batch's instances cover. A grass patch or a tree

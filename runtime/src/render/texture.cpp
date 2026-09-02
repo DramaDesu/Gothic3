@@ -118,6 +118,48 @@ bool createTexture(Device &device, const genome::Image &source, bool srgb, Textu
     return true;
 }
 
+bool updateTextureRegion(Device &device, Texture &texture, std::uint32_t x, std::uint32_t y, std::uint32_t width,
+                         std::uint32_t height, const void *bgra, std::string *error)
+{
+    if (width == 0 || height == 0)
+        return true;
+
+    const VkDeviceSize bytes = VkDeviceSize(width) * height * 4;
+    Buffer staging = device.createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, error);
+    if (!staging.handle)
+        return false;
+    std::memcpy(staging.mapped, bgra, std::size_t(bytes));
+
+    VkCommandBuffer command = device.beginOneShot();
+
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.image = texture.image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                         0, nullptr, 1, &barrier);
+
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageOffset = {std::int32_t(x), std::int32_t(y), 0};
+    copy.imageExtent = {width, height, 1};
+    vkCmdCopyBufferToImage(command, staging.handle, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
+                         0, nullptr, 1, &barrier);
+
+    device.endOneShot(command);
+    device.destroyBuffer(staging);
+    return true;
+}
+
 void destroyTexture(Device &device, Texture &texture)
 {
     // The sampler is the device's, shared by every texture, so it is not

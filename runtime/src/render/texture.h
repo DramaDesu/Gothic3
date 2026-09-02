@@ -26,6 +26,12 @@ struct Texture
 // data maps such as normals.
 bool createTexture(Device &device, const genome::Image &source, bool srgb, Texture &texture, std::string *error);
 
+// Replaces a rectangle of the top level. The baked-patch atlas is written
+// this way as sectors arrive: the image and its descriptor never change, only
+// the texels inside a tile nothing is reading.
+bool updateTextureRegion(Device &device, Texture &texture, std::uint32_t x, std::uint32_t y, std::uint32_t width,
+                         std::uint32_t height, const void *bgra, std::string *error);
+
 void destroyTexture(Device &device, Texture &texture);
 
 } // namespace render
