@@ -19,7 +19,8 @@ add_library(genome STATIC
   src/genome/motion.cpp
   src/genome/spt.cpp
   src/genome/tree.cpp
-  src/genome/lightmap.cpp)
+  src/genome/lightmap.cpp
+  src/genome/residency.cpp)
 target_include_directories(genome PUBLIC src)
 target_link_libraries(genome PRIVATE miniz)
 

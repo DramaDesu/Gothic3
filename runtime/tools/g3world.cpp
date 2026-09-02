@@ -10,6 +10,7 @@
 #include "genome/material.h"
 #include "genome/mesh.h"
 #include "genome/pak.h"
+#include "genome/residency.h"
 #include "genome/spt.h"
 #include "genome/tree.h"
 #include "genome/lightmap.h"
@@ -107,7 +108,9 @@ std::array<float, 16> multiply(const std::array<float, 16> &a, const std::array<
 // and a shelf packer is enough for rectangles that arrive in no particular size.
 struct PatchAtlas
 {
-    static constexpr std::uint32_t c_Size = 2048;
+    // 4096 holds a resident set of sectors; 2048 did not, refusing 11368 of
+    // 19046 patches at sixteen cells.
+    static constexpr std::uint32_t c_Size = 4096;
 
     genome::Image image;
     std::uint32_t shelfY = 0, shelfHeight = 0, penX = 0;
@@ -251,6 +254,10 @@ int main(int argc, char **argv)
     int cameraArgument = 0;
     int treeArgument = 0;
     bool validation = false;
+    // Load only what is close enough to matter, the way the game does: a
+    // rectangle of 10000-unit cells around the camera. Off by default so the
+    // whole-world runs still work.
+    bool streaming = false;
     // A baked patch stands in for the daylight on the surface it covers, rather
     // than adding to it: the bake already accounted for the sun that reached
     // there, and adding both counts the same light twice. Measured - replacing
@@ -283,6 +290,8 @@ int main(int argc, char **argv)
             treeArgument = index + 1;
         if (std::string(argv[index]) == "--validate")
             validation = true;
+        if (std::string(argv[index]) == "--stream")
+            streaming = true;
         if (std::string(argv[index]) == "--baked-adds")
             lightmapReplaces = 0.0f;
     }
@@ -352,10 +361,62 @@ int main(int argc, char **argv)
             std::size_t placed = 0, sectors = 0, missing = 0, grass = 0, planted = 0, missingTrees = 0;
             std::map<std::string, std::size_t> treeBatchOf;
 
+            // The residency index: every sector's own bounding box, which is
+            // 2177 files of 197 bytes rather than the 347 MB they describe. The
+            // box is what decides, not the cell in the file name - the box of
+            // x55000z55000 starts a whole cell further out, at 45000.
+            std::map<std::string, genome::SectorBounds> boundsOf;
+            if (streaming)
+            {
+                const auto indexStart = now();
+                for (const genome::PakEntry &entry : world->entries())
+                {
+                    if (entry.deleted || entry.path.find("_cstat.lrgeodat") == std::string::npos)
+                        continue;
+                    std::string ignored;
+                    genome::SectorBounds bounds;
+                    if (!genome::loadSectorBounds(world->read(entry, &ignored), bounds))
+                        continue;
+                    std::string key = entry.path;
+                    const std::size_t dot = key.find_last_of('.');
+                    if (dot != std::string::npos)
+                        key = key.substr(0, dot);
+                    boundsOf.emplace(key, bounds);
+                }
+                std::printf("residency index: %zu sector boxes in %.2fs\n", boundsOf.size(), since(indexStart));
+            }
+
+            // Where the camera will be, since that is what decides residency.
+            // With no camera given, the middle of the map.
+            std::array<float, 3> eye{55000.0f, 8000.0f, 55000.0f};
+            if (cameraArgument != 0)
+                eye = {float(std::atof(argv[cameraArgument])), float(std::atof(argv[cameraArgument + 1])),
+                       float(std::atof(argv[cameraArgument + 2]))};
+
+            const genome::ResidentCells resident = genome::residentCells(eye, 10000.0f);
+            if (streaming)
+                std::printf("resident cells x %d..%d, z %d..%d around (%.0f, %.0f)\n", resident.left,
+                            resident.right, resident.top, resident.bottom, eye[0], eye[2]);
+
+            std::size_t skipped = 0;
             for (const genome::PakEntry &entry : world->entries())
             {
                 if (entry.deleted || entry.path.find(sectorFilter) == std::string::npos)
                     continue;
+
+                if (streaming)
+                {
+                    std::string key = entry.path;
+                    const std::size_t dot = key.find_last_of('.');
+                    if (dot != std::string::npos)
+                        key = key.substr(0, dot);
+                    const auto box = boundsOf.find(key);
+                    if (box == boundsOf.end() || !genome::overlaps(box->second, resident))
+                    {
+                        ++skipped;
+                        continue;
+                    }
+                }
 
                 genome::WorldLayer layer;
                 std::string ignored;
@@ -637,6 +698,8 @@ int main(int argc, char **argv)
                     ++grass;
                 }
             }
+            if (streaming)
+                std::printf("%zu sectors resident, %zu left on disk\n", sectors, skipped);
             std::printf("%zu sectors, %zu objects placed, %zu meshes missing, %zu plants\n", sectors, placed,
                         missing, grass);
             if (planted != 0 || missingTrees != 0)
