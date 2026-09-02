@@ -68,14 +68,19 @@ class GpuArena
 
 // Copies pile up here and cross the bus together.
 //
-// A one-shot submit waits for the queue to go idle, so uploading two and a half
-// thousand meshes one at a time is two and a half thousand round trips to the
-// card. Staging them into one buffer and submitting the copies as a batch is
-// the difference between a load you can measure and a load you can go and make
-// tea during.
+// Uploading two and a half thousand meshes one at a time would be two and a
+// half thousand submits; staged together they are one. And the submit is not
+// waited for: there is a single queue, so the copy runs before whatever is
+// submitted after it, and the barrier the device records makes its writes
+// visible to those commands. The staging buffer is therefore made fresh for
+// each flush and handed to the device, which frees it once the copy has really
+// happened - reusing one would mean overwriting bytes the card had not read
+// yet.
 class ArenaUploader
 {
   public:
+    // stagingBytes is the point at which writes flush themselves, not an
+    // allocation - nothing that size is ever allocated.
     bool create(Device &device, VkDeviceSize stagingBytes, std::string *error);
     void destroy(Device &device);
 
@@ -96,9 +101,9 @@ class ArenaUploader
         VkDeviceSize bytes = 0;
     };
 
-    Buffer m_staging{};
+    // Staged in ordinary memory, then copied once into a buffer sized to fit.
+    std::vector<std::uint8_t> m_scratch;
     VkDeviceSize m_capacity = 0;
-    VkDeviceSize m_at = 0;
     std::vector<Copy> m_pending;
     std::size_t m_submits = 0;
 };

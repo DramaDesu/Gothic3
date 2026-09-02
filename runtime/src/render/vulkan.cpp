@@ -68,7 +68,18 @@ bool Device::create(Window &window, std::string *error, bool validation)
                                         VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
 
+    // Ordinary validation checks what a call says; this checks whether one
+    // command's writes are really visible to another's reads. Everything the
+    // uploads do rests on that, so it is asked for here rather than left to an
+    // environment variable which turned out to do nothing.
+    const VkValidationFeatureEnableEXT wantedChecks[] = {
+        VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT};
+    VkValidationFeaturesEXT features{VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT};
+    features.enabledValidationFeatureCount = 1;
+    features.pEnabledValidationFeatures = wantedChecks;
+
     VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    instanceInfo.pNext = wantValidation ? &features : nullptr;
     instanceInfo.pApplicationInfo = &application;
     instanceInfo.enabledExtensionCount = wantValidation ? 3 : 2;
     instanceInfo.ppEnabledExtensionNames = instanceExtensions;
@@ -354,6 +365,10 @@ void Device::destroy()
         vkDestroySemaphore(m_device, m_rendered[index], nullptr);
         vkDestroyFence(m_device, m_inFlight[index], nullptr);
     }
+    retireTransfers(true);
+    for (VkFence fence : m_spareFences)
+        vkDestroyFence(m_device, fence, nullptr);
+    m_spareFences.clear();
     vkDestroyCommandPool(m_device, m_commandPool, nullptr);
     vkDestroyDevice(m_device, nullptr);
     if (m_messenger)
@@ -370,6 +385,8 @@ void Device::destroy()
 
 bool Device::beginFrame()
 {
+    retireTransfers();
+
     vkWaitForFences(m_device, 1, &m_inFlight[m_frame], VK_TRUE, UINT64_MAX);
 
     const VkResult acquired =
@@ -524,6 +541,79 @@ VkCommandBuffer Device::beginOneShot()
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(command, &begin);
     return command;
+}
+
+void Device::barrierAfterTransfer(VkCommandBuffer command)
+{
+    // A barrier outside a render pass orders against everything later in
+    // submission order on this queue, which includes later submissions - that
+    // is what lets the copy go unwaited.
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                            VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+}
+
+void Device::endOneShotAsync(VkCommandBuffer command, const std::vector<Buffer> &recycle)
+{
+    barrierAfterTransfer(command);
+    vkEndCommandBuffer(command);
+
+    // Keep the number in flight bounded. Waiting here is the same drain that
+    // was being paid every time, so it is counted and reported rather than
+    // hidden - if it ever fires often, the bound is wrong.
+    while (m_retiring.size() >= c_MaxTransfersInFlight)
+    {
+        ++m_transferStalls;
+        retireTransfers(true);
+    }
+
+    VkFence fence = VK_NULL_HANDLE;
+    if (!m_spareFences.empty())
+    {
+        fence = m_spareFences.back();
+        m_spareFences.pop_back();
+        vkResetFences(m_device, 1, &fence);
+    }
+    else
+    {
+        VkFenceCreateInfo info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        vkCreateFence(m_device, &info, nullptr, &fence);
+    }
+
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command;
+    vkQueueSubmit(m_queue, 1, &submit, fence);
+
+    m_retiring.push_back({fence, command, recycle});
+}
+
+void Device::retireTransfers(bool waitForAll)
+{
+    for (std::size_t index = 0; index < m_retiring.size();)
+    {
+        Retiring &one = m_retiring[index];
+        if (waitForAll)
+            vkWaitForFences(m_device, 1, &one.fence, VK_TRUE, UINT64_MAX);
+        else if (vkGetFenceStatus(m_device, one.fence) != VK_SUCCESS)
+        {
+            ++index;
+            continue;
+        }
+
+        for (Buffer &buffer : one.recycle)
+            destroyBuffer(buffer);
+        vkFreeCommandBuffers(m_device, m_commandPool, 1, &one.command);
+        m_spareFences.push_back(one.fence);
+        m_retiring.erase(m_retiring.begin() + std::ptrdiff_t(index));
+        if (waitForAll)
+            index = 0;
+    }
 }
 
 void Device::endOneShot(VkCommandBuffer command)

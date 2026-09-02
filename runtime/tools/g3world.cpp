@@ -1704,6 +1704,8 @@ int main(int argc, char **argv)
                                     arrivalTrees * 1000.0, arrivalTextures * 1000.0, arrivalUpload * 1000.0,
                                     arrivalPatches * 1000.0, double(totalArrival) - accounted);
                     }
+                    std::printf("%zu transfers still in flight, %zu drains paid to keep the bound\n",
+                                device.transfersInFlight(), device.transferStalls());
                     if (billboardsMissed != 0)
                         std::printf("%zu tree kinds arrived after the billboard atlas was baked and have none\n",
                                     billboardsMissed);

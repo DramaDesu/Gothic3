@@ -71,6 +71,27 @@ class Device
     VkCommandBuffer beginOneShot();
     void endOneShot(VkCommandBuffer command);
 
+    // Submits without waiting for anything. There is one queue, so this runs
+    // before whatever is submitted after it, and the barrier below makes its
+    // writes visible to those commands - so a copy for a sector that arrives
+    // this frame is ready by the time this frame's draws read it, with no
+    // drain. The buffers handed over are freed when the copy has really
+    // finished, and the submission is fenced only for that.
+    void endOneShotAsync(VkCommandBuffer command, const std::vector<Buffer> &recycle = {});
+
+    // Records the dependency that makes the above legal: everything written by
+    // transfers up to here is visible to every later command that reads a
+    // vertex, an index, a storage buffer or a texture.
+    void barrierAfterTransfer(VkCommandBuffer command);
+
+    // Frees what finished. Called once a frame; safe to call at any time.
+    void retireTransfers(bool waitForAll = false);
+
+    // How many transfers are still in flight, and how many drains were paid to
+    // keep that number down.
+    std::size_t transfersInFlight() const { return m_retiring.size(); }
+    std::size_t transferStalls() const { return m_transferStalls; }
+
   private:
     bool pickPhysicalDevice(std::string *error);
     bool createSwapchain(std::string *error);
@@ -105,6 +126,20 @@ class Device
     VkSemaphore m_acquired[c_FramesInFlight]{};
     VkSemaphore m_rendered[c_FramesInFlight]{};
     VkFence m_inFlight[c_FramesInFlight]{};
+
+    // Transfers submitted and not yet known to be finished. Bounded, because a
+    // load that submits hundreds of them would otherwise hold every staging
+    // buffer alive at once.
+    struct Retiring
+    {
+        VkFence fence = VK_NULL_HANDLE;
+        VkCommandBuffer command = VK_NULL_HANDLE;
+        std::vector<Buffer> recycle;
+    };
+    static constexpr std::size_t c_MaxTransfersInFlight = 8;
+    std::vector<Retiring> m_retiring;
+    std::vector<VkFence> m_spareFences;
+    std::size_t m_transferStalls = 0;
 
     std::uint32_t m_frame = 0;
     std::uint32_t m_imageIndex = 0;

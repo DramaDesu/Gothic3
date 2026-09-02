@@ -87,18 +87,21 @@ std::size_t GpuArena::largestFree() const
 
 bool ArenaUploader::create(Device &device, VkDeviceSize stagingBytes, std::string *error)
 {
+    (void)device;
+    (void)error;
     m_capacity = stagingBytes;
-    m_at = 0;
     m_submits = 0;
-    m_staging = device.createBuffer(stagingBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, error);
-    return m_staging.handle != VK_NULL_HANDLE;
+    m_scratch.clear();
+    return true;
 }
 
 void ArenaUploader::destroy(Device &device)
 {
-    device.destroyBuffer(m_staging);
+    (void)device;
     m_pending.clear();
-    m_capacity = m_at = 0;
+    m_scratch.clear();
+    m_scratch.shrink_to_fit();
+    m_capacity = 0;
 }
 
 bool ArenaUploader::write(Device &device, GpuArena &arena, std::size_t offset, const void *data, std::size_t count,
@@ -108,44 +111,34 @@ bool ArenaUploader::write(Device &device, GpuArena &arena, std::size_t offset, c
         return true;
 
     const VkDeviceSize bytes = arena.stride() * count;
-    if (bytes > m_capacity)
-    {
-        // Bigger than the whole staging buffer: give it one of its own rather
-        // than refuse. The landscape meshes are the only things this size.
-        if (!flush(device, error))
-            return false;
 
-        Buffer once = device.createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, error);
-        if (!once.handle)
-            return false;
-        std::memcpy(once.mapped, data, std::size_t(bytes));
-
-        VkCommandBuffer command = device.beginOneShot();
-        VkBufferCopy copy{0, arena.stride() * offset, bytes};
-        vkCmdCopyBuffer(command, once.handle, arena.handle(), 1, &copy);
-        device.endOneShot(command);
-        device.destroyBuffer(once);
-        ++m_submits;
-        return true;
-    }
-
-    if (m_at + bytes > m_capacity && !flush(device, error))
+    // Flush before adding, not after, so that one huge write still goes in a
+    // batch of its own rather than being refused.
+    if (!m_scratch.empty() && VkDeviceSize(m_scratch.size()) + bytes > m_capacity && !flush(device, error))
         return false;
 
-    std::memcpy(static_cast<std::uint8_t *>(m_staging.mapped) + m_at, data, std::size_t(bytes));
-    m_pending.push_back({arena.handle(), m_at, arena.stride() * offset, bytes});
-    m_at += bytes;
+    const VkDeviceSize at = m_scratch.size();
+    m_scratch.resize(std::size_t(at + bytes));
+    std::memcpy(m_scratch.data() + at, data, std::size_t(bytes));
+    m_pending.push_back({arena.handle(), at, arena.stride() * offset, bytes});
     return true;
 }
 
 bool ArenaUploader::flush(Device &device, std::string *error)
 {
-    (void)error;
     if (m_pending.empty())
     {
-        m_at = 0;
+        m_scratch.clear();
         return true;
     }
+
+    // Sized to what is actually staged. A sector arriving brings a couple of
+    // megabytes; the whole world brings ninety.
+    Buffer staging = device.createBuffer(VkDeviceSize(m_scratch.size()), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true,
+                                         error);
+    if (!staging.handle)
+        return false;
+    std::memcpy(staging.mapped, m_scratch.data(), m_scratch.size());
 
     VkCommandBuffer command = device.beginOneShot();
 
@@ -163,13 +156,16 @@ bool ArenaUploader::flush(Device &device, std::string *error)
                                m_pending[index].bytes});
             ++index;
         }
-        vkCmdCopyBuffer(command, m_staging.handle, destination, std::uint32_t(regions.size()), regions.data());
+        vkCmdCopyBuffer(command, staging.handle, destination, std::uint32_t(regions.size()), regions.data());
     }
 
-    device.endOneShot(command);
+    // Not waited for: the barrier the device records makes these writes visible
+    // to everything submitted after, and the staging buffer is freed when the
+    // copy has really finished.
+    device.endOneShotAsync(command, {staging});
     ++m_submits;
     m_pending.clear();
-    m_at = 0;
+    m_scratch.clear();
     return true;
 }
 

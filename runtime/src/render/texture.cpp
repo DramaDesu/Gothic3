@@ -100,8 +100,9 @@ bool createTexture(Device &device, const genome::Image &source, bool srgb, Textu
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
                          0, nullptr, 1, &barrier);
 
-    device.endOneShot(command);
-    device.destroyBuffer(staging);
+    // Not waited for. The layout transition is in this command buffer, and one
+    // queue means it has happened before anything submitted later samples it.
+    device.endOneShotAsync(command, {staging});
 
     VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     viewInfo.image = texture.image;
@@ -165,6 +166,7 @@ bool updateTextureRegions(Device &device, Texture &texture, const std::vector<Te
     vkCmdCopyBufferToImage(command, staging.handle, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            std::uint32_t(copies.size()), copies.data());
 
+
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -172,8 +174,7 @@ bool updateTextureRegions(Device &device, Texture &texture, const std::vector<Te
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
                          0, nullptr, 1, &barrier);
 
-    device.endOneShot(command);
-    device.destroyBuffer(staging);
+    device.endOneShotAsync(command, {staging});
     return true;
 }
 
