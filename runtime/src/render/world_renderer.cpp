@@ -326,12 +326,11 @@ bool WorldRenderer::sectorResident(std::uint32_t sector) const
     return false;
 }
 
-bool WorldRenderer::updatePatchAtlas(Device &device, std::uint32_t x, std::uint32_t y, std::uint32_t width,
-                                     std::uint32_t height, const void *bgra, std::string *error)
+bool WorldRenderer::updatePatchAtlas(Device &device, const std::vector<TextureRegion> &regions, std::string *error)
 {
     if (!m_lightmapTexture.valid())
         return true;
-    return updateTextureRegion(device, m_lightmapTexture, x, y, width, height, bgra, error);
+    return updateTextureRegions(device, m_lightmapTexture, regions, error);
 }
 
 namespace

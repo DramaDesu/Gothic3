@@ -8,6 +8,7 @@
 #include "vulkan.h"
 
 #include <string>
+#include <vector>
 
 namespace render
 {
@@ -26,11 +27,21 @@ struct Texture
 // data maps such as normals.
 bool createTexture(Device &device, const genome::Image &source, bool srgb, Texture &texture, std::string *error);
 
-// Replaces a rectangle of the top level. The baked-patch atlas is written
-// this way as sectors arrive: the image and its descriptor never change, only
-// the texels inside a tile nothing is reading.
-bool updateTextureRegion(Device &device, Texture &texture, std::uint32_t x, std::uint32_t y, std::uint32_t width,
-                         std::uint32_t height, const void *bgra, std::string *error);
+// One rectangle of the top level, and its own pixels.
+struct TextureRegion
+{
+    std::uint32_t x = 0, y = 0, width = 0, height = 0;
+    const void *bgra = nullptr;
+};
+
+// Replaces rectangles of the top level. The baked-patch atlas is written this
+// way as sectors arrive: the image and its descriptor never change, only the
+// texels inside tiles nothing is reading.
+//
+// Takes them together rather than one at a time because a submit costs a drain
+// of the queue, and a sector brings about ten tiles.
+bool updateTextureRegions(Device &device, Texture &texture, const std::vector<TextureRegion> &regions,
+                          std::string *error);
 
 void destroyTexture(Device &device, Texture &texture);
 

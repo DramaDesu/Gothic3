@@ -118,17 +118,37 @@ bool createTexture(Device &device, const genome::Image &source, bool srgb, Textu
     return true;
 }
 
-bool updateTextureRegion(Device &device, Texture &texture, std::uint32_t x, std::uint32_t y, std::uint32_t width,
-                         std::uint32_t height, const void *bgra, std::string *error)
+bool updateTextureRegions(Device &device, Texture &texture, const std::vector<TextureRegion> &regions,
+                          std::string *error)
 {
-    if (width == 0 || height == 0)
+    VkDeviceSize bytes = 0;
+    for (const TextureRegion &region : regions)
+        bytes += VkDeviceSize(region.width) * region.height * 4;
+    if (bytes == 0)
         return true;
 
-    const VkDeviceSize bytes = VkDeviceSize(width) * height * 4;
     Buffer staging = device.createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, error);
     if (!staging.handle)
         return false;
-    std::memcpy(staging.mapped, bgra, std::size_t(bytes));
+
+    std::vector<VkBufferImageCopy> copies;
+    copies.reserve(regions.size());
+    VkDeviceSize at = 0;
+    for (const TextureRegion &region : regions)
+    {
+        const VkDeviceSize size = VkDeviceSize(region.width) * region.height * 4;
+        if (size == 0)
+            continue;
+        std::memcpy(static_cast<std::uint8_t *>(staging.mapped) + at, region.bgra, std::size_t(size));
+
+        VkBufferImageCopy copy{};
+        copy.bufferOffset = at;
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageOffset = {std::int32_t(region.x), std::int32_t(region.y), 0};
+        copy.imageExtent = {region.width, region.height, 1};
+        copies.push_back(copy);
+        at += size;
+    }
 
     VkCommandBuffer command = device.beginOneShot();
 
@@ -142,11 +162,8 @@ bool updateTextureRegion(Device &device, Texture &texture, std::uint32_t x, std:
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
                          0, nullptr, 1, &barrier);
 
-    VkBufferImageCopy copy{};
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageOffset = {std::int32_t(x), std::int32_t(y), 0};
-    copy.imageExtent = {width, height, 1};
-    vkCmdCopyBufferToImage(command, staging.handle, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    vkCmdCopyBufferToImage(command, staging.handle, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           std::uint32_t(copies.size()), copies.data());
 
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

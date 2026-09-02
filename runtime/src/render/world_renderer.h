@@ -124,10 +124,9 @@ class WorldRenderer
     bool sectorResident(std::uint32_t sector) const;
     std::size_t sectorCount() const { return m_sectors.size(); }
 
-    // Writes a rectangle of the baked-patch atlas, for the patches a sector
+    // Writes rectangles of the baked-patch atlas, for the patches a sector
     // brings with it. The texture and its descriptor do not change.
-    bool updatePatchAtlas(Device &device, std::uint32_t x, std::uint32_t y, std::uint32_t width,
-                          std::uint32_t height, const void *bgra, std::string *error);
+    bool updatePatchAtlas(Device &device, const std::vector<TextureRegion> &regions, std::string *error);
 
     void destroy(Device &device);
 

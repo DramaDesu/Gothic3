@@ -1533,19 +1533,27 @@ int main(int argc, char **argv)
                             // inside tiles nothing was reading.
                             arrivalUpload += since(uploadStart);
                             const auto patchStart = std::chrono::steady_clock::now();
-                            std::vector<std::uint8_t> tile(std::size_t(PatchAtlas::c_Tile) * PatchAtlas::c_Tile * 4);
-                            for (std::uint32_t index : content.tiles)
+                            // Every tile it brought, in one submit. Gathered out
+                            // of the atlas row by row because a tile is a window
+                            // into a 4096-wide image, not a run of bytes.
+                            const std::size_t tileBytes = std::size_t(PatchAtlas::c_Tile) * PatchAtlas::c_Tile * 4;
+                            std::vector<std::uint8_t> pixels(tileBytes * content.tiles.size());
+                            std::vector<render::TextureRegion> regions;
+                            regions.reserve(content.tiles.size());
+                            for (std::size_t which = 0; which < content.tiles.size(); ++which)
                             {
+                                const std::uint32_t index = content.tiles[which];
                                 const std::uint32_t tx = (index % PatchAtlas::c_Grid) * PatchAtlas::c_Tile;
                                 const std::uint32_t ty = (index / PatchAtlas::c_Grid) * PatchAtlas::c_Tile;
+                                std::uint8_t *into = pixels.data() + which * tileBytes;
                                 for (std::uint32_t row = 0; row < PatchAtlas::c_Tile; ++row)
-                                    std::memcpy(&tile[std::size_t(row) * PatchAtlas::c_Tile * 4],
+                                    std::memcpy(into + std::size_t(row) * PatchAtlas::c_Tile * 4,
                                                 &patchAtlas.image.data[(std::size_t(ty + row) * PatchAtlas::c_Size +
                                                                         tx) * 4],
                                                 std::size_t(PatchAtlas::c_Tile) * 4);
-                                renderer.updatePatchAtlas(device, tx, ty, PatchAtlas::c_Tile, PatchAtlas::c_Tile,
-                                                          tile.data(), &error);
+                                regions.push_back({tx, ty, PatchAtlas::c_Tile, PatchAtlas::c_Tile, into});
                             }
+                            renderer.updatePatchAtlas(device, regions, &error);
                             arrivalPatches += since(patchStart);
                             residentSectors.push_back(std::move(content));
                             ++sectorsArrived;
