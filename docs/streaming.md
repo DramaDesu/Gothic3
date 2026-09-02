@@ -269,11 +269,23 @@ worst frame is 12.8 ms and an arrival costs 1 ms on the frame.
 - **A refused sector is retried every time the rectangle changes**, and fails
   again for the same reason. Harmless, since the unwind is clean, but it is
   work done for nothing.
-- **Billboard cells are not suballocated.** The atlas is baked once, from the
-  kinds the first resident set happened to use. A fixed cell grid with cells
-  handed out as kinds appear is the same trick used everywhere else here.
+- **Eight trees in the world still draw no billboard.** The atlas is baked once,
+  from the 139 kinds the first resident set used; 151 turn up in the end. A kind
+  is a definition plus a variant digit and the variants are one tree from
+  different seeds, so a late kind takes a sibling variant is card - at four
+  hundred metres, the only distance a billboard is seen from, that is the same
+  tree. That covered 15 of the 20 late kinds and took the trees with no
+  billboard from 29 to 8. The last 8 are definitions with no variant baked at
+  all, and closing that would mean a render pass and a readback in the middle of
+  a frame for eight trees.
 - **Lights are gathered once.** 588 across the world, so nothing is visibly
   wrong yet, but they should come and go with their sectors.
+- **A quarter-second frame turns up in roughly one run in four**, and it is not
+  attributed. The grid printf and a swapchain rebuild were both guessed and both
+  measured wrong - the swapchain is never rebuilt during a flight. Four clean
+  runs put the real worst frame at 13 to 21 ms and name what it did: an arrival
+  costs about 5 ms over the baseline, a departure burst about 11. Until it can
+  be caught, the worst-frame figure is the one from a run without it.
 - **Synchronization validation has never actually run here.** The unwaited
   uploads are correct by the spec rule that a barrier orders against later
   submissions on the same queue, and that is an argument rather than a check. It

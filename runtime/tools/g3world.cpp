@@ -1325,6 +1325,10 @@ int main(int argc, char **argv)
     std::vector<std::unique_ptr<genome::Mesh>> billboardMeshes;
     std::map<std::string, genome::Mesh *> cardOf;
     std::size_t billboardsMissed = 0;
+    // And what that costs: the trees that will never draw a billboard, and how
+    // many kinds the atlas was baked for against how many turned up in the end.
+    std::size_t billboardInstancesMissed = 0;
+    std::size_t kindsAtBake = 0, kindsSubstituted = 0;
 
     // A sector's trees get their third detail level: the same instances as the
     // full-detail form, drawn as a quad sampling that kind's cell. A kind first
@@ -1335,15 +1339,39 @@ int main(int argc, char **argv)
         const std::size_t before = content.batches.size();
         for (const auto &[kind, slot] : content.treeSlots)
         {
-            const auto card = cardOf.find(kind);
-            if (card == cardOf.end() || slot >= before)
+            const genome::Mesh *card = nullptr;
+            const auto exact = cardOf.find(kind);
+            if (exact != cardOf.end())
+                card = exact->second;
+            else if (!kind.empty())
             {
-                billboardsMissed += card == cardOf.end() ? 1 : 0;
+                // A kind is a definition plus a variant digit, and the variants
+                // are one tree grown from different seeds. At four hundred
+                // metres, which is the only distance a billboard is seen from,
+                // a sibling's card is that tree.
+                const std::string stem = kind.substr(0, kind.size() - 1);
+                for (std::uint32_t variant = 0; variant < c_TreeVariants && !card; ++variant)
+                {
+                    const auto sibling = cardOf.find(stem + char('0' + variant));
+                    if (sibling != cardOf.end())
+                        card = sibling->second;
+                }
+                kindsSubstituted += card ? 1 : 0;
+            }
+
+            if (!card || slot >= before)
+            {
+                if (!card)
+                {
+                    ++billboardsMissed;
+                    if (slot < before)
+                        billboardInstancesMissed += content.batches[slot].transforms.size();
+                }
                 continue;
             }
 
             render::MeshInstances billboard;
-            billboard.mesh = card->second;
+            billboard.mesh = card;
             billboard.textures.push_back(&treeAtlasImage);
             billboard.alphaTested.push_back(1);
             billboard.faceCamera = true;
@@ -1409,6 +1437,7 @@ int main(int argc, char **argv)
                 mesh->elements.push_back(std::move(card));
                 cardOf.emplace(treeKinds[index], mesh.get());
                 billboardMeshes.push_back(std::move(mesh));
+                kindsAtBake = cardOf.size();
             }
 
             std::size_t billboardInstances = 0;
@@ -1573,6 +1602,10 @@ int main(int argc, char **argv)
     POINT lastCursor{};
 
     std::vector<float> frameTimes, cullTimes;
+    // What each frame did, so the worst one can be asked about rather than
+    // guessed at. Two guesses have already been measured and been wrong.
+    std::vector<std::uint8_t> frameWork;
+    std::uint8_t workThisFrame = 0;
     if (benchFrames > 0)
     {
         frameTimes.reserve(std::size_t(benchFrames));
@@ -1715,6 +1748,7 @@ int main(int argc, char **argv)
                         ++index;
                         continue;
                     }
+                    workThisFrame |= 2;
                     renderer.dropSector(device, residentSectors[index].id);
                     freedTiles.emplace_back(device.frameCounter(), std::move(residentSectors[index].tiles));
                     residentSectors.erase(residentSectors.begin() + std::ptrdiff_t(index));
@@ -1797,6 +1831,7 @@ int main(int argc, char **argv)
                         }
                         renderer.updatePatchAtlas(device, regions, &error);
                         arrivalPatches += since(patchStart);
+                        workThisFrame |= 1;
                         residentSectors.push_back(std::move(content));
                         ++sectorsArrived;
                     }
@@ -1897,6 +1932,8 @@ int main(int argc, char **argv)
         {
             frameTimes.push_back(
                 std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - now).count());
+            frameWork.push_back(workThisFrame);
+            workThisFrame = 0;
             if (int(frameTimes.size()) >= benchFrames)
             {
                 // The first frames pay for pipeline warm-up and uploads, so they
@@ -1914,6 +1951,19 @@ int main(int argc, char **argv)
                 };
                 report(frameTimes, "frame");
                 report(cullTimes, "cull");
+
+                // Which frame was the worst, and what it was doing.
+                std::size_t worst = skip;
+                for (std::size_t at = skip; at < frameTimes.size(); ++at)
+                    if (frameTimes[at] > frameTimes[worst])
+                        worst = at;
+                const std::uint8_t did = worst < frameWork.size() ? frameWork[worst] : 0;
+                std::printf("the worst frame was number %zu of %zu at %.2f ms, and it %s\n", worst,
+                            frameTimes.size(), frameTimes[worst],
+                            did == 3   ? "both took a sector in and dropped some"
+                            : did == 1 ? "took a sector in"
+                            : did == 2 ? "dropped sectors"
+                                       : "neither took nor dropped anything");
                 std::printf("%.2fM instances walked by the cull\n", double(renderer.testedInstances()) / 1e6);
                 std::printf("%zu draws, %.2fM triangles submitted\n", renderer.submittedDraws(),
                             double(renderer.submittedTriangles()) / 1e6);
@@ -1952,14 +2002,18 @@ int main(int argc, char **argv)
                                     "%zu lookups would have named the wrong batch and %zu one past the end\n",
                                     renderer.staleArrivals(), renderer.staleLookups(),
                                     renderer.staleOutOfRange());
+                    if (device.swapchainRebuilds() != 0)
+                        std::printf("the swapchain was rebuilt %zu times, each of which drains the device\n",
+                                    device.swapchainRebuilds());
                     std::printf("%zu device allocations live holding %.0f MB, %zu and %.0f MB at peak, "
                                 "of %u allocations the driver allows\n",
                                 device.liveAllocations(), double(device.liveBytes()) / 1048576.0,
                                 device.peakAllocations(), double(device.peakBytes()) / 1048576.0,
                                 device.allocationLimit());
-                    if (billboardsMissed != 0)
-                        std::printf("%zu tree kinds arrived after the billboard atlas was baked and have none\n",
-                                    billboardsMissed);
+                    std::printf("%zu tree kinds at the bake, %zu in the end; %zu took a sibling's billboard, "
+                                "%zu found none and %zu trees will never draw one\n",
+                                kindsAtBake, treeKinds.size(), kindsSubstituted, billboardsMissed,
+                                billboardInstancesMissed);
                     renderer.reportArenas();
                 }
                 break;

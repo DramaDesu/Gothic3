@@ -325,6 +325,8 @@ void Device::destroySwapchain()
 
 bool Device::recreateSwapchain()
 {
+    ++m_swapchainRebuilds;
+
     vkDeviceWaitIdle(m_device);
     destroySwapchain();
     return createSwapchain(nullptr) && createDepth(nullptr);

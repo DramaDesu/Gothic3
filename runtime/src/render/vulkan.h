@@ -112,6 +112,9 @@ class Device
     std::size_t liveAllocations() const { return m_liveAllocations; }
     std::size_t peakAllocations() const { return m_peakAllocations; }
     std::uint32_t allocationLimit() const { return m_allocationLimit; }
+    // How many times the swapchain was rebuilt. Each one drains the device,
+    // so a frame that took a quarter of a second is worth checking against it.
+    std::size_t swapchainRebuilds() const { return m_swapchainRebuilds; }
     VkDeviceSize liveBytes() const { return m_liveBytes; }
     VkDeviceSize peakBytes() const { return m_peakBytes; }
 
@@ -170,6 +173,7 @@ class Device
     std::size_t m_transferStalls = 0;
     std::size_t m_liveAllocations = 0;
     std::size_t m_peakAllocations = 0;
+    std::size_t m_swapchainRebuilds = 0;
     VkDeviceSize m_liveBytes = 0;
     VkDeviceSize m_peakBytes = 0;
     // What each allocation was worth, so giving it back subtracts the right
