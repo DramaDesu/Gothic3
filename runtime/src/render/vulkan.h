@@ -46,6 +46,11 @@ class Device
     VkExtent2D extent() const { return m_extent; }
     std::uint32_t frameIndex() const { return m_frame; }
 
+    // Frames begun since startup. Anything handed back to a pool has to wait
+    // out the frames in flight before it can be handed out again, and this is
+    // what that is counted in.
+    std::uint64_t frameCounter() const { return m_frameCounter; }
+
     VkImageView currentColorView() const { return m_swapchainViews[m_imageIndex]; }
     VkImage currentColorImage() const { return m_swapchainImages[m_imageIndex]; }
     VkImageView depthView() const { return m_depthView; }
@@ -143,6 +148,7 @@ class Device
 
     std::uint32_t m_frame = 0;
     std::uint32_t m_imageIndex = 0;
+    std::uint64_t m_frameCounter = 0;
 };
 
 } // namespace render

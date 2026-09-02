@@ -176,6 +176,10 @@ class WorldRenderer
     std::size_t tooSmallInstances() const { return m_tooSmall; }
     std::size_t occludedInstances() const { return m_occluded; }
 
+    // Frees what has outlived the frames in flight. Called every frame.
+    void retireReleases(std::uint64_t frame);
+    std::size_t pendingReleases() const { return m_pendingReleases.size(); }
+
     std::size_t vertexCount() const { return m_vertexCount; }
     std::size_t triangleCount() const { return m_indexCount / 3; }
     std::size_t instanceCount() const { return m_instanceCount; }
@@ -269,6 +273,19 @@ class WorldRenderer
     std::map<const genome::Mesh *, MeshGeometry> m_geometry;
     bool placeMesh(Device &device, const genome::Mesh &mesh, MeshGeometry *&out, std::string *error);
     void releaseMesh(Device &device, const genome::Mesh *mesh);
+
+    // Ranges a departed sector gave back. They cannot go on the free list at
+    // once: a frame already submitted may still be drawing from them. Until
+    // uploads stopped draining the queue this was covered by accident.
+    struct PendingRelease
+    {
+        GpuArena *arena = nullptr;
+        std::size_t offset = 0, count = 0;
+        std::uint64_t frame = 0;
+    };
+    std::vector<PendingRelease> m_pendingReleases;
+    std::uint64_t m_frameCounter = 0;
+    void queueRelease(GpuArena &arena, std::size_t offset, std::size_t count);
 
     // One batch per mesh, whichever sectors placed it.
     std::map<const genome::Mesh *, std::size_t> m_batchOf;

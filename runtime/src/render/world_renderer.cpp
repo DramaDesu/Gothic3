@@ -302,6 +302,30 @@ bool WorldRenderer::placeMesh(Device &device, const genome::Mesh &mesh, MeshGeom
     return true;
 }
 
+void WorldRenderer::queueRelease(GpuArena &arena, std::size_t offset, std::size_t count)
+{
+    if (count != 0)
+        m_pendingReleases.push_back({&arena, offset, count, m_frameCounter});
+}
+
+void WorldRenderer::retireReleases(std::uint64_t frame)
+{
+    m_frameCounter = frame;
+    for (std::size_t index = 0; index < m_pendingReleases.size();)
+    {
+        const PendingRelease &one = m_pendingReleases[index];
+        // One more than the frames in flight, because the release was recorded
+        // between frames rather than inside one.
+        if (frame < one.frame + Device::c_FramesInFlight + 1)
+        {
+            ++index;
+            continue;
+        }
+        one.arena->release(one.offset, one.count);
+        m_pendingReleases.erase(m_pendingReleases.begin() + std::ptrdiff_t(index));
+    }
+}
+
 void WorldRenderer::releaseMesh(Device &device, const genome::Mesh *mesh)
 {
     (void)device;
@@ -311,8 +335,8 @@ void WorldRenderer::releaseMesh(Device &device, const genome::Mesh *mesh)
     if (--found->second.refs != 0)
         return;
 
-    m_vertices.release(found->second.vertexOffset, found->second.vertexCount);
-    m_indices.release(found->second.indexOffset, found->second.indexCount);
+    queueRelease(m_vertices, found->second.vertexOffset, found->second.vertexCount);
+    queueRelease(m_indices, found->second.indexOffset, found->second.indexCount);
     m_vertexCount -= found->second.vertexCount;
     m_indexCount -= found->second.indexCount;
     m_geometry.erase(found);
@@ -516,7 +540,7 @@ void WorldRenderer::dropSector(Device &device, std::uint32_t sector)
         return;
 
     if (held->colourCount != 0)
-        m_lightmapArena.release(held->colourBase, held->colourCount);
+        queueRelease(m_lightmapArena, held->colourBase, held->colourCount);
     m_sectors.erase(held);
 
     for (std::size_t index = 0; index < m_batches.size();)
@@ -957,6 +981,8 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                          const std::array<float, 3> &eye, float pixelsPerRadian, float minimumPixels,
                          bool useOcclusion)
 {
+    retireReleases(device.frameCounter());
+
     G3_ZONE("cull");
 
     // Frustum planes straight out of the view-projection matrix: each is a

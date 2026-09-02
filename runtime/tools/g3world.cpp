@@ -177,6 +177,15 @@ struct PatchAtlas
         return false;
     }
 
+    // A sector starting to pack must not continue in a tile another sector
+    // owns: its patches would never be uploaded, because the tile is not in its
+    // own list, and the tile would be freed under it when that sector left.
+    void beginSector()
+    {
+        sectorTiles.clear();
+        hasTile = false;
+    }
+
     // A sector leaving hands its tiles back. Nothing is cleared: the
     // coordinates that pointed at them left with it.
     void freeTiles(const std::vector<std::uint32_t> &tiles)
@@ -924,7 +933,7 @@ int main(int argc, char **argv)
                 SectorContent content;
                 content.name = entry.path;
                 content.id = nextSectorId++;
-                patchAtlas.sectorTiles.clear();
+                patchAtlas.beginSector();
                 if (!loadSector(entry, content))
                     continue;
                 content.tiles = std::move(patchAtlas.sectorTiles);
@@ -1396,6 +1405,10 @@ int main(int argc, char **argv)
     auto previous = std::chrono::steady_clock::now();
     std::size_t frames = 0;
     std::vector<std::string> arriving;
+    // Atlas tiles a departed sector gave back, held until no submitted frame
+    // can still be sampling them. The next arrival would otherwise take one and
+    // paint over it mid-frame.
+    std::vector<std::pair<std::uint64_t, std::vector<std::uint32_t>>> freedTiles;
     std::size_t sectorsArrived = 0, sectorsDeparted = 0;
     float worstArrival = 0.0f, totalArrival = 0.0f;
     // What an arrival is actually made of. The accumulators that time the
@@ -1462,6 +1475,17 @@ int main(int argc, char **argv)
         // game's own conditions.
         if (streaming && world)
         {
+            for (std::size_t index = 0; index < freedTiles.size();)
+            {
+                if (device.frameCounter() < freedTiles[index].first + render::Device::c_FramesInFlight + 1)
+                {
+                    ++index;
+                    continue;
+                }
+                patchAtlas.freeTiles(freedTiles[index].second);
+                freedTiles.erase(freedTiles.begin() + std::ptrdiff_t(index));
+            }
+
             const genome::ResidentCells want = genome::residentCells(eye, c_ResidencyFar);
             const float dx = eye[0] - residencyEye[0], dz = eye[2] - residencyEye[2];
             const float gate = std::max(1300.0f, c_ResidencyFar * 0.2f);
@@ -1480,7 +1504,7 @@ int main(int argc, char **argv)
                         continue;
                     }
                     renderer.dropSector(device, residentSectors[index].id);
-                    patchAtlas.freeTiles(residentSectors[index].tiles);
+                    freedTiles.emplace_back(device.frameCounter(), std::move(residentSectors[index].tiles));
                     residentSectors.erase(residentSectors.begin() + std::ptrdiff_t(index));
                     ++sectorsDeparted;
                 }
@@ -1521,7 +1545,7 @@ int main(int argc, char **argv)
                     SectorContent content;
                     content.name = path;
                     content.id = nextSectorId++;
-                    patchAtlas.sectorTiles.clear();
+                    patchAtlas.beginSector();
                     if (loadSector(*entry, content))
                     {
                         content.tiles = std::move(patchAtlas.sectorTiles);

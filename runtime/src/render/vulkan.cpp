@@ -386,6 +386,7 @@ void Device::destroy()
 bool Device::beginFrame()
 {
     retireTransfers();
+    ++m_frameCounter;
 
     vkWaitForFences(m_device, 1, &m_inFlight[m_frame], VK_TRUE, UINT64_MAX);
 
