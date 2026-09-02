@@ -278,8 +278,6 @@ worst frame is 12.8 ms and an arrival costs 1 ms on the frame.
   billboard from 29 to 8. The last 8 are definitions with no variant baked at
   all, and closing that would mean a render pass and a readback in the middle of
   a frame for eight trees.
-- **Lights are gathered once.** 588 across the world, so nothing is visibly
-  wrong yet, but they should come and go with their sectors.
 - **A quarter-second frame turns up in roughly one run in four**, and it is not
   attributed. The grid printf and a swapchain rebuild were both guessed and both
   measured wrong - the swapchain is never rebuilt during a flight. Four clean

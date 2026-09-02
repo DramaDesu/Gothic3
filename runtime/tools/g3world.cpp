@@ -1474,6 +1474,10 @@ int main(int argc, char **argv)
     // zeros - so the lighting was not wrong, it was absent, and every attempt to
     // change it changed nothing at all.
     render::WorldRenderer renderer;
+    // Everything that is not a sector's: the landscape's own lights and the
+    // vegetation layers'. The rest are added back whenever the resident set
+    // changes, which is the only way a sector's torches arrive with it.
+    const std::vector<genome::PointLight> baseLights = worldLights;
     for (const SectorContent &content : residentSectors)
         worldLights.insert(worldLights.end(), content.lights.begin(), content.lights.end());
     renderer.setLights(worldLights);
@@ -1620,6 +1624,10 @@ int main(int argc, char **argv)
     // paint over it mid-frame.
     std::vector<std::pair<std::uint64_t, std::vector<std::uint32_t>>> freedTiles;
     std::size_t sectorsArrived = 0, sectorsDeparted = 0, sectorsUnwanted = 0, sectorsRefused = 0;
+    // Set whenever the resident set changes; the list is rebuilt once, before
+    // the cull that reads it, rather than on each arrival and each departure.
+    bool lightsStale = false;
+    std::size_t lightsAtStart = worldLights.size(), lightsNow = worldLights.size(), lightsMost = worldLights.size();
     float worstArrival = 0.0f, totalArrival = 0.0f;
 
     // Everything a sector needs read and parsed, on the loader's thread. Its
@@ -1749,6 +1757,7 @@ int main(int argc, char **argv)
                         continue;
                     }
                     workThisFrame |= 2;
+                    lightsStale = true;
                     renderer.dropSector(device, residentSectors[index].id);
                     freedTiles.emplace_back(device.frameCounter(), std::move(residentSectors[index].tiles));
                     residentSectors.erase(residentSectors.begin() + std::ptrdiff_t(index));
@@ -1832,6 +1841,7 @@ int main(int argc, char **argv)
                         renderer.updatePatchAtlas(device, regions, &error);
                         arrivalPatches += since(patchStart);
                         workThisFrame |= 1;
+                        lightsStale = true;
                         residentSectors.push_back(std::move(content));
                         ++sectorsArrived;
                     }
@@ -1841,6 +1851,17 @@ int main(int argc, char **argv)
                     totalArrival += cost;
                 }
             }
+        }
+
+        if (lightsStale)
+        {
+            lightsStale = false;
+            worldLights = baseLights;
+            for (const SectorContent &content : residentSectors)
+                worldLights.insert(worldLights.end(), content.lights.begin(), content.lights.end());
+            renderer.setLights(worldLights);
+            lightsNow = worldLights.size();
+            lightsMost = std::max(lightsMost, lightsNow);
         }
 
         const std::array<float, 3> target{eye[0] + forward[0], eye[1] + forward[1], eye[2] + forward[2]};
@@ -1995,6 +2016,8 @@ int main(int argc, char **argv)
                                     sectorsUnwanted);
                     if (sectorsRefused != 0)
                         std::printf("%zu sectors did not fit and were put back\n", sectorsRefused);
+                    std::printf("lights: %zu at the start, %zu now, %zu at the most\n", lightsAtStart, lightsNow,
+                                lightsMost);
                     std::printf("%zu transfers still in flight, %zu drains paid to keep the bound\n",
                                 device.transfersInFlight(), device.transferStalls());
                     if (renderer.staleArrivals() != 0)
