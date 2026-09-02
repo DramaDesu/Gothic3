@@ -677,7 +677,6 @@ bool WorldRenderer::create(Device &device, const std::vector<MeshInstances> &bat
             *error = "no geometry to draw";
         return false;
     }
-    std::printf("%zu occluders, %zu large enough but foliage\n", m_occluders.size(), m_foliageSkipped);
     return true;
 }
 
@@ -691,6 +690,7 @@ void WorldRenderer::reportArenas() const
                 m_lightmapArena.capacity() >> 20, m_textureSets.size(), m_uploader.submits());
     std::printf("%zu sectors resident, %zu batches, %zu instances of which %zu carry baked light\n",
                 m_sectors.size(), m_batches.size(), m_instanceCount, m_bakedInstances);
+    std::printf("%zu occluders, %zu large enough but foliage\n", m_occluders.size(), m_foliageSkipped);
 }
 
 bool WorldRenderer::createPipeline(Device &device, std::string *error)

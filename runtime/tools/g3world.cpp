@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -245,6 +246,23 @@ struct PatchAtlas
     }
 };
 
+// Everything one sector contributes, kept together so it can be handed over and
+// taken back as a unit. Meshes it owns are the ones nobody else can be using -
+// its own scattered vegetation; the placed meshes and the grown trees are
+// shared and outlive it.
+struct SectorContent
+{
+    std::string name;
+    std::uint32_t id = 0;
+    std::vector<render::MeshInstances> batches;
+    render::WorldRenderer::SectorLighting lighting;
+    std::vector<genome::PointLight> lights;
+    std::vector<std::unique_ptr<genome::Mesh>> meshes;
+    // Which of its batches is the full-detail form of which tree, so that a
+    // billboard can be given the same instances once the atlas is baked.
+    std::vector<std::pair<std::string, std::size_t>> treeSlots;
+};
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -282,9 +300,21 @@ int main(int argc, char **argv)
     std::vector<std::unique_ptr<genome::Mesh>> ownedMeshes;
     std::map<std::string, std::size_t> batchOf;
     std::vector<render::MeshInstances> batches;
-    // Which batch holds the full-detail mesh of each tree variant, in the order
-    // they were grown - the billboard atlas is baked from exactly these.
-    std::vector<std::size_t> treeFullDetail;
+    // Sectors, loaded one at a time so that one at a time is also how they can
+    // leave. Everything a later arrival needs lives out here with them: the
+    // archive, the caches, the residency index and the loader itself, because
+    // an arrival takes exactly the same path as the startup load.
+    std::vector<SectorContent> residentSectors;
+    std::function<bool(const genome::PakEntry &, SectorContent &)> loadSector;
+    std::unique_ptr<genome::PakArchive> world;
+    std::map<std::string, genome::SectorBounds> boundsOf;
+    std::string sectorFilter = "_cstat.node";
+    std::map<std::string, genome::Mesh *> meshOf;
+
+    // Tree kinds in the order they were grown - the billboard atlas is baked
+    // from exactly these, and a cell is found by a kind's place in this list.
+    std::vector<std::string> treeKinds;
+    std::map<std::string, std::array<genome::Mesh *, 2>> treeMeshOf;
     std::vector<genome::PointLight> worldLights;
     // Every instance's baked vertex lighting, end to end. The shader indexes it
     // by the base each instance carries, which is how per-instance lighting
@@ -436,21 +466,19 @@ int main(int argc, char **argv)
 
     if (sectorArgument != 0)
     {
-        const auto world = genome::PakArchive::open(argv[sectorArgument], nullptr);
+        world = genome::PakArchive::open(argv[sectorArgument], nullptr);
         if (!world)
             std::puts("warning: could not open the world archive");
         else
         {
-            const std::string sectorFilter =
-                sectorArgument + 1 < argc ? argv[sectorArgument + 1] : "_cstat.node";
+            sectorFilter = sectorArgument + 1 < argc ? argv[sectorArgument + 1] : "_cstat.node";
             std::size_t placed = 0, sectors = 0, missing = 0, grass = 0, planted = 0, missingTrees = 0;
-            std::map<std::string, std::size_t> treeBatchOf;
+
 
             // The residency index: every sector's own bounding box, which is
             // 2177 files of 197 bytes rather than the 347 MB they describe. The
             // box is what decides, not the cell in the file name - the box of
             // x55000z55000 starts a whole cell further out, at 45000.
-            std::map<std::string, genome::SectorBounds> boundsOf;
             if (streaming)
             {
                 const auto indexStart = now();
@@ -484,24 +512,20 @@ int main(int argc, char **argv)
                             resident.right, resident.top, resident.bottom, eye[0], eye[2]);
 
             std::size_t skipped = 0;
-            for (const genome::PakEntry &entry : world->entries())
-            {
-                if (entry.deleted || entry.path.find(sectorFilter) == std::string::npos)
-                    continue;
 
-                if (streaming)
-                {
-                    std::string key = entry.path;
-                    const std::size_t dot = key.find_last_of('.');
-                    if (dot != std::string::npos)
-                        key = key.substr(0, dot);
-                    const auto box = boundsOf.find(key);
-                    if (box == boundsOf.end() || !genome::overlaps(box->second, resident))
-                    {
-                        ++skipped;
-                        continue;
-                    }
-                }
+            // One sector's worth of loading. Everything it appends to goes into
+            // `out`, including the two maps that used to span the whole world:
+            // a mesh placed in two sectors now makes an entry in each, and the
+            // renderer merges them back into one batch by mesh pointer, which
+            // is what keeps the draw count where it was.
+            loadSector = [&](const genome::PakEntry &entry, SectorContent &out) -> bool {
+                auto &batches = out.batches;
+                auto &lightmapColours = out.lighting.colours;
+                auto &lightmapIncident = out.lighting.incident;
+                auto &lightmapCoords = out.lighting.coords;
+                auto &worldLights = out.lights;
+                std::map<std::string, std::size_t> batchOf;
+                std::map<std::string, std::size_t> treeBatchOf;
 
                 genome::WorldLayer layer;
                 std::string ignored;
@@ -509,8 +533,7 @@ int main(int argc, char **argv)
                 const bool read = genome::loadWorldNode(world->read(entry, &ignored), layer, &ignored);
                 timeReadingSectors += since(sectorStart);
                 if (!read)
-                    continue;
-                ++sectors;
+                    return false;
 
                 for (const genome::Placement &placement : layer.placements)
                 {
@@ -642,27 +665,40 @@ int main(int argc, char **argv)
                         continue;
                     }
 
-                    auto mesh = std::make_unique<genome::Mesh>();
-                    const auto meshStart = now();
-                    const bool loaded =
-                        genome::loadMesh(archive->read(placement.meshName, &ignored), *mesh, &ignored);
-                    timeMeshes += since(meshStart);
-                    if (!loaded)
+                    genome::Mesh *shared = nullptr;
+                    const auto cached = meshOf.find(placement.meshName);
+                    if (cached != meshOf.end())
+                        shared = cached->second;
+                    else
                     {
-                        ++missing;
+                        auto mesh = std::make_unique<genome::Mesh>();
+                        const auto meshStart = now();
+                        const bool loaded =
+                            genome::loadMesh(archive->read(placement.meshName, &ignored), *mesh, &ignored);
+                        timeMeshes += since(meshStart);
+                        if (loaded)
+                        {
+                            shared = mesh.get();
+                            ownedMeshes.push_back(std::move(mesh));
+                        }
+                        else
+                            ++missing;
+                        meshOf.emplace(placement.meshName, shared);
+                    }
+                    if (!shared)
+                    {
                         batchOf.emplace(placement.meshName, std::size_t(-1));
                         continue;
                     }
 
                     render::MeshInstances batch;
-                    batch.mesh = mesh.get();
-                    batch.lightmapBase.push_back(attachLightmap(mesh.get()));
+                    batch.mesh = shared;
+                    batch.lightmapBase.push_back(attachLightmap(shared));
                     batch.transforms.push_back(placement.world);
                     batch.bounds.push_back({placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
                                             placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
                     batchOf.emplace(placement.meshName, batches.size());
                     batches.push_back(std::move(batch));
-                    ownedMeshes.push_back(std::move(mesh));
                     ++placed;
                 }
                 worldLights.insert(worldLights.end(), layer.lights.begin(), layer.lights.end());
@@ -689,6 +725,12 @@ int main(int argc, char **argv)
                             path = found->second;
 
                         std::size_t slot = std::size_t(-1);
+                        std::array<genome::Mesh *, 2> grown{nullptr, nullptr};
+                        const auto grownAlready = treeMeshOf.find(key);
+                        if (grownAlready != treeMeshOf.end())
+                            grown = grownAlready->second;
+                        else
+                        {
                         genome::SpeedTree definition;
                         std::string why;
                         if (!path.empty() &&
@@ -710,24 +752,43 @@ int main(int argc, char **argv)
                                 auto mesh = std::make_unique<genome::Mesh>();
                                 if (!genome::growTree(definition, seed, growth, *mesh))
                                     continue;
-
-                                render::MeshInstances batch;
-                                batch.mesh = mesh.get();
-                                batch.occludes = false;
-                                batch.lodNear = level == 0 ? 0.0f : treeLodDistance;
-                                batch.lodFar = level == 0 ? treeLodDistance : 0.0f;
-                                if (level == 0)
-                                {
-                                    slot = batches.size();
-                                    treeFullDetail.push_back(slot);
-                                }
-                                batches.push_back(std::move(batch));
+                                grown[level] = mesh.get();
                                 ownedMeshes.push_back(std::move(mesh));
                             }
                             timeTrees += since(treeStart);
                         }
                         else
                             ++missingTrees;
+
+                        // Grown once for the whole world; the billboard atlas
+                        // is baked from exactly these, in this order.
+                        treeMeshOf.emplace(key, grown);
+                        if (grown[0])
+                            treeKinds.push_back(key);
+                        }
+
+                        if (grown[0])
+                        {
+                            // Two detail levels: the full tree close up and a
+                            // thinned one past the switch distance. A tree is
+                            // four thousand triangles and there are 29138 of
+                            // them in view at once, which is where the frame
+                            // goes; a distant one covering a few pixels must
+                            // not cost the same as one filling the screen.
+                            slot = batches.size();
+                            out.treeSlots.emplace_back(key, slot);
+                            for (int level = 0; level < 2; ++level)
+                            {
+                                if (!grown[level])
+                                    break;
+                                render::MeshInstances batch;
+                                batch.mesh = grown[level];
+                                batch.occludes = false;
+                                batch.lodNear = level == 0 ? 0.0f : treeLodDistance;
+                                batch.lodFar = level == 0 ? treeLodDistance : 0.0f;
+                                batches.push_back(std::move(batch));
+                            }
+                        }
                         known = treeBatchOf.emplace(key, slot).first;
                     }
 
@@ -769,7 +830,7 @@ int main(int argc, char **argv)
                     batch.mesh = mesh.get();
                     batch.occludes = false;
                     batches.push_back(std::move(batch));
-                    ownedMeshes.push_back(std::move(mesh));
+                    out.meshes.push_back(std::move(mesh));
                 }
 
                 for (const genome::VegetationInstance &plant : layer.vegetation)
@@ -782,169 +843,226 @@ int main(int argc, char **argv)
                                             plant.boundsMax[0], plant.boundsMax[1], plant.boundsMax[2]});
                     ++grass;
                 }
+                return true;
+            };
+
+            for (const genome::PakEntry &entry : world->entries())
+            {
+                if (entry.deleted || entry.path.find(sectorFilter) == std::string::npos)
+                    continue;
+
+                if (streaming)
+                {
+                    std::string key = entry.path;
+                    const std::size_t dot = key.find_last_of('.');
+                    if (dot != std::string::npos)
+                        key = key.substr(0, dot);
+                    const auto box = boundsOf.find(key);
+                    if (box == boundsOf.end() || !genome::overlaps(box->second, resident))
+                    {
+                        ++skipped;
+                        continue;
+                    }
+                }
+
+                SectorContent content;
+                content.name = entry.path;
+                content.id = std::uint32_t(residentSectors.size() + 1);
+                if (!loadSector(entry, content))
+                    continue;
+                ++sectors;
+                residentSectors.push_back(std::move(content));
             }
             if (streaming)
                 std::printf("%zu sectors resident, %zu left on disk\n", sectors, skipped);
             std::printf("%zu sectors, %zu objects placed, %zu meshes missing, %zu plants\n", sectors, placed,
                         missing, grass);
             if (planted != 0 || missingTrees != 0)
-                std::printf("%zu trees planted from %zu grown meshes, %zu definitions missing\n", planted,
-                            treeBatchOf.size(), missingTrees);
+                std::printf("%zu trees planted from %zu grown kinds, %zu definitions missing\n", planted,
+                            treeKinds.size(), missingTrees);
         }
     }
 
-    if (batches.empty())
+    if (batches.empty() && residentSectors.empty())
     {
         std::puts("nothing to draw");
         return 1;
     }
 
-    std::size_t vertices = 0, triangles = 0, instances = 0;
-    for (const render::MeshInstances &batch : batches)
-    {
-        vertices += batch.mesh->vertexCount();
-        triangles += batch.mesh->triangleCount();
-        instances += batch.transforms.size();
-    }
-    std::printf("%zu distinct meshes (%zu failed), %zu instances, %zu unique vertices, %zu unique triangles\n",
-                batches.size(), failed, instances, vertices, triangles);
+    // Every batch there is, flat list and sectors together, for the passes that
+    // do not care which sector something came from.
+    const auto everyBatch = [&](const std::function<void(std::vector<render::MeshInstances> &)> &visit) {
+        visit(batches);
+        for (SectorContent &content : residentSectors)
+            visit(content.batches);
+    };
+
+    // Set up inside the block below, which owns the archives it needs, and used
+    // again for every sector that arrives afterwards.
+    std::function<void(std::vector<render::MeshInstances> &)> resolveTextures;
+
+    std::size_t vertices = 0, triangles = 0, instances = 0, batchCount = 0;
+    std::set<const genome::Mesh *> distinctMeshes;
+    everyBatch([&](std::vector<render::MeshInstances> &list) {
+        for (const render::MeshInstances &batch : list)
+        {
+            ++batchCount;
+            instances += batch.transforms.size();
+            if (!batch.mesh || !distinctMeshes.insert(batch.mesh).second)
+                continue;
+            vertices += batch.mesh->vertexCount();
+            triangles += batch.mesh->triangleCount();
+        }
+    });
+    std::printf("%zu distinct meshes (%zu failed) in %zu sector batches, %zu instances, %zu unique vertices, "
+                "%zu unique triangles\n",
+                distinctMeshes.size(), failed, batchCount, instances, vertices, triangles);
 
     // Every mesh element names a material, and those resolve to textures that
-    // are shared across the meshes using them.
+    // are shared across the meshes using them. Kept as a pass rather than a
+    // phase, because a sector arriving later needs exactly the same work done
+    // to it and the caches behind it are what make that cheap.
+    const auto materials = genome::PakArchive::open(dataDirectory + "/_compiledMaterial.pak", nullptr);
+    const auto imageArchive = genome::PakArchive::open(dataDirectory + "/_compiledImage.pak", nullptr);
+
+    std::set<std::string> imageNames;
+    if (imageArchive)
     {
-        const auto materials = genome::PakArchive::open(dataDirectory + "/_compiledMaterial.pak", nullptr);
-        const auto imageArchive = genome::PakArchive::open(dataDirectory + "/_compiledImage.pak", nullptr);
-
-        std::set<std::string> imageNames;
-        if (imageArchive)
+        for (const genome::PakEntry &entry : imageArchive->entries())
         {
-            for (const genome::PakEntry &entry : imageArchive->entries())
-            {
-                if (entry.deleted || entry.path.size() < 6 ||
-                    entry.path.compare(entry.path.size() - 5, 5, ".ximg") != 0)
-                    continue;
-                const std::size_t slash = entry.path.find_last_of('/');
-                const std::string leaf = slash == std::string::npos ? entry.path : entry.path.substr(slash + 1);
-                imageNames.insert(leaf.substr(0, leaf.size() - 5));
-            }
+            if (entry.deleted || entry.path.size() < 6 ||
+                entry.path.compare(entry.path.size() - 5, 5, ".ximg") != 0)
+                continue;
+            const std::size_t slash = entry.path.find_last_of('/');
+            const std::string leaf = slash == std::string::npos ? entry.path : entry.path.substr(slash + 1);
+            imageNames.insert(leaf.substr(0, leaf.size() - 5));
         }
-        const auto exists = [&](const std::string &name) { return imageNames.count(name) != 0; };
+    }
+    const auto exists = [&](const std::string &name) { return imageNames.count(name) != 0; };
 
-        // Water has no diffuse slot at all - its look comes from a dedicated
-        // shader - so without a stand-in every river renders as white.
-        auto water = std::make_unique<genome::Image>();
-        water->width = 1;
-        water->height = 1;
-        water->faceCount = 1;
-        water->format = genome::ImageFormat::A8R8G8B8;
-        water->data = {150, 105, 45, 255}; // BGRA
-        water->levels.push_back({1, 1, 0, 4});
-        water->faceStride = 4;
-        const genome::Image *waterImage = water.get();
-        images.push_back(std::move(water));
+    // Water has no diffuse slot at all - its look comes from a dedicated
+    // shader - so without a stand-in every river renders as white.
+    auto water = std::make_unique<genome::Image>();
+    water->width = 1;
+    water->height = 1;
+    water->faceCount = 1;
+    water->format = genome::ImageFormat::A8R8G8B8;
+    water->data = {150, 105, 45, 255}; // BGRA
+    water->levels.push_back({1, 1, 0, 4});
+    water->faceStride = 4;
+    const genome::Image *waterImage = water.get();
+    images.push_back(std::move(water));
 
-        const auto textureStart = now();
-        std::map<std::string, const genome::Image *> cache;
-        struct TimeTextures
+    std::map<std::string, const genome::Image *> cache;
+    // Which materials throw away transparent pixels, remembered per name so
+    // the answer survives the texture cache.
+    std::map<std::string, bool> masked;
+
+    resolveTextures = [&, waterImage](std::vector<render::MeshInstances> &list) {
+    const auto textureStart = now();
+    struct TimeTextures
+    {
+        double &into;
+        std::chrono::steady_clock::time_point start;
+        ~TimeTextures()
         {
-            double &into;
-            std::chrono::steady_clock::time_point start;
-            ~TimeTextures()
-            {
-                into += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-            }
-        } timeTexturesGuard{timeTextures, textureStart};
-        // Which materials throw away transparent pixels, remembered per name so
-        // the answer survives the texture cache.
-        std::map<std::string, bool> masked;
-        for (render::MeshInstances &batch : batches)
+            into += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        }
+    } timeTexturesGuard{timeTextures, textureStart};
+    for (render::MeshInstances &batch : list)
+    {
+        for (const genome::MeshElement &element : batch.mesh->elements)
         {
-            for (const genome::MeshElement &element : batch.mesh->elements)
+            const genome::Image *loaded = nullptr;
+            const auto cached = cache.find(element.materialName);
+            if (cached != cache.end())
+                loaded = cached->second;
+            else if (imageArchive && element.materialName.size() > 4 &&
+                     (element.materialName.compare(element.materialName.size() - 4, 4, ".dds") == 0 ||
+                      element.materialName.compare(element.materialName.size() - 4, 4, ".tga") == 0))
             {
-                const genome::Image *loaded = nullptr;
-                const auto cached = cache.find(element.materialName);
-                if (cached != cache.end())
-                    loaded = cached->second;
-                else if (imageArchive && element.materialName.size() > 4 &&
-                         (element.materialName.compare(element.materialName.size() - 4, 4, ".dds") == 0 ||
-                          element.materialName.compare(element.materialName.size() - 4, 4, ".tga") == 0))
-                {
-                    // Grass and trees name their textures outright, in the form
-                    // they were authored under rather than through a material.
-                    std::string base = element.materialName.substr(0, element.materialName.size() - 4);
-                    for (char &c : base)
-                        c = char(std::tolower(static_cast<unsigned char>(c)));
+                // Grass and trees name their textures outright, in the form
+                // they were authored under rather than through a material.
+                std::string base = element.materialName.substr(0, element.materialName.size() - 4);
+                for (char &c : base)
+                    c = char(std::tolower(static_cast<unsigned char>(c)));
 
-                    std::string ignored;
-                    auto image = std::make_unique<genome::Image>();
-                    if (exists(base) && genome::loadImage(imageArchive->read(base + ".ximg", &ignored), *image,
-                                                          &ignored))
-                    {
-                        loaded = image.get();
-                        images.push_back(std::move(image));
-                    }
-                    cache.emplace(element.materialName, loaded);
-                    // Our own foliage - grass patches, leaves and fronds - is
-                    // quads whose texture is mostly empty.
-                    masked.emplace(element.materialName, true);
-                }
-                else if (materials && imageArchive && !element.materialName.empty())
-                {
-                    genome::Material material;
-                    std::string ignored;
-                    if (genome::loadMaterial(materials->read(element.materialName, &ignored), material, &ignored))
-                    {
-                        // The game says which surfaces mask; taking every alpha
-                        // channel at face value punches holes through stone.
-                        masked.emplace(element.materialName, material.blendMode == genome::BlendMode::Masked);
-                        if (material.kind == genome::ShaderKind::Water)
-                            loaded = waterImage;
-                        else if (const genome::Sampler *sampler = material.texture(genome::Slot::Diffuse))
-                        {
-                            const genome::TextureResolution resolved = genome::resolveTexture(*sampler, 0, exists);
-                            if (!resolved.fileName.empty())
-                            {
-                                auto image = std::make_unique<genome::Image>();
-                                if (genome::loadImage(imageArchive->read(resolved.fileName, &ignored), *image,
+                std::string ignored;
+                auto image = std::make_unique<genome::Image>();
+                if (exists(base) && genome::loadImage(imageArchive->read(base + ".ximg", &ignored), *image,
                                                       &ignored))
-                                {
-                                    loaded = image.get();
-                                    images.push_back(std::move(image));
-                                }
+                {
+                    loaded = image.get();
+                    images.push_back(std::move(image));
+                }
+                cache.emplace(element.materialName, loaded);
+                // Our own foliage - grass patches, leaves and fronds - is
+                // quads whose texture is mostly empty.
+                masked.emplace(element.materialName, true);
+            }
+            else if (materials && imageArchive && !element.materialName.empty())
+            {
+                genome::Material material;
+                std::string ignored;
+                if (genome::loadMaterial(materials->read(element.materialName, &ignored), material, &ignored))
+                {
+                    // The game says which surfaces mask; taking every alpha
+                    // channel at face value punches holes through stone.
+                    masked.emplace(element.materialName, material.blendMode == genome::BlendMode::Masked);
+                    if (material.kind == genome::ShaderKind::Water)
+                        loaded = waterImage;
+                    else if (const genome::Sampler *sampler = material.texture(genome::Slot::Diffuse))
+                    {
+                        const genome::TextureResolution resolved = genome::resolveTexture(*sampler, 0, exists);
+                        if (!resolved.fileName.empty())
+                        {
+                            auto image = std::make_unique<genome::Image>();
+                            if (genome::loadImage(imageArchive->read(resolved.fileName, &ignored), *image,
+                                                  &ignored))
+                            {
+                                loaded = image.get();
+                                images.push_back(std::move(image));
                             }
                         }
                     }
-                    cache.emplace(element.materialName, loaded);
                 }
-                batch.textures.push_back(loaded);
-                const auto isMasked = masked.find(element.materialName);
-                batch.alphaTested.push_back(isMasked != masked.end() && isMasked->second ? 1 : 0);
+                cache.emplace(element.materialName, loaded);
             }
+            batch.textures.push_back(loaded);
+            const auto isMasked = masked.find(element.materialName);
+            batch.alphaTested.push_back(isMasked != masked.end() && isMasked->second ? 1 : 0);
         }
-        std::size_t untextured = 0;
-        for (const render::MeshInstances &batch : batches)
+    }
+    };
+
+    everyBatch(resolveTextures);
+
+    std::size_t untextured = 0;
+    everyBatch([&](std::vector<render::MeshInstances> &list) {
+        for (const render::MeshInstances &batch : list)
             for (const genome::Image *texture : batch.textures)
                 untextured += texture == nullptr ? 1 : 0;
+    });
 
-        std::printf("%zu distinct textures, %zu mesh elements left untextured\n", images.size(), untextured);
-        if (untextured != 0)
-        {
-            // Name a few so the gap is diagnosable rather than just white.
-            std::size_t named = 0;
-            for (const render::MeshInstances &batch : batches)
+    std::printf("%zu distinct textures, %zu mesh elements left untextured\n", images.size(), untextured);
+    if (untextured != 0)
+    {
+        // Name a few so the gap is diagnosable rather than just white.
+        std::size_t named = 0;
+        everyBatch([&](std::vector<render::MeshInstances> &list) {
+            for (const render::MeshInstances &batch : list)
             {
                 for (std::size_t element = 0; element < batch.textures.size() && named < 6; ++element)
                 {
                     if (batch.textures[element] != nullptr)
                         continue;
                     const std::string &material = batch.mesh->elements[element].materialName;
-                    std::printf("    no texture for %s\n", material.empty() ? "(no material named)" : material.c_str());
+                    std::printf("    no texture for %s\n",
+                                material.empty() ? "(no material named)" : material.c_str());
                     ++named;
                 }
-                if (named >= 6)
-                    break;
             }
-        }
+        });
     }
 
     render::Window window("Genome runtime - world", 1280, 720);
@@ -962,16 +1080,15 @@ int main(int argc, char **argv)
     // baking our own is both easier and more correct.
     render::TreeAtlas treeAtlas;
     genome::Image treeAtlasImage;
-    if (!treeFullDetail.empty())
+    std::vector<std::unique_ptr<genome::Mesh>> billboardMeshes;
+    if (!treeKinds.empty())
     {
         std::vector<render::MeshInstances> bakeBatches;
         std::vector<std::size_t> bakeOrder;
-        for (std::size_t slot : treeFullDetail)
+        for (const std::string &kind : treeKinds)
         {
             render::MeshInstances one;
-            one.mesh = batches[slot].mesh;
-            one.textures = batches[slot].textures;
-            one.alphaTested = batches[slot].alphaTested;
+            one.mesh = treeMeshOf[kind][0];
             one.transforms.push_back(c_Identity);
             // The mesh sits at the origin, so its own bounds fit the camera.
             std::array<float, 6> box{1e9f, 1e9f, 1e9f, -1e9f, -1e9f, -1e9f};
@@ -986,6 +1103,7 @@ int main(int argc, char **argv)
             bakeOrder.push_back(bakeBatches.size());
             bakeBatches.push_back(std::move(one));
         }
+        resolveTextures(bakeBatches);
 
         render::WorldRenderer baker;
         if (baker.create(device, bakeBatches, &error) &&
@@ -994,44 +1112,52 @@ int main(int argc, char **argv)
         {
             std::printf("baked %zu tree billboards into a %ux%u atlas\n", treeAtlas.cells.size(), treeAtlas.size,
                         treeAtlas.size);
-            std::size_t billboardInstances = 0;
 
-            auto quad = std::make_unique<genome::Mesh>();
-            genome::MeshElement element;
-            element.positions = {{-0.5f, 0.0f, 0.0f}, {0.5f, 0.0f, 0.0f}, {0.5f, 1.0f, 0.0f}, {-0.5f, 1.0f, 0.0f}};
-            element.normals = {{0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}};
-            element.indices = {0, 1, 2, 0, 2, 3};
-            element.materialName = "tree billboard";
-            quad->elements.push_back(std::move(element));
-
-            for (std::size_t index = 0; index < treeFullDetail.size(); ++index)
+            // One quad per kind, with that kind's cell baked into its texture
+            // coordinates. Every sector that planted this kind of tree points
+            // at the same quad, so the renderer keeps them in one batch.
+            std::map<std::string, genome::Mesh *> cardOf;
+            for (std::size_t index = 0; index < treeKinds.size() && index < treeAtlas.cells.size(); ++index)
             {
-                const std::size_t slot = treeFullDetail[index];
                 const std::array<float, 4> &cell = treeAtlas.cells[index];
-
-                // One quad per definition, with that definition's cell baked
-                // into its texture coordinates.
                 auto mesh = std::make_unique<genome::Mesh>();
-                genome::MeshElement card = quad->elements.front();
+                genome::MeshElement card;
+                card.positions = {{-0.5f, 0.0f, 0.0f}, {0.5f, 0.0f, 0.0f}, {0.5f, 1.0f, 0.0f}, {-0.5f, 1.0f, 0.0f}};
+                card.normals = {{0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}};
+                card.indices = {0, 1, 2, 0, 2, 3};
+                card.materialName = "tree billboard";
                 card.texCoords = {{cell[0], cell[3]}, {cell[2], cell[3]}, {cell[2], cell[1]}, {cell[0], cell[1]}};
                 mesh->elements.push_back(std::move(card));
+                cardOf.emplace(treeKinds[index], mesh.get());
+                billboardMeshes.push_back(std::move(mesh));
+            }
 
-                render::MeshInstances billboard;
-                billboard.mesh = mesh.get();
-                billboard.textures.push_back(&treeAtlasImage);
-                billboard.alphaTested.push_back(1);
-                billboard.faceCamera = true;
-                billboard.occludes = false;
-                billboard.lodNear = treeBillboardDistance;
-                billboard.transforms = batches[slot].transforms;
-                billboard.bounds = batches[slot].bounds;
-                billboardInstances += billboard.transforms.size();
-                batches.push_back(std::move(billboard));
-                ownedMeshes.push_back(std::move(mesh));
+            std::size_t billboardInstances = 0;
+            for (SectorContent &content : residentSectors)
+            {
+                const std::size_t before = content.batches.size();
+                for (const auto &[kind, slot] : content.treeSlots)
+                {
+                    const auto card = cardOf.find(kind);
+                    if (card == cardOf.end() || slot >= before)
+                        continue;
 
-                // The thinned tree now ends where the billboard begins.
-                if (slot + 1 < batches.size())
-                    batches[slot + 1].lodFar = treeBillboardDistance;
+                    render::MeshInstances billboard;
+                    billboard.mesh = card->second;
+                    billboard.textures.push_back(&treeAtlasImage);
+                    billboard.alphaTested.push_back(1);
+                    billboard.faceCamera = true;
+                    billboard.occludes = false;
+                    billboard.lodNear = treeBillboardDistance;
+                    billboard.transforms = content.batches[slot].transforms;
+                    billboard.bounds = content.batches[slot].bounds;
+                    billboardInstances += billboard.transforms.size();
+                    content.batches.push_back(std::move(billboard));
+
+                    // The thinned tree now ends where the billboard begins.
+                    if (slot + 1 < before)
+                        content.batches[slot + 1].lodFar = treeBillboardDistance;
+                }
             }
             std::printf("billboards cover %zu tree instances beyond %.0f units\n", billboardInstances,
                         treeBillboardDistance);
@@ -1064,6 +1190,8 @@ int main(int argc, char **argv)
     // zeros - so the lighting was not wrong, it was absent, and every attempt to
     // change it changed nothing at all.
     render::WorldRenderer renderer;
+    for (const SectorContent &content : residentSectors)
+        worldLights.insert(worldLights.end(), content.lights.begin(), content.lights.end());
     renderer.setLights(worldLights);
     renderer.setLightmaps(std::move(lightmapColours));
     renderer.setLightmapDirections(std::move(lightmapIncident));
@@ -1072,10 +1200,60 @@ int main(int argc, char **argv)
     renderer.setLightmapAtlas(&patchAtlas.image);
 
     const auto rendererStart = now();
-    if (!renderer.create(device, batches, &error))
+
+    // What the arenas are built to hold. Measured from what is loaded, with
+    // room to spare when sectors will be coming and going: an arrival has to
+    // land somewhere before the departure that makes room for it.
+    render::WorldRenderer::Budget budget;
+    {
+        std::size_t budgetVertices = 0, budgetIndices = 0, budgetInstances = 0, budgetLit = 0;
+        std::set<const genome::Mesh *> counted;
+        everyBatch([&](std::vector<render::MeshInstances> &list) {
+            for (const render::MeshInstances &batch : list)
+            {
+                budgetInstances += batch.transforms.size();
+                if (!batch.mesh || !counted.insert(batch.mesh).second)
+                    continue;
+                for (const genome::MeshElement &element : batch.mesh->elements)
+                {
+                    if (element.positions.empty() || element.indices.empty())
+                        continue;
+                    budgetVertices += element.positions.size();
+                    budgetIndices += element.indices.size();
+                }
+            }
+        });
+        for (const SectorContent &content : residentSectors)
+            budgetLit += content.lighting.colours.size();
+
+        const double room = streaming ? 2.0 : 1.02;
+        budget.vertices = std::size_t(double(budgetVertices) * room) + 4096;
+        budget.indices = std::size_t(double(budgetIndices) * room) + 4096;
+        budget.lightVertices = std::size_t(double(budgetLit) * room) + 4096;
+        budget.instances = std::size_t(double(budgetInstances) * room) + 4096;
+    }
+
+    if (!renderer.create(device, budget, &error))
     {
         std::cerr << "renderer: " << error << "\n";
         return 1;
+    }
+
+    // Sector zero is everything that is not a sector - the landscape, and a
+    // single tree when one was asked for - and it never leaves. The rest go in
+    // one at a time, by exactly the call an arrival will use later.
+    if (!batches.empty() && !renderer.addSector(device, 0, batches, {}, &error))
+    {
+        std::cerr << "renderer: " << error << "\n";
+        return 1;
+    }
+    for (SectorContent &content : residentSectors)
+    {
+        if (!renderer.addSector(device, content.id, content.batches, content.lighting, &error))
+        {
+            std::cerr << "renderer: " << error << "\n";
+            return 1;
+        }
     }
     renderer.reportArenas();
     if (const char *dump = std::getenv("G3_DUMP_ATLAS"))
