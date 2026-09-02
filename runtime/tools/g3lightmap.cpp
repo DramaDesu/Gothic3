@@ -115,6 +115,10 @@ int main(int argc, char **argv)
     std::size_t totalLight = 0, totalSky = 0, litVertices = 0;
     // Whether every bitmap really is four bytes a texel.
     std::size_t sized = 0, oddlySized = 0;
+    // How big a patch gets, which decides whether a fixed-tile atlas allocator
+    // can hold every one of them.
+    std::int32_t widest = 0, tallest = 0;
+    std::size_t over64 = 0, over128 = 0, over256 = 0;
     std::map<std::string, std::size_t> reasons;
     for (const genome::PakEntry &entry : archive->entries())
     {
@@ -146,6 +150,11 @@ int main(int argc, char **argv)
             {
                 if (bitmap.data.empty())
                     continue;
+                widest = std::max(widest, bitmap.width);
+                tallest = std::max(tallest, bitmap.height);
+                over64 += (bitmap.width > 64 || bitmap.height > 64) ? 1 : 0;
+                over128 += (bitmap.width > 128 || bitmap.height > 128) ? 1 : 0;
+                over256 += (bitmap.width > 256 || bitmap.height > 256) ? 1 : 0;
                 if (bitmap.data.size() == std::size_t(bitmap.width) * bitmap.height * 4)
                     ++sized;
                 else
@@ -158,6 +167,8 @@ int main(int argc, char **argv)
     std::printf("%zu lit vertices, %zu instances lit by bitmaps as well, %zu bitmaps in all\n", vertices, mixed,
                 bitmaps);
     std::printf("%zu bitmaps are four bytes a texel, %zu are not\n", sized, oddlySized);
+    std::printf("widest patch %d, tallest %d; %zu over 64, %zu over 128, %zu over 256\n", widest, tallest, over64,
+                over128, over256);
     if (vertices != 0)
         std::printf("mean baked light %.1f of 255, mean sky %.1f of 255, %.1f%% of vertices carry any light\n",
                     double(totalLight) / double(vertices), double(totalSky) / double(vertices),

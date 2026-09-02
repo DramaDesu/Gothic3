@@ -112,9 +112,27 @@ struct PatchAtlas
     // 19046 patches at sixteen cells.
     static constexpr std::uint32_t c_Size = 4096;
 
+    // Shelf packing laid the resident set's patches - which cover 14.7% of the
+    // atlas - across 3420 of its 4096 rows: five and a half times the room they
+    // need, because a shelf is as tall as the tallest thing on it and runs the
+    // full width. A tile wastes only inside itself. It is also the unit a
+    // sector can give back when it leaves, which a shelf never was.
+    //
+    // 128 because a patch is nearly always smaller: of the 203884 patches in
+    // the game 1377 are wider than 64, 35 wider than 128 and 3 wider than 256.
+    // The rare big one takes a rectangle of tiles.
+    static constexpr std::uint32_t c_Tile = 128;
+    static constexpr std::uint32_t c_Grid = c_Size / c_Tile;
+
     genome::Image image;
-    std::uint32_t shelfY = 0, shelfHeight = 0, penX = 0;
+    std::vector<char> taken = std::vector<char>(std::size_t(c_Grid) * c_Grid, 0);
+    std::size_t tilesTaken = 0;
     std::size_t packed = 0, refused = 0;
+    std::size_t texels = 0, widest = 0, tallest = 0;
+
+    // The tile currently being filled, shelf by shelf inside its 128 squares.
+    bool hasTile = false;
+    std::uint32_t tileX = 0, tileY = 0, penX = 0, shelfY = 0, shelfHeight = 0;
 
     PatchAtlas()
     {
@@ -127,6 +145,44 @@ struct PatchAtlas
         image.faceStride = std::uint32_t(image.data.size());
     }
 
+    // A free rectangle of tiles, top-left first. One tile is the common case
+    // and the scan finds it immediately.
+    bool takeTiles(std::uint32_t wide, std::uint32_t tall, std::uint32_t &outX, std::uint32_t &outY)
+    {
+        if (wide > c_Grid || tall > c_Grid)
+            return false;
+        for (std::uint32_t y = 0; y + tall <= c_Grid; ++y)
+            for (std::uint32_t x = 0; x + wide <= c_Grid; ++x)
+            {
+                bool free = true;
+                for (std::uint32_t dy = 0; dy < tall && free; ++dy)
+                    for (std::uint32_t dx = 0; dx < wide && free; ++dx)
+                        free = taken[std::size_t(y + dy) * c_Grid + x + dx] == 0;
+                if (!free)
+                    continue;
+                for (std::uint32_t dy = 0; dy < tall; ++dy)
+                    for (std::uint32_t dx = 0; dx < wide; ++dx)
+                        taken[std::size_t(y + dy) * c_Grid + x + dx] = 1;
+                tilesTaken += std::size_t(wide) * tall;
+                outX = x;
+                outY = y;
+                return true;
+            }
+        return false;
+    }
+
+    void blit(const genome::LightmapBitmap &bitmap, std::uint32_t x, std::uint32_t y)
+    {
+        const std::uint32_t width = std::uint32_t(bitmap.width), height = std::uint32_t(bitmap.height);
+        for (std::uint32_t row = 0; row < height; ++row)
+            std::memcpy(&image.data[(std::size_t(y + row) * c_Size + x) * 4],
+                        &bitmap.data[std::size_t(row) * width * 4], std::size_t(width) * 4);
+        texels += std::size_t(width) * height;
+        widest = std::max(widest, std::size_t(width));
+        tallest = std::max(tallest, std::size_t(height));
+        ++packed;
+    }
+
     // Returns false when the atlas is full; the caller then leaves that patch
     // unlit rather than drawing someone else's light.
     bool place(const genome::LightmapBitmap &bitmap, std::uint32_t &outX, std::uint32_t &outY)
@@ -135,28 +191,57 @@ struct PatchAtlas
         if (width == 0 || height == 0 || width > c_Size || height > c_Size)
             return false;
 
-        if (penX + width > c_Size)
+        if (width > c_Tile || height > c_Tile)
         {
-            penX = 0;
-            shelfY += shelfHeight;
-            shelfHeight = 0;
-        }
-        if (shelfY + height > c_Size)
-        {
-            ++refused;
-            return false;
+            // Its own rectangle of tiles, and no shelf kept: there are 35 of
+            // these in the game and chasing the offcuts is not worth it.
+            std::uint32_t tx = 0, ty = 0;
+            if (!takeTiles((width + c_Tile - 1) / c_Tile, (height + c_Tile - 1) / c_Tile, tx, ty))
+            {
+                ++refused;
+                return false;
+            }
+            outX = tx * c_Tile;
+            outY = ty * c_Tile;
+            blit(bitmap, outX, outY);
+            return true;
         }
 
-        outX = penX;
-        outY = shelfY;
-        for (std::uint32_t row = 0; row < height; ++row)
-            std::memcpy(&image.data[(std::size_t(outY + row) * c_Size + outX) * 4],
-                        &bitmap.data[std::size_t(row) * width * 4], std::size_t(width) * 4);
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            if (!hasTile)
+            {
+                if (!takeTiles(1, 1, tileX, tileY))
+                {
+                    ++refused;
+                    return false;
+                }
+                hasTile = true;
+                penX = shelfY = shelfHeight = 0;
+            }
 
-        penX += width;
-        shelfHeight = std::max(shelfHeight, height);
-        ++packed;
-        return true;
+            if (penX + width > c_Tile)
+            {
+                penX = 0;
+                shelfY += shelfHeight;
+                shelfHeight = 0;
+            }
+            if (shelfY + height > c_Tile)
+            {
+                // This tile is full; the next patch starts a new one.
+                hasTile = false;
+                continue;
+            }
+
+            outX = tileX * c_Tile + penX;
+            outY = tileY * c_Tile + shelfY;
+            blit(bitmap, outX, outY);
+            penX += width;
+            shelfHeight = std::max(shelfHeight, height);
+            return true;
+        }
+        ++refused;
+        return false;
     }
 };
 
@@ -960,6 +1045,13 @@ int main(int argc, char **argv)
                 timeReadingSectors, timeMeshes, timeLightmaps, timeTrees);
     std::printf("%zu instances lit by a baked lightmap, %zu without one, %zu colours, %zu direction floats\n",
                 lightmapsFound, lightmapsMissing, lightmapColours.size(), lightmapIncident.size());
+    std::printf("patches cover %.1f%% of the atlas in %zu of %u tiles (%.0f%% of each used); widest %zu, "
+                "tallest %zu\n",
+                100.0 * double(patchAtlas.texels) / double(PatchAtlas::c_Size) / double(PatchAtlas::c_Size),
+                patchAtlas.tilesTaken, PatchAtlas::c_Grid * PatchAtlas::c_Grid,
+                100.0 * double(patchAtlas.texels) /
+                    double(std::max<std::size_t>(patchAtlas.tilesTaken, 1) * PatchAtlas::c_Tile * PatchAtlas::c_Tile),
+                patchAtlas.widest, patchAtlas.tallest);
     std::printf("%zu baked patches packed, %zu refused, %zu vertices given one; sizes match the charts %zu to %zu\n",
                 patchAtlas.packed, patchAtlas.refused, patchedVertices, sizeMatches, sizeMismatches);
     std::printf("baked patches %s the daylight where they cover\n",
