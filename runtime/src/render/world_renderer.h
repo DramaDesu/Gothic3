@@ -494,6 +494,7 @@ class WorldRenderer
     std::size_t m_tooSmall = 0;
     std::size_t m_rejectedWhole = 0, m_outsideView = 0, m_wrongLod = 0;
     std::ptrdiff_t m_unaccounted = 0;
+    bool m_toldAboutLostInstances = false;
     std::size_t m_occluded = 0;
     std::size_t m_submittedTriangles = 0;
     std::size_t m_submittedDraws = 0;

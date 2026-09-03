@@ -1703,6 +1703,10 @@ int main(int argc, char **argv)
     // paint over it mid-frame.
     std::vector<std::pair<std::uint64_t, std::vector<std::uint32_t>>> freedTiles;
     std::size_t sectorsArrived = 0, sectorsDeparted = 0, sectorsUnwanted = 0, sectorsRefused = 0;
+    // Kept apart from the arrivals: a refusal costs real milliseconds, and
+    // adding them to a total divided by the number of successes made arrivals
+    // look slower when none of them was.
+    float refusedCost = 0.0f;
     // Set whenever the resident set changes; the list is rebuilt once, before
     // the cull that reads it, rather than on each arrival and each departure.
     bool lightsStale = false;
@@ -1901,6 +1905,8 @@ int main(int argc, char **argv)
                         std::printf("warning: %s did not fit: %s\n", content.name.c_str(), error.c_str());
                         loader.giveBackTiles(std::move(content.tiles));
                         ++sectorsRefused;
+                        refusedCost += std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
+                                                                               arrivalStart).count();
                     }
                     else
                     {
@@ -1926,11 +1932,16 @@ int main(int argc, char **argv)
                         lightsStale = true;
                         residentSectors.push_back(std::move(content));
                         ++sectorsArrived;
+
+                        // Timed on this branch only. A refusal's milliseconds
+                        // used to land in a total divided by the number of
+                        // successes, which made arrivals look slower when none
+                        // of them was.
+                        const float cost = std::chrono::duration<float, std::milli>(
+                            std::chrono::steady_clock::now() - arrivalStart).count();
+                        worstArrival = std::max(worstArrival, cost);
+                        totalArrival += cost;
                     }
-                    const float cost = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
-                                                                                arrivalStart).count();
-                    worstArrival = std::max(worstArrival, cost);
-                    totalArrival += cost;
                 }
             }
         }
@@ -2169,7 +2180,8 @@ int main(int argc, char **argv)
                         std::printf("%zu sectors finished loading after the camera had left them\n",
                                     sectorsUnwanted);
                     if (sectorsRefused != 0)
-                        std::printf("%zu sectors did not fit and were put back\n", sectorsRefused);
+                        std::printf("%zu sectors did not fit and were put back, costing %.0f ms in all\n",
+                                    sectorsRefused, refusedCost);
                     std::printf("lights: %zu at the start, %zu now, %zu at the most\n", lightsAtStart, lightsNow,
                                 lightsMost);
                     std::printf("%zu transfers still in flight, %zu drains paid to keep the bound\n",

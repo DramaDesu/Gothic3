@@ -508,6 +508,20 @@ bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::v
                 *error = "the lighting arena is full; raise Budget::lightVertices";
             return false;
         }
+
+        // The base reaches the shader through a float - world.vert reads it as
+        // int(inRow0.w) and adds gl_VertexIndex - so it has to be
+        // integer-exact, and a float is exact only to 2^24. Past that an
+        // instance samples a neighbouring vertex's colour and patch
+        // coordinate, which is a quietly wrong picture. Say so instead.
+        constexpr std::size_t c_ExactInFloat = 1u << 24;
+        if (held.colourBase + held.colourCount > c_ExactInFloat)
+        {
+            m_lightmapArena.release(held.colourBase, held.colourCount);
+            if (error)
+                *error = "the baked light passed 2^24 vertices, which a float base cannot address exactly";
+            return false;
+        }
     }
 
     // From here the sector is a thing that can be dropped, so every failure
@@ -1589,18 +1603,29 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
         }
     }
 
+    m_cullPhases.lights = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
+                                                                   lightStart).count();
+    m_visibleInstances = visibleTotal;
+
     // Every instance loaded left the loop through exactly one exit, so the
     // buckets have to come to the total. If they do not, the parallel merge
-    // lost some - which is a stronger and much earlier signal than a screenshot
-    // that happens to differ.
+    // lost or doubled some - a stronger and much earlier signal than a
+    // screenshot that happens to differ. Checked after visibleTotal is in
+    // place: reading it before that line compared this frame's rejections
+    // against last frame's survivors, which is how this check first caught
+    // itself.
     const std::size_t accounted =
         m_visibleInstances + m_rejectedWhole + m_tooSmall + m_occluded + m_outsideView + m_wrongLod;
     m_unaccounted = std::ptrdiff_t(m_instanceCount) - std::ptrdiff_t(accounted);
     assert(m_unaccounted == 0 && "the cull lost instances: a bucket is missing or the merge dropped a thread");
-
-    m_cullPhases.lights = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
-                                                                   lightStart).count();
-    m_visibleInstances = visibleTotal;
+    if (m_unaccounted != 0 && !m_toldAboutLostInstances)
+    {
+        // assert is compiled out under NDEBUG, which is what everything here is
+        // measured in, so the check that matters most has to speak anyway.
+        m_toldAboutLostInstances = true;
+        std::printf("the cull did not account for %td of %zu instances; a bucket is missing or the merge is wrong\n",
+                    m_unaccounted, m_instanceCount);
+    }
 
     {
         // Its own scope: a zone names a local, so two in one scope collide.
