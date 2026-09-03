@@ -16,7 +16,9 @@
 //
 // Only the geometry is taken. Each blob also carries an OPCODE tree, which was
 // its acceleration structure; we build our own or hand the triangles to
-// something that does, so it is skipped.
+// something that does, so it is skipped. A hull carries its planes and edges
+// beside the triangles, and those are skipped for the same reason: any solver
+// worth using derives them from the points.
 
 #include <array>
 #include <cstdint>
@@ -32,6 +34,9 @@ struct CollisionPart
 {
     std::vector<std::array<float, 3>> positions;
     std::vector<std::uint32_t> indices; // three per triangle, into positions
+    // A hull can be given to a solver as a hull, which is cheaper and steadier
+    // than the same shape as loose triangles, so which it was is kept.
+    bool convex = false;
 };
 
 struct CollisionMesh

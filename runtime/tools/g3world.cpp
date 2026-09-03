@@ -501,6 +501,7 @@ int main(int argc, char **argv)
     std::unique_ptr<genome::PakArchive> collisionArchive;
     std::map<std::string, genome::Mesh *> collisionOf;
     std::size_t collisionFound = 0, collisionMissing = 0, collisionTriangles = 0;
+    std::vector<std::string> collisionMissingNames;
     const auto collisionFor = [&](const std::string &meshName) -> genome::Mesh * {
         if (!collisionArchive)
             return nullptr;
@@ -523,13 +524,30 @@ int main(int argc, char **argv)
         std::string ignored;
         genome::CollisionMesh cooked;
         genome::Mesh *made = nullptr;
-        bool have = genome::loadCollisionMesh(collisionArchive->read(bare + ".xnvmsh", &ignored), cooked, &ignored);
-        if (!have)
+
+        // Half the archive names collision after the mesh it belongs to and the
+        // other half appends _col, and the second half is where the walls and
+        // the floors are. There is a third naming with the scale baked into the
+        // name - _scx_0_6214_scy_1_0000_scz_1_0000 - because a cooked PhysX 2.x
+        // triangle mesh cannot be scaled at use. We apply the world matrix,
+        // scale included, so the unscaled mesh is the one to take.
+        bool have = false;
+        for (const char *suffix : {"", "_col", "_cv"})
         {
+            have = genome::loadCollisionMesh(collisionArchive->read(bare + suffix + ".xnvmsh", &ignored), cooked,
+                                             &ignored);
+            if (have)
+                break;
+        }
+        // Then the mesh archive, which carries 782 of its own.
+        for (const char *suffix : {"", "_col", "_cv"})
+        {
+            if (have)
+                break;
             std::string beside = meshName;
             const std::size_t swap = beside.find_last_of('.');
             if (swap != std::string::npos)
-                beside = beside.substr(0, swap) + ".xnvmsh";
+                beside = beside.substr(0, swap) + suffix + ".xnvmsh";
             have = genome::loadCollisionMesh(archive->read(beside, &ignored), cooked, &ignored);
         }
         if (have)
@@ -571,7 +589,11 @@ int main(int argc, char **argv)
             ++collisionFound;
         }
         else
+        {
             ++collisionMissing;
+            if (collisionMissingNames.size() < 12)
+                collisionMissingNames.push_back(bare);
+        }
 
         collisionOf.emplace(meshName, made);
         return made;
@@ -1284,8 +1306,12 @@ int main(int argc, char **argv)
             std::printf("%zu sectors, %zu objects placed, %zu meshes missing, %zu plants\n", sectors, placed,
                         missing, grass);
             if (collisionArchive)
+            {
                 std::printf("collision: %zu meshes found, %zu without one, %zu triangles placed\n",
                             collisionFound, collisionMissing, collisionTriangles);
+                for (const std::string &name : collisionMissingNames)
+                    std::printf("  no collision: %s\n", name.c_str());
+            }
             if (planted != 0 || missingTrees != 0)
                 std::printf("%zu trees planted from %zu grown kinds, %zu definitions missing\n", planted,
                             treeKinds.size(), missingTrees);

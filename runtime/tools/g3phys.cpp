@@ -124,9 +124,7 @@ int main(int argc, char **argv)
             if (reasons.size() < 12)
                 ++reasons[error];
 
-            // A convex hull is a different shape, not a failed reading, and
-            // counting it as one made a clean split look like a reader that
-            // half worked.
+            // Which kind it was, so that a failure says what it failed on.
             const genome::CollisionKind kind = genome::collisionKind(raw);
             const char *carries = kind == genome::CollisionKind::ConvexHull ? "a convex hull"
                                   : kind == genome::CollisionKind::TriangleMesh
@@ -135,10 +133,11 @@ int main(int argc, char **argv)
             ++carried[carries];
             if (firstOfKind.find(carries) == firstOfKind.end())
                 firstOfKind[carries] = entry.path;
-            hulls += kind == genome::CollisionKind::ConvexHull ? 1 : 0;
             continue;
         }
         ++parsed;
+        // A file is one shape or the other, so its first part says which.
+        hulls += mesh.parts.front().convex ? 1 : 0;
         parts += mesh.parts.size();
         vertices += mesh.vertexCount();
         const std::size_t count = mesh.triangleCount();
@@ -222,8 +221,8 @@ int main(int argc, char **argv)
         }
     }
 
-    std::printf("%zu triangle meshes read, %zu convex hulls not read yet, %zu neither\n", parsed, hulls,
-                failed - hulls);
+    std::printf("%zu triangle meshes, %zu convex hulls, %zu that would not read\n", parsed - hulls, hulls,
+                failed);
     std::printf("%zu parts, %zu vertices, %zu triangles in all\n", parts, vertices, triangles);
     if (!perFile.empty())
     {
@@ -246,6 +245,5 @@ int main(int argc, char **argv)
         std::printf("  %-32s %5zu   e.g. %s\n", what.c_str(), count, firstOfKind[what].c_str());
     for (const auto &[reason, count] : reasons)
         std::printf("  %5zu  %s\n", count, reason.c_str());
-    // Hulls are a kind, not a fault, so only the third bucket is a failure.
-    return failed == hulls ? 0 : 1;
+    return failed == 0 ? 0 : 1;
 }

@@ -42,6 +42,20 @@ const std::uint8_t *findSignature(const std::uint8_t *from, const std::uint8_t *
     return findTag(from, end, "MESH");
 }
 
+// The hull chunks are stamped ICE, not NXS: the file is a NovodeX container
+// holding a chunk of ICE, the geometry library PhysX 2.x was built on. The
+// pointer returned is to the tag itself rather than to the stamp, because
+// everything in the chunk is placed relative to the tag.
+const std::uint8_t *findIceTag(const std::uint8_t *from, const std::uint8_t *end, const char *tag)
+{
+    for (const std::uint8_t *at = from; at + 8 <= end; ++at)
+        if (at[0] == 'I' && at[1] == 'C' && at[2] == 'E' && at[4] == tag[0] && at[5] == tag[1] &&
+            at[6] == tag[2] && at[7] == tag[3])
+            return at + 4;
+    return nullptr;
+}
+
+
 std::uint32_t indexAt(const std::uint8_t *data, std::size_t at, unsigned width)
 {
     if (width == 1)
@@ -55,6 +69,127 @@ std::uint32_t indexAt(const std::uint8_t *data, std::size_t at, unsigned width)
     std::uint32_t value = 0;
     std::memcpy(&value, data + at * 4, 4);
     return value;
+}
+
+// The hull chunk, whose counts check each other. `why` is set and false
+// returned when they do not, because a hull that reads wrong is worse than one
+// that does not read: it collides with nothing in the right place.
+// The triangles of a hull, once its vertices and triangle count are known, and
+// the checks that say the reading is right. A hull triangulated into triangles
+// has two per corner less four, counting only the corners that are on it: the
+// crate group keeps 141 points of which 69 are corners and declares 134
+// triangles, which is 2*69 - 4. A reading from the wrong offset does not land
+// on a set of indices where that holds with nothing degenerate.
+bool readHullTriangles(const std::uint8_t *indices, std::size_t available, std::uint32_t vertices,
+                       std::uint32_t triangles, unsigned width, CollisionPart &part, const char **why)
+{
+    const std::size_t count = std::size_t(triangles) * 3;
+    if (available < count * width)
+        return *why = "a hull chunk's indices run past the end of the file", false;
+
+    part.indices.resize(count);
+    std::vector<bool> corner(vertices, false);
+    for (std::size_t which = 0; which < count; ++which)
+    {
+        part.indices[which] = indexAt(indices, which, width);
+        if (part.indices[which] >= vertices)
+            return *why = "a hull chunk names a vertex it does not have", false;
+        corner[part.indices[which]] = true;
+    }
+    for (std::size_t at = 0; at < count; at += 3)
+        if (part.indices[at] == part.indices[at + 1] || part.indices[at + 1] == part.indices[at + 2] ||
+            part.indices[at + 2] == part.indices[at])
+            return *why = "a hull chunk has a triangle that collapses to a line", false;
+
+    const std::size_t corners = std::size_t(std::count(corner.begin(), corner.end(), true));
+    if (corners < 4 || 2 * corners - 4 != triangles)
+        return *why = "a hull chunk's triangles do not close a solid over its corners", false;
+    return true;
+}
+
+bool readHull(const std::uint8_t *tag, const std::uint8_t *end, CollisionPart &part, const char **why)
+{
+    if (std::size_t(end - tag) < 8)
+        return *why = "a hull chunk is too short to hold a version", false;
+
+    std::uint32_t version = 0;
+    std::memcpy(&version, tag + 4, 4);
+
+    // Version 2 says only how many vertices and triangles it has, and puts the
+    // indices straight after the vertices with nothing to say how wide they
+    // are. One file in 6735 is this old, and leaving it unread would be a hole
+    // in a reader that otherwise covers the archive.
+    if (version == 2)
+    {
+        constexpr std::size_t c_OldVerticesAt = 16;
+        if (std::size_t(end - tag) < c_OldVerticesAt)
+            return *why = "a hull chunk is too short to hold its counts", false;
+
+        std::uint32_t vertices = 0, triangles = 0;
+        std::memcpy(&vertices, tag + 8, 4);
+        std::memcpy(&triangles, tag + 12, 4);
+        if (vertices < 4 || triangles < 4)
+            return *why = "a hull chunk has too few of something to be a solid", false;
+
+        const std::size_t positionBytes = std::size_t(vertices) * 12;
+        if (std::size_t(end - tag) < c_OldVerticesAt + positionBytes)
+            return *why = "a hull chunk's vertices run past the end of the file", false;
+
+        part.convex = true;
+        part.positions.resize(vertices);
+        std::memcpy(part.positions.data(), tag + c_OldVerticesAt, positionBytes);
+
+        const std::uint8_t *indices = tag + c_OldVerticesAt + positionBytes;
+        const std::size_t available = std::size_t(end - indices);
+        for (const unsigned width : {2u, 1u, 4u})
+        {
+            const char *ignored = "";
+            if (readHullTriangles(indices, available, vertices, triangles, width, part, &ignored))
+                return true;
+        }
+        return *why = "a hull chunk has no index width that reads as a solid", false;
+    }
+
+    constexpr std::size_t c_CountsAt = 8;   // past the tag and the version
+    constexpr std::size_t c_VerticesAt = 32; // past the tag, the version and six counts
+    if (std::size_t(end - tag) < c_VerticesAt)
+        return *why = "a hull chunk is too short to hold its counts", false;
+
+    std::uint32_t counts[6] = {};
+    std::memcpy(counts, tag + c_CountsAt, sizeof(counts));
+    const std::uint32_t vertices = counts[0], triangles = counts[1];
+    const std::uint32_t edges = counts[2], polygons = counts[3];
+    const std::uint32_t corners = counts[4], cornersAgain = counts[5];
+    if (vertices < 4 || triangles < 4 || polygons < 4)
+        return *why = "a hull chunk has too few of something to be a solid", false;
+    if (corners != cornersAgain)
+        return *why = "a hull chunk disagrees with itself about how many corners it has", false;
+
+    // A convex polyhedron satisfies Euler's formula, and triangulating each
+    // polygon turns its corners into corners - 2 triangles. Neither holds by
+    // accident, so together they say the counts were read from the right place.
+    if (vertices + polygons != edges + 2)
+        return *why = "a hull chunk is not a solid: Euler's formula does not hold", false;
+    if (corners < 2 * polygons || corners - 2 * polygons != triangles)
+        return *why = "a hull chunk's polygons do not triangulate to its triangles", false;
+
+    const std::size_t positionBytes = std::size_t(vertices) * 12;
+    if (std::size_t(end - tag) < c_VerticesAt + positionBytes + 4)
+        return *why = "a hull chunk's vertices run past the end of the file", false;
+
+    // The file says the highest index it uses, which is how wide they are.
+    std::uint32_t highest = 0;
+    std::memcpy(&highest, tag + c_VerticesAt + positionBytes, 4);
+    if (highest != vertices - 1)
+        return *why = "a hull chunk's highest index is not its last vertex", false;
+    const unsigned width = highest < 0x100 ? 1u : (highest < 0x10000 ? 2u : 4u);
+
+    part.convex = true;
+    part.positions.resize(vertices);
+    std::memcpy(part.positions.data(), tag + c_VerticesAt, positionBytes);
+
+    const std::uint8_t *indices = tag + c_VerticesAt + positionBytes + 4;
+    return readHullTriangles(indices, std::size_t(end - indices), vertices, triangles, width, part, why);
 }
 
 // How many of the triangles are real, at a given index width. A triangle whose
@@ -204,10 +339,22 @@ bool loadCollisionMesh(const std::vector<std::uint8_t> &bytes, CollisionMesh &ou
         out.parts.push_back(std::move(part));
     }
 
+    // Then the hulls. A file is one or the other in practice, but the loop is
+    // written the same way as the one above rather than as an else, because
+    // nothing in the format says a file cannot hold both.
+    at = bytes.data();
+    while (const std::uint8_t *tag = findIceTag(at, end, "CVHL"))
+    {
+        at = tag + 4;
+        CollisionPart part;
+        const char *why = "";
+        if (!readHull(tag, end, part, &why))
+            return fail(why);
+        out.parts.push_back(std::move(part));
+    }
+
     if (out.parts.empty())
-        return fail(collisionKind(bytes) == CollisionKind::ConvexHull
-                        ? "this is a convex hull, not a triangle mesh"
-                        : "no cooked shape found in the file");
+        return fail("no cooked shape found in the file");
     return true;
 }
 

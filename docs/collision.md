@@ -124,8 +124,83 @@ through the machinery that already exists; hiding it is the cull rejecting whole
 batches by that flag. With the archive loaded and the view off, the frame is
 1.56 ms against 1.60 - the same frame, and the difference is noise.
 
-**215 of the 435 placed meshes still find no collision mesh**, including the
-walls and the floor of the room above. They are found by name in
-`_compiledPhysic.pak` and the ones that miss are not there under the name the
-placement uses. That is the next thing to find, and until it is found the green
-in the picture is what exists rather than what the game has.
+The picture above was taken when 215 of the 435 placed objects still found no
+collision, which is why the walls and the floor are missing from it. That had
+two causes, and both are below.
+
+## The convex hulls
+
+2795 of the 6735 files are not triangle meshes at all. They are convex hulls,
+and they are everything the game lets you push about: crates, sacks, stumps,
+loose branches, helmets, weapons on the ground. The reader skipped them at
+first, which is why the first overlay had 215 objects with nothing.
+
+The hull chunk is stamped `ICE` rather than `NXS` - the file is a NovodeX
+container holding a chunk of ICE, the geometry library PhysX 2.x was built on -
+and searching for the `NXS` stamp is why they read as empty files rather than as
+anything wrong. After the `CVHL` tag come a version and six counts: vertices,
+triangles, edges, polygons, and the number of polygon corners written twice.
+Then the vertices, three floats each; then a value naming the highest index,
+which is what says whether the indices are one, two or four bytes wide; then
+three indices per triangle.
+
+Three of those counts are redundant, and that is exactly what makes them worth
+reading. A convex solid satisfies Euler's formula, so vertices plus polygons has
+to be edges plus two. Triangulating a polygon of n corners gives n - 2
+triangles, so the corner count less twice the polygon count has to be the
+triangle count. A chickenbox is 8 vertices, 12 edges, 6 polygons and 24 corners:
+8 - 12 + 6 = 2, and 24 - 12 = 12 triangles. It is a box, and it reads as one.
+A reading from the wrong offset does not satisfy either identity.
+
+**One file in 6735 is older.** `g3_object_crategroup_01_cv` is version 2, which
+says only how many vertices and triangles it has - no edges, no polygons, and no
+value naming the index width - so both of the checks above are gone. What
+replaces them is the same formula from the other side: a hull triangulated into
+triangles has 2V - 4 of them, counting only the corners that are on it. That
+file keeps 141 points of which 69 are corners, and declares 134 triangles, which
+is 2*69 - 4 exactly. The other 72 points are interior - it is a group of crates,
+and the hull over them needs only the outside. The width is found the way the
+triangle meshes find theirs: try each, keep the one that reads as a solid.
+
+With the hulls read, the reader covers the archive: **3940 triangle meshes,
+2795 convex hulls, nothing that will not read**, 8643 parts and 5.36 million
+triangles in all.
+
+## Three names for the same object
+
+The lookup was finding a fifth of what exists because it only tried one name.
+An object's collision is stored under its own name, or that name with `_col`,
+or that name with `_cv`, and the archive is split roughly in half between the
+first two:
+
+- `<name>.xnvmsh` and `<name>_col.xnvmsh` - triangle meshes, the things you
+  stand on and walk into. Walls and floors are all in the second form, which is
+  why the room had none.
+- `<name>_cv.xnvmsh` - the convex hull, for things that move.
+- `..._sc_1_4256` and `..._scx_0_6214_scy_1_0000_scz_1_0000` - the same shape
+  cooked again with a scale baked into the name, because a cooked PhysX 2.x mesh
+  cannot be scaled where it is used. We apply the world matrix, scale included,
+  so the unscaled one is the one to take and these are ignored.
+
+Trying `_col` took the test room from 220 objects with collision to 393; adding
+`_cv` took it to 408 of 435.
+
+![the collision alone](collision-alone.png)
+
+The same room with the world hidden. Every surface a player would touch is
+there - the walls, the floor, the ceiling beams, the arch of the oven - and it
+is a far cheaper mesh than what is drawn over it.
+
+## What has none, and whether that is right
+
+The 27 that remain are not a gap. They are mushrooms, spiderweb decals,
+waterfalls and the river meshes - decoration and water, which the game gives no
+collision because you walk through them. Checked against the archive: there is
+no `g3_object_mushroom_01` under any of the three names. The dungeon spiderwebs
+that do have collision are level geometry, a different asset from the decal.
+
+**Trees are a real gap.** They are planted through the Speedtree path rather
+than as placements, so the name lookup never runs for them and nothing in the
+forest collides. That is the next thing to find, and it is a different question
+- a tree's collision in this engine is likely a shape in its own definition
+rather than a cooked mesh in an archive.
