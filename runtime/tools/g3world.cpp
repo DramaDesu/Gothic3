@@ -569,6 +569,7 @@ int main(int argc, char **argv)
     float occlusionPixels = 0.0f;
     // Nought draws with the interpolated normal, one with the mapped one.
     float normalStrength = 1.0f;
+    float specularStrength = 1.0f, specularPower = 32.0f;
     // Runs the cull several times a frame. The cost of the extra passes is the
     // warm-cache cost; the difference from the first is what the memory costs.
     int cullRepeat = 1;
@@ -652,6 +653,11 @@ int main(int argc, char **argv)
             cullRepeat = std::max(1, std::atoi(argv[index + 1]));
         if (std::string(argv[index]) == "--normal-strength" && hasValue)
             normalStrength = float(std::atof(argv[index + 1]));
+        if (std::string(argv[index]) == "--specular" && index + 2 < argc)
+        {
+            specularStrength = float(std::atof(argv[index + 1]));
+            specularPower = float(std::atof(argv[index + 2]));
+        }
         if (std::string(argv[index]) == "--occlusion-pixels" && hasValue)
             occlusionPixels = float(std::atof(argv[index + 1]));
         if (std::string(argv[index]) == "--stream")
@@ -1233,10 +1239,19 @@ int main(int argc, char **argv)
     // archive is a number about the archive; this one is about the scene.
     std::size_t materialsSeen = 0, materialsWithNormal = 0, normalsMissing = 0;
     std::size_t normalsSwizzled = 0, normalsPlain = 0, normalsOdd = 0;
+    // What else the materials offer, and which shader classes they are, before
+    // anything is built on top of them.
+    std::map<std::string, std::size_t> slotsNamed, shaderClasses;
+    std::set<std::string> specularSeen;
+    std::size_t specularGrey = 0, specularColoured = 0, specularAlphaUsed = 0;
+    std::size_t specularIsDiffuse = 0, specularIsOwn = 0;
     // Per material name, the normal map it resolved to. Kept beside the diffuse
     // cache rather than inside it because a material can name one without the
     // other.
     std::map<std::string, const genome::Image *> normalOf;
+    // And per material, the specular map - which three times in four is the
+    // diffuse image again, bound a second time rather than copied.
+    std::map<std::string, const genome::Image *> specularOf;
     // Which materials throw away transparent pixels, remembered per name so
     // the answer survives the texture cache.
     std::map<std::string, bool> masked;
@@ -1261,6 +1276,7 @@ int main(int argc, char **argv)
         // and misalign every element index against the mesh.
         batch.textures.clear();
         batch.normals.clear();
+        batch.speculars.clear();
         batch.alphaTested.clear();
         for (const genome::MeshElement &element : batch.mesh->elements)
         {
@@ -1308,6 +1324,79 @@ int main(int argc, char **argv)
                     // channel at face value punches holes through stone.
                     masked.emplace(element.materialName, material.blendMode == genome::BlendMode::Masked);
                     ++materialsSeen;
+                    ++shaderClasses[material.shaderClass.empty() ? std::string("(none)")
+                                                                 : material.shaderClass];
+                    for (std::size_t which = 0; which < genome::c_SlotCount; ++which)
+                    {
+                        const genome::Slot slot = genome::Slot(which);
+                        const genome::Sampler *sampler = material.texture(slot);
+                        if (!sampler)
+                            continue;
+                        const genome::TextureResolution named = genome::resolveTexture(*sampler, 0, exists);
+                        ++slotsNamed[std::string(genome::slotName(slot)) +
+                                     (named.fileName.empty() ? " (missing)" : "")];
+
+                        // What a specular map actually holds: grey or coloured,
+                        // and whether the alpha is doing anything.
+                        // How often the specular slot just names the diffuse
+                        // again: if it usually does, a third texture binding
+                        // would mostly be a second copy of the first.
+                        if (slot == genome::Slot::Specular && !named.fileName.empty())
+                        {
+                            const genome::Sampler *diffuseSampler = material.texture(genome::Slot::Diffuse);
+                            const std::string diffuseFile =
+                                diffuseSampler ? genome::resolveTexture(*diffuseSampler, 0, exists).fileName
+                                               : std::string();
+                            if (named.fileName == diffuseFile)
+                                ++specularIsDiffuse;
+                            else
+                                ++specularIsOwn;
+                        }
+                        if (slot == genome::Slot::Specular && !named.fileName.empty() &&
+                            specularSeen.insert(named.fileName).second)
+                        {
+                            genome::Image probe;
+                            std::vector<std::uint8_t> decoded;
+                            if (genome::loadImage(imageArchive->read(named.fileName, &ignored), probe, &ignored) &&
+                                genome::decodeLevel(probe, 0, 0, decoded, &ignored))
+                            {
+                                std::uint8_t low[4] = {255, 255, 255, 255};
+                                std::uint8_t high[4] = {0, 0, 0, 0};
+                                double sums[4] = {0, 0, 0, 0};
+                                std::size_t coloured = 0;
+                                const std::size_t texels = decoded.size() / 4;
+                                for (std::size_t at = 0; at < texels; ++at)
+                                {
+                                    for (int channel = 0; channel < 4; ++channel)
+                                    {
+                                        const std::uint8_t value = decoded[at * 4 + channel];
+                                        low[channel] = std::min(low[channel], value);
+                                        high[channel] = std::max(high[channel], value);
+                                        sums[channel] += value;
+                                    }
+                                    const int spread = std::max({decoded[at * 4], decoded[at * 4 + 1],
+                                                                 decoded[at * 4 + 2]}) -
+                                                       std::min({decoded[at * 4], decoded[at * 4 + 1],
+                                                                 decoded[at * 4 + 2]});
+                                    coloured += spread > 16 ? 1 : 0;
+                                }
+                                if (texels != 0)
+                                {
+                                    specularGrey += coloured * 20 < texels ? 1 : 0;
+                                    specularColoured += coloured * 20 >= texels ? 1 : 0;
+                                    specularAlphaUsed += high[3] - low[3] > 32 ? 1 : 0;
+                                    if (specularSeen.size() <= 4)
+                                        std::printf("specular %s: r %3.0f [%3u..%3u] g %3.0f [%3u..%3u] "
+                                                    "b %3.0f [%3u..%3u] a %3.0f [%3u..%3u], %.0f%% coloured\n",
+                                                    named.fileName.c_str(), sums[0] / double(texels), low[0],
+                                                    high[0], sums[1] / double(texels), low[1], high[1],
+                                                    sums[2] / double(texels), low[2], high[2],
+                                                    sums[3] / double(texels), low[3], high[3],
+                                                    100.0 * double(coloured) / double(texels));
+                                }
+                            }
+                        }
+                    }
                     if (const genome::Sampler *bump = material.texture(genome::Slot::Normal))
                     {
                         const genome::TextureResolution resolvedBump = genome::resolveTexture(*bump, 0, exists);
@@ -1376,6 +1465,30 @@ int main(int argc, char **argv)
                             }
                         }
                     }
+                    if (const genome::Sampler *shine = material.texture(genome::Slot::Specular))
+                    {
+                        const genome::TextureResolution resolvedShine = genome::resolveTexture(*shine, 0, exists);
+                        if (!resolvedShine.fileName.empty())
+                        {
+                            const auto already = imageOfFile.find(resolvedShine.fileName);
+                            if (already != imageOfFile.end())
+                                specularOf.emplace(element.materialName, already->second);
+                            else
+                            {
+                                auto image = std::make_unique<genome::Image>();
+                                const genome::Image *loadedShine = nullptr;
+                                if (genome::loadImage(imageArchive->read(resolvedShine.fileName, &ignored), *image,
+                                                      &ignored))
+                                {
+                                    loadedShine = image.get();
+                                    images.push_back(std::move(image));
+                                }
+                                imageOfFile.emplace(resolvedShine.fileName, loadedShine);
+                                specularOf.emplace(element.materialName, loadedShine);
+                            }
+                        }
+                    }
+
                     if (material.kind == genome::ShaderKind::Water)
                         loaded = waterImage;
                     else if (const genome::Sampler *sampler = material.texture(genome::Slot::Diffuse))
@@ -1405,6 +1518,8 @@ int main(int argc, char **argv)
             batch.textures.push_back(loaded);
             const auto bumped = normalOf.find(element.materialName);
             batch.normals.push_back(bumped != normalOf.end() ? bumped->second : nullptr);
+            const auto shone = specularOf.find(element.materialName);
+            batch.speculars.push_back(shone != specularOf.end() ? shone->second : nullptr);
             const auto isMasked = masked.find(element.materialName);
             batch.alphaTested.push_back(isMasked != masked.end() && isMasked->second ? 1 : 0);
         }
@@ -1425,6 +1540,16 @@ int main(int argc, char **argv)
                 materialsSeen, materialsWithNormal, normalsMissing);
     std::printf("of those normal maps %zu are swizzled (x in alpha), %zu plain rgb, %zu neither\n",
                 normalsSwizzled, normalsPlain, normalsOdd);
+    std::printf("what the materials name:\n");
+    for (const auto &[slot, count] : slotsNamed)
+        std::printf("    %-24s %zu\n", slot.c_str(), count);
+    std::printf("specular maps: %zu distinct, %zu greyscale, %zu coloured, %zu with a varying alpha\n",
+                specularSeen.size(), specularGrey, specularColoured, specularAlphaUsed);
+    std::printf("the specular slot names the diffuse again %zu times and its own file %zu times\n",
+                specularIsDiffuse, specularIsOwn);
+    std::printf("shader classes in front of the camera:\n");
+    for (const auto &[name, count] : shaderClasses)
+        std::printf("    %-40s %zu\n", name.c_str(), count);
     if (untextured != 0)
     {
         // Name a few so the gap is diagnosable rather than just white.
@@ -1621,6 +1746,7 @@ int main(int argc, char **argv)
     renderer.setLights(worldLights);
     renderer.setOcclusionThreshold(occlusionPixels);
     renderer.setNormalStrength(normalStrength);
+    renderer.setSpecular(specularStrength, specularPower);
     if (cullThreads > 0)
         renderer.setCullThreads(unsigned(cullThreads));
     // Jitter sets the grain to one itself, so an explicit grain is applied

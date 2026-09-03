@@ -12,12 +12,19 @@ layout(push_constant) uniform Push
     // Zero draws with the interpolated normal, one with the mapped one. A knob
     // so that the same binary can be compared against itself.
     float normalStrength;
+    float specularStrength;
+    float specularPower;
+    // Where the camera is, for the halfway vector.
+    vec4 eye;
 }
 push;
 
 layout(set = 0, binding = 0) uniform sampler2D diffuseMap;
 // The material's normal map, or a flat one where it names none.
 layout(set = 0, binding = 1) uniform sampler2D normalMap;
+// The specular map. In three materials out of four this is the diffuse image
+// again, bound a second time rather than copied.
+layout(set = 0, binding = 2) uniform sampler2D specularMap;
 
 // The lights nearest the camera, chosen per frame. count sits in x; the rest of
 // the first vector is spare.
@@ -119,6 +126,21 @@ void main()
     }
 
     lit += sampled.rgb * baked;
+
+    // A highlight where the map says there is one. There is no specular power
+    // in this data, so the exponent is a choice; the map is dark almost
+    // everywhere, with means of 13 to 32 of 255, so this is a glint on wet
+    // stone and metal rather than a sheen on everything.
+    if (push.specularStrength > 0.0)
+    {
+        // Blinn: the halfway vector between the sun and the eye. The eye
+        // position comes down in a push constant because the fragment stage has
+        // no other way to know where it is.
+        vec3 toEye = normalize(push.eye.xyz - inWorld);
+        vec3 halfway = normalize(normalize(push.lightDirection.xyz) + toEye);
+        float shine = pow(max(dot(normal, halfway), 0.0), push.specularPower);
+        lit += texture(specularMap, inTexCoord).rgb * shine * push.specularStrength * inSky;
+    }
 
     // The game's own tone curve, from its shipped ip_hdri.fx and the defaults in
     // ge3.INI: Render.HDRExposure 2.85 and Render.HDRGamma 0.60. Without it a

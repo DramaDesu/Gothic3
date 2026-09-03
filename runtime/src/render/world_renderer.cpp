@@ -25,6 +25,9 @@ struct PushConstants
     std::array<float, 4> light;
     float alphaTested = 0.0f;    // per draw, not per frame
     float normalStrength = 1.0f; // per frame
+    float specularStrength = 1.0f;
+    float specularPower = 32.0f;
+    std::array<float, 4> eye{};
 };
 
 std::vector<char> readFile(const std::string &path)
@@ -140,8 +143,8 @@ bool WorldRenderer::create(Device &device, const Budget &budget, std::string *er
         return false;
 
     // Binding 0 the diffuse, binding 1 the normal map.
-    VkDescriptorSetLayoutBinding bindings[2]{};
-    for (int at = 0; at < 2; ++at)
+    VkDescriptorSetLayoutBinding bindings[3]{};
+    for (int at = 0; at < 3; ++at)
     {
         bindings[at].binding = std::uint32_t(at);
         bindings[at].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -150,15 +153,15 @@ bool WorldRenderer::create(Device &device, const Budget &budget, std::string *er
     }
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = 2;
+    layoutInfo.bindingCount = 3;
     layoutInfo.pBindings = bindings;
     vkCreateDescriptorSetLayout(device.device(), &layoutInfo, nullptr, &m_descriptorLayout);
 
     // Sets are handed out as textures turn up rather than counted first, so the
     // pool is sized by the budget.
     const std::uint32_t setCount = budget.textures + 1;
-    // Two images a set now.
-    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, setCount * 2};
+    // Three images a set now: diffuse, normal, specular.
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, setCount * 3};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     // Without this the spec forbids freeing a set back to the pool at all -
     // only vkResetDescriptorPool, which would invalidate every set at once.
@@ -175,7 +178,12 @@ bool WorldRenderer::create(Device &device, const Budget &budget, std::string *er
     if (!createTexture(device, flat, false, m_flatNormal, error))
         return false;
 
-    m_whiteSet = acquireMaterial(device, nullptr, nullptr, error);
+    // Black: a material naming no specular map gets no highlight.
+    const genome::Image dark = solidImage(0, 0, 0, 255);
+    if (!createTexture(device, dark, true, m_noSpecular, error))
+        return false;
+
+    m_whiteSet = acquireMaterial(device, nullptr, nullptr, nullptr, error);
     if (!m_whiteSet)
         return false;
 
@@ -202,12 +210,13 @@ Texture *WorldRenderer::textureFor(Device &device, const genome::Image *image, b
 }
 
 VkDescriptorSet WorldRenderer::acquireMaterial(Device &device, const genome::Image *diffuse,
-                                               const genome::Image *normal, std::string *error)
+                                               const genome::Image *normal, const genome::Image *specular,
+                                               std::string *error)
 {
-    if (!diffuse && !normal && m_whiteSet)
+    if (!diffuse && !normal && !specular && m_whiteSet)
         return m_whiteSet;
 
-    const auto key = std::make_pair(diffuse, normal);
+    const MaterialKey key{diffuse, normal, specular};
     const auto existing = m_setOf.find(key);
     if (existing != m_setOf.end())
     {
@@ -230,7 +239,20 @@ VkDescriptorSet WorldRenderer::acquireMaterial(Device &device, const genome::Ima
         bump = textureFor(device, normal, false, error);
         if (!bump)
         {
-            releaseMaterial(diffuse, nullptr);
+            releaseMaterial(diffuse, nullptr, nullptr);
+            return VK_NULL_HANDLE;
+        }
+    }
+    // Where the slot named the diffuse again - which it does 109 times in 141 -
+    // this takes a second reference on the same image rather than a second copy
+    // of it.
+    Texture *shine = &m_noSpecular;
+    if (specular)
+    {
+        shine = textureFor(device, specular, true, error);
+        if (!shine)
+        {
+            releaseMaterial(diffuse, normal, nullptr);
             return VK_NULL_HANDLE;
         }
     }
@@ -250,15 +272,16 @@ VkDescriptorSet WorldRenderer::acquireMaterial(Device &device, const genome::Ima
             *error = allocated == VK_ERROR_FRAGMENTED_POOL
                          ? "the descriptor pool is fragmented; sets are being freed and remade too finely"
                          : "the descriptor pool is out of sets; raise Budget::textures";
-        releaseMaterial(diffuse, normal);
+        releaseMaterial(diffuse, normal, specular);
         return VK_NULL_HANDLE;
     }
 
-    const VkDescriptorImageInfo images[2] = {
+    const VkDescriptorImageInfo images[3] = {
         {colour->sampler, colour->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {bump->sampler, bump->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-    VkWriteDescriptorSet writes[2]{};
-    for (int at = 0; at < 2; ++at)
+        {bump->sampler, bump->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {shine->sampler, shine->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    VkWriteDescriptorSet writes[3]{};
+    for (int at = 0; at < 3; ++at)
     {
         writes[at].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[at].dstSet = set;
@@ -267,7 +290,7 @@ VkDescriptorSet WorldRenderer::acquireMaterial(Device &device, const genome::Ima
         writes[at].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[at].pImageInfo = &images[at];
     }
-    vkUpdateDescriptorSets(device.device(), 2, writes, 0, nullptr);
+    vkUpdateDescriptorSets(device.device(), 3, writes, 0, nullptr);
 
     m_setOf.emplace(key, SetEntry{set, 1});
     return set;
@@ -276,16 +299,17 @@ VkDescriptorSet WorldRenderer::acquireMaterial(Device &device, const genome::Ima
 // Gives back one batch's hold on a pair. The set goes at zero, and each image
 // goes when no set names it any more. Both wait out the frames in flight rather
 // than being destroyed here: a submitted frame may still be binding them.
-void WorldRenderer::releaseMaterial(const genome::Image *diffuse, const genome::Image *normal)
+void WorldRenderer::releaseMaterial(const genome::Image *diffuse, const genome::Image *normal,
+                                   const genome::Image *specular)
 {
     // The shared white set is handed out without being counted - acquire
     // returns it before it ever reaches the map - so counting it here would
     // take it to zero and destroy it while every untextured range still binds
     // it. Which is what happened, and what the validation layers said.
-    if (!diffuse && !normal)
+    if (!diffuse && !normal && !specular)
         return;
 
-    const auto held = m_setOf.find(std::make_pair(diffuse, normal));
+    const auto held = m_setOf.find(MaterialKey{diffuse, normal, specular});
     if (held == m_setOf.end() || held->second.refs == 0 || --held->second.refs != 0)
         return;
 
@@ -296,7 +320,7 @@ void WorldRenderer::releaseMaterial(const genome::Image *diffuse, const genome::
     // once, when it goes - not on every release. Giving them back per release
     // destroyed an image while a set two ranges shared was still binding it,
     // which is what the validation layers reported.
-    for (const genome::Image *image : {diffuse, normal})
+    for (const genome::Image *image : {diffuse, normal, specular})
     {
         if (!image)
             continue;
@@ -669,14 +693,16 @@ bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::v
                     elementIndex < incoming.textures.size() ? incoming.textures[elementIndex] : nullptr;
                 range.image = image;
                 range.normal = elementIndex < incoming.normals.size() ? incoming.normals[elementIndex] : nullptr;
-                range.descriptor = acquireMaterial(device, range.image, range.normal, error);
+                range.specular =
+                    elementIndex < incoming.speculars.size() ? incoming.speculars[elementIndex] : nullptr;
+                range.descriptor = acquireMaterial(device, range.image, range.normal, range.specular, error);
                 if (!range.descriptor)
                 {
                     // This batch was never pushed, so dropSector cannot see it:
                     // its ranges, their textures and its hold on the mesh are
                     // all undone here.
                     for (const Range &taken : fresh.ranges)
-                        releaseMaterial(taken.image, taken.normal);
+                        releaseMaterial(taken.image, taken.normal, taken.specular);
                     m_rangeCount -= fresh.ranges.size();
                     releaseMesh(device, incoming.mesh);
                     return giveUp();
@@ -794,7 +820,7 @@ void WorldRenderer::dropSector(Device &device, std::uint32_t sector)
         // Nothing is drawing this mesh any more, so the arenas get it back,
         // and so do the textures its ranges were holding.
         for (const Range &range : batch.ranges)
-            releaseMaterial(range.image, range.normal);
+            releaseMaterial(range.image, range.normal, range.specular);
         releaseMesh(device, batch.mesh);
         m_rangeCount -= batch.ranges.size();
         m_batches.erase(m_batches.begin() + std::ptrdiff_t(index));
@@ -1270,6 +1296,7 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                          bool useOcclusion)
 {
     const auto prologueStart = std::chrono::steady_clock::now();
+    m_eye = {eye[0], eye[1], eye[2], 0.0f};
     retireReleases(device, device.frameCounter());
     ensureDerived();
     m_cullPhases.prologue = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
@@ -1838,7 +1865,7 @@ void WorldRenderer::drawBatch(Device &device, std::size_t batch, const std::arra
                             &m_lightSet[device.frameIndex()], 0, nullptr);
 
     // The billboard bake wants the flat normal: the impostor is a card.
-    PushConstants push{viewProjection, {0.0f, 1.0f, 0.0f, 0.0f}, 0.0f, 0.0f};
+    PushConstants push{viewProjection, {0.0f, 1.0f, 0.0f, 0.0f}, 0.0f, 0.0f, 0.0f, 32.0f, {}};
     vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
                        &push);
 
@@ -1872,7 +1899,7 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
     G3_GPU_ZONE(m_gpu, command, "world");
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
 
-    PushConstants push{viewProjection, light, 0.0f, m_normalStrength};
+    PushConstants push{viewProjection, light, 0.0f, m_normalStrength, m_specularStrength, m_specularPower, m_eye};
     vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
                        &push);
 
@@ -1923,6 +1950,7 @@ void WorldRenderer::destroy(Device &device)
     m_textureOf.clear();
     m_setOf.clear();
     destroyTexture(device, m_flatNormal);
+    destroyTexture(device, m_noSpecular);
     destroyTexture(device, m_white);
     for (std::uint32_t frame = 0; frame < Device::c_FramesInFlight; ++frame)
         device.destroyBuffer(m_lightBuffer[frame]);

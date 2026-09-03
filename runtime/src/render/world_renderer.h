@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <tuple>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,9 @@ struct MeshInstances
     // The normal map that goes with each element, where the material names one.
     // 128 of the 189 materials in a resident set do.
     std::vector<const genome::Image *> normals;
+    // And the specular map, which 141 of them name - though 109 of those name
+    // the diffuse again rather than a file of their own.
+    std::vector<const genome::Image *> speculars;
 
     // Which elements throw away their transparent pixels. Foliage must - it is
     // drawn as quads whose texture is mostly empty - and solid surfaces must not:
@@ -193,6 +197,14 @@ class WorldRenderer
     // constant so the same binary can be compared against itself.
     void setNormalStrength(float strength) { m_normalStrength = strength; }
 
+    // How bright the highlight is, and how tight. There is no SpecularPower
+    // slot in this data, so the exponent is a choice rather than a reading.
+    void setSpecular(float strength, float power)
+    {
+        m_specularStrength = strength;
+        m_specularPower = power;
+    }
+
     // The world's static point lights. There are 588 of them across the whole
     // map, so the nearest handful to the camera are picked each frame and
     // handed to the shader; a light beyond its own range lights nothing.
@@ -292,6 +304,7 @@ class WorldRenderer
         // the thing a texture is counted by.
         const genome::Image *image = nullptr;
         const genome::Image *normal = nullptr;
+        const genome::Image *specular = nullptr;
         bool alphaTested = false;
     };
 
@@ -422,17 +435,23 @@ class WorldRenderer
         VkDescriptorSet set = VK_NULL_HANDLE;
         std::size_t refs = 0;
     };
-    std::map<std::pair<const genome::Image *, const genome::Image *>, SetEntry> m_setOf;
+    // Keyed by the three images the set binds. A triple rather than a pair
+    // because two materials can share a diffuse and a normal and differ in
+    // their specular.
+    using MaterialKey = std::tuple<const genome::Image *, const genome::Image *, const genome::Image *>;
+    std::map<MaterialKey, SetEntry> m_setOf;
     VkDescriptorSet m_whiteSet = VK_NULL_HANDLE;
     // A flat tangent-space normal, for the materials that name none. Not the
     // white texture: white decodes to a normal pointing nowhere useful.
     Texture m_flatNormal;
+    // Black, for a material that names no specular map: no highlight at all.
+    Texture m_noSpecular;
 
     // Takes a reference on the pair and on each image, making whatever is not
     // there yet.
     VkDescriptorSet acquireMaterial(Device &device, const genome::Image *diffuse, const genome::Image *normal,
-                                    std::string *error);
-    void releaseMaterial(const genome::Image *diffuse, const genome::Image *normal);
+                                    const genome::Image *specular, std::string *error);
+    void releaseMaterial(const genome::Image *diffuse, const genome::Image *normal, const genome::Image *specular);
     Texture *textureFor(Device &device, const genome::Image *image, bool srgb, std::string *error);
 
     // Handles a batch gave back. They cannot be destroyed at once: a submitted
@@ -558,6 +577,10 @@ class WorldRenderer
     std::vector<CullCounts> m_cullCounts;
     float m_occlusionPixels = 0.0f;
     float m_normalStrength = 1.0f;
+    float m_specularStrength = 1.0f;
+    float m_specularPower = 32.0f;
+    // Where the camera was on the last cull, for the halfway vector.
+    std::array<float, 4> m_eye{};
     unsigned m_cullJitter = 0;
     // Two batches at a time. Measured at eight threads with the heaviest first:
     // one, two and four all land on a 0.40 ms cull, but two burns the least
