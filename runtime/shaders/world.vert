@@ -8,7 +8,11 @@ layout(push_constant) uniform Push
 {
     mat4 viewProjection;
     vec4 lightDirection;
-    float alphaTested; // read by the fragment stage; declared here so the block matches
+    // Vectors before scalars: a vec4 is aligned to sixteen, so a scalar in
+    // front of one moves it and the C++ struct stops agreeing.
+    vec4 eye;
+    float alphaTested;
+    float collision; // read by the fragment stage; declared here so the block matches
 }
 push;
 
@@ -87,4 +91,11 @@ void main()
         outPatch = vec2(coords.values[patchAt], coords.values[patchAt + 1]);
     }
     gl_Position = push.viewProjection * vec4(world, 1.0);
+
+    // Collision hugs the surface it belongs to, so drawn over the world the two
+    // fight for the same depth. A nudge towards the eye, proportional to w so
+    // it holds at every distance, settles it - and it is a push constant rather
+    // than a second pipeline with a depth bias.
+    if (push.collision > 0.5)
+        gl_Position.z -= 0.0002 * gl_Position.w;
 }

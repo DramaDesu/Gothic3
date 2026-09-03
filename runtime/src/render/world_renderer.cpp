@@ -19,15 +19,22 @@ namespace render
 namespace
 {
 
+// Vectors first, scalars last, and that ordering is load-bearing rather than
+// tidy. A vec4 in GLSL is aligned to sixteen bytes, so a scalar added before one
+// can push it to a different offset than the C++ struct puts it at - which is
+// exactly what happened when the collision flag went in, and what the validation
+// layers reported as a push constant past the end of its range. With everything
+// that needs aligning in front, a new scalar moves nothing.
 struct PushConstants
 {
     std::array<float, 16> viewProjection;
     std::array<float, 4> light;
-    float alphaTested = 0.0f;    // per draw, not per frame
+    std::array<float, 4> eye; // where the camera is, for the highlight
+    float alphaTested = 0.0f;    // per draw
+    float collision = 0.0f;      // per draw: flat colour, nudged towards the eye
     float normalStrength = 1.0f; // per frame
     float specularStrength = 1.0f;
     float specularPower = 32.0f;
-    std::array<float, 4> eye{};
 };
 
 std::vector<char> readFile(const std::string &path)
@@ -667,6 +674,7 @@ bool WorldRenderer::addSector(Device &device, std::uint32_t sector, const std::v
             Batch fresh;
             fresh.mesh = incoming.mesh;
             fresh.occludes = incoming.occludes;
+            fresh.collision = incoming.collision;
             fresh.lodNear = incoming.lodNear;
             fresh.lodFar = incoming.lodFar;
             fresh.faceCamera = incoming.faceCamera;
@@ -1471,7 +1479,12 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
         genome::WorldMatrix *out =
             static_cast<genome::WorldMatrix *>(m_instanceBuffer[device.frameIndex()].mapped) + batch.instanceBase;
 
-        if (skipBatch[batchIndex] ||
+        // Collision is drawn only when it is being looked at, and when it is
+        // being looked at alone, nothing else is. Rejecting the batch whole
+        // rather than skipping the draw keeps every count adding up.
+        const bool wanted = m_collisionView == 1 || (m_collisionView != 0) == batch.collision;
+
+        if (!wanted || skipBatch[batchIndex] ||
             (batch.hasExtent && (outsideFrustum(batch.extent) || tooSmallOnScreen(batch.extent))))
         {
             // Rejected whole - by the cell it sits in, by the frustum, or by
@@ -1865,7 +1878,7 @@ void WorldRenderer::drawBatch(Device &device, std::size_t batch, const std::arra
                             &m_lightSet[device.frameIndex()], 0, nullptr);
 
     // The billboard bake wants the flat normal: the impostor is a card.
-    PushConstants push{viewProjection, {0.0f, 1.0f, 0.0f, 0.0f}, 0.0f, 0.0f, 0.0f, 32.0f, {}};
+    PushConstants push{viewProjection, {0.0f, 1.0f, 0.0f, 0.0f}, {}, 0.0f, 0.0f, 0.0f, 0.0f, 32.0f};
     vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
                        &push);
 
@@ -1899,7 +1912,8 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
     G3_GPU_ZONE(m_gpu, command, "world");
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
 
-    PushConstants push{viewProjection, light, 0.0f, m_normalStrength, m_specularStrength, m_specularPower, m_eye};
+    PushConstants push{viewProjection,   light,           m_eye, 0.0f, 0.0f,
+                       m_normalStrength,   m_specularStrength, m_specularPower};
     vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
                        &push);
 
@@ -1915,6 +1929,7 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
     // so this is a handful of texture binds rather than one per tile.
     VkDescriptorSet bound = VK_NULL_HANDLE;
     float boundAlphaTest = -1.0f;
+    float boundCollision = -1.0f;
     for (const Batch &batch : m_batches)
         for (const Range &range : batch.ranges)
     {
@@ -1929,6 +1944,14 @@ void WorldRenderer::draw(Device &device, const std::array<float, 16> &viewProjec
             vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                offsetof(PushConstants, alphaTested), sizeof(wanted), &wanted);
             boundAlphaTest = wanted;
+        }
+
+        const float isCollision = batch.collision ? 1.0f : 0.0f;
+        if (isCollision != boundCollision)
+        {
+            vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               offsetof(PushConstants, collision), sizeof(isCollision), &isCollision);
+            boundCollision = isCollision;
         }
 
         if (range.descriptor != bound)

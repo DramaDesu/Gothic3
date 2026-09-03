@@ -9,6 +9,7 @@
 #include "genome/image.h"
 #include "genome/material.h"
 #include "genome/mesh.h"
+#include "genome/collision.h"
 #include "genome/pak.h"
 #include "genome/residency.h"
 #include "genome/spt.h"
@@ -490,6 +491,92 @@ int main(int argc, char **argv)
     std::uint32_t nextSectorId = 1;
     std::map<std::string, genome::Mesh *> meshOf;
 
+    // Opened after the flags are read, which happens below this - see where it
+    // is filled in.
+
+    // The game's own collision, per mesh name. Converted to an ordinary mesh so
+    // that it can be drawn by the machinery that already exists, and scaled by
+    // a hundred on the way: collision is in metres and everything drawn is in
+    // centimetres.
+    std::unique_ptr<genome::PakArchive> collisionArchive;
+    std::map<std::string, genome::Mesh *> collisionOf;
+    std::size_t collisionFound = 0, collisionMissing = 0, collisionTriangles = 0;
+    const auto collisionFor = [&](const std::string &meshName) -> genome::Mesh * {
+        if (!collisionArchive)
+            return nullptr;
+        const auto cached = collisionOf.find(meshName);
+        if (cached != collisionOf.end())
+            return cached->second;
+
+        std::string bare = meshName;
+        const std::size_t slash = bare.find_last_of('/');
+        if (slash != std::string::npos)
+            bare = bare.substr(slash + 1);
+        const std::size_t dot = bare.find_last_of('.');
+        if (dot != std::string::npos)
+            bare = bare.substr(0, dot);
+
+        // The physics archive first, then the mesh archive, which carries 782
+        // of its own - the landscape cells and the architecture among them.
+        // Without the second, walls and floors come out with no collision at
+        // all, which is exactly what the first look at this showed.
+        std::string ignored;
+        genome::CollisionMesh cooked;
+        genome::Mesh *made = nullptr;
+        bool have = genome::loadCollisionMesh(collisionArchive->read(bare + ".xnvmsh", &ignored), cooked, &ignored);
+        if (!have)
+        {
+            std::string beside = meshName;
+            const std::size_t swap = beside.find_last_of('.');
+            if (swap != std::string::npos)
+                beside = beside.substr(0, swap) + ".xnvmsh";
+            have = genome::loadCollisionMesh(archive->read(beside, &ignored), cooked, &ignored);
+        }
+        if (have)
+        {
+            auto mesh = std::make_unique<genome::Mesh>();
+            for (const genome::CollisionPart &part : cooked.parts)
+            {
+                genome::MeshElement element;
+                element.positions.reserve(part.positions.size());
+                for (const std::array<float, 3> &position : part.positions)
+                    element.positions.push_back({position[0] * 100.0f, position[1] * 100.0f,
+                                                 position[2] * 100.0f});
+                // Flat normals from the triangles themselves: the cooked mesh
+                // carries none, and the debug shading only needs enough to
+                // read the shape.
+                element.normals.assign(element.positions.size(), {0.0f, 1.0f, 0.0f});
+                element.texCoords.assign(element.positions.size(), {0.0f, 0.0f});
+                element.indices = part.indices;
+                for (std::size_t at = 0; at + 2 < element.indices.size(); at += 3)
+                {
+                    const std::array<float, 3> &a = element.positions[element.indices[at]];
+                    const std::array<float, 3> &b = element.positions[element.indices[at + 1]];
+                    const std::array<float, 3> &c = element.positions[element.indices[at + 2]];
+                    const std::array<float, 3> u{b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+                    const std::array<float, 3> v{c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+                    const std::array<float, 3> n{u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+                                                 u[0] * v[1] - u[1] * v[0]};
+                    const float length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                    if (length > 1e-6f)
+                        for (int corner = 0; corner < 3; ++corner)
+                            element.normals[element.indices[at + corner]] = {n[0] / length, n[1] / length,
+                                                                            n[2] / length};
+                }
+                collisionTriangles += element.indices.size() / 3;
+                mesh->elements.push_back(std::move(element));
+            }
+            made = mesh.get();
+            ownedMeshes.push_back(std::move(mesh));
+            ++collisionFound;
+        }
+        else
+            ++collisionMissing;
+
+        collisionOf.emplace(meshName, made);
+        return made;
+    };
+
     // Tree kinds in the order they were grown - the billboard atlas is baked
     // from exactly these, and a cell is found by a kind's place in this list.
     std::vector<std::string> treeKinds;
@@ -578,6 +665,10 @@ int main(int argc, char **argv)
     int windowWidth = 1280, windowHeight = 720;
     // Threads the cull runs on, the caller included. Zero leaves the default.
     int cullThreads = 0;
+    // The archive of cooked collision meshes, and what to draw: 0 the world,
+    // 1 the world with its collision over it, 2 the collision alone.
+    int collisionArgument = 0;
+    int collisionView = 0;
     // Shakes the timing inside the cull so two runs never line up. For
     // comparisons only; it costs whatever it is set to.
     int cullJitter = 0;
@@ -643,6 +734,10 @@ int main(int argc, char **argv)
             windowWidth = std::atoi(argv[index + 1]);
             windowHeight = std::atoi(argv[index + 2]);
         }
+        if (std::string(argv[index]) == "--collision" && hasValue)
+            collisionArgument = index + 1;
+        if (std::string(argv[index]) == "--collision-view" && hasValue)
+            collisionView = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--threads" && hasValue)
             cullThreads = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--cull-grain" && hasValue)
@@ -668,6 +763,15 @@ int main(int argc, char **argv)
             flySpeed = float(std::atof(argv[index + 1]));
         if (std::string(argv[index]) == "--baked-adds")
             lightmapReplaces = 0.0f;
+    }
+
+    // The collision archive, now that the flag naming it has been read.
+    if (collisionArgument != 0)
+    {
+        std::string why;
+        collisionArchive = genome::PakArchive::open(argv[collisionArgument], &why);
+        if (!collisionArchive)
+            std::printf("warning: no collision archive: %s\n", why.c_str());
     }
 
     const bool showOneTree = treeArgument != 0 && treeArgument + 1 < argc &&
@@ -786,6 +890,7 @@ int main(int argc, char **argv)
                 auto &lightmapCoords = out.lighting.coords;
                 auto &worldLights = out.lights;
                 std::map<std::string, std::size_t> batchOf;
+                std::map<std::string, std::size_t> collisionBatchOf;
                 std::map<std::string, std::size_t> treeBatchOf;
 
                 genome::WorldLayer layer;
@@ -922,6 +1027,15 @@ int main(int argc, char **argv)
                                 {placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
                                  placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
                             ++placed;
+
+                            const auto shape = collisionBatchOf.find(placement.meshName);
+                            if (shape != collisionBatchOf.end())
+                            {
+                                batches[shape->second].transforms.push_back(placement.world);
+                                batches[shape->second].bounds.push_back(
+                                    {placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
+                                     placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
+                            }
                         }
                         continue;
                     }
@@ -961,6 +1075,23 @@ int main(int argc, char **argv)
                     batchOf.emplace(placement.meshName, batches.size());
                     batches.push_back(std::move(batch));
                     ++placed;
+
+                    // The same object's collision, in its own batch with the
+                    // same transform. Its index is remembered so that later
+                    // placements of the same mesh extend it too.
+                    if (genome::Mesh *cooked = collisionFor(placement.meshName))
+                    {
+                        render::MeshInstances shape;
+                        shape.mesh = cooked;
+                        shape.collision = true;
+                        shape.occludes = false;
+                        shape.transforms.push_back(placement.world);
+                        shape.bounds.push_back(
+                            {placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
+                             placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
+                        collisionBatchOf.emplace(placement.meshName, batches.size());
+                        batches.push_back(std::move(shape));
+                    }
                 }
                 worldLights.insert(worldLights.end(), layer.lights.begin(), layer.lights.end());
 
@@ -1152,6 +1283,9 @@ int main(int argc, char **argv)
                 std::printf("%zu sectors resident, %zu left on disk\n", sectors, skipped);
             std::printf("%zu sectors, %zu objects placed, %zu meshes missing, %zu plants\n", sectors, placed,
                         missing, grass);
+            if (collisionArchive)
+                std::printf("collision: %zu meshes found, %zu without one, %zu triangles placed\n",
+                            collisionFound, collisionMissing, collisionTriangles);
             if (planted != 0 || missingTrees != 0)
                 std::printf("%zu trees planted from %zu grown kinds, %zu definitions missing\n", planted,
                             treeKinds.size(), missingTrees);
@@ -1749,6 +1883,7 @@ int main(int argc, char **argv)
     renderer.setSpecular(specularStrength, specularPower);
     if (cullThreads > 0)
         renderer.setCullThreads(unsigned(cullThreads));
+    renderer.setCollisionView(collisionView);
     // Jitter sets the grain to one itself, so an explicit grain is applied
     // after it rather than before.
     if (cullJitter > 0)
@@ -2021,6 +2156,10 @@ int main(int argc, char **argv)
             eye[1] -= speed;
         if (window.keyPressed('O'))
             occlusion = !occlusion;
+        // Off, over the world, or alone. Nothing is reloaded: the collision is
+        // already there as batches and the cull decides which are wanted.
+        if (window.keyPressed('C'))
+            renderer.setCollisionView((renderer.collisionView() + 1) % 3);
         if (flySpeed != 0.0f)
             move(forward, flySpeed * delta);
 

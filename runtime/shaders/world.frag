@@ -8,14 +8,16 @@ layout(push_constant) uniform Push
 {
     mat4 viewProjection;
     vec4 lightDirection;
+    // Vectors before scalars: a vec4 is aligned to sixteen, so a scalar in
+    // front of one moves it and the C++ struct stops agreeing.
+    vec4 eye;
     float alphaTested;
+    float collision;
     // Zero draws with the interpolated normal, one with the mapped one. A knob
     // so that the same binary can be compared against itself.
     float normalStrength;
     float specularStrength;
     float specularPower;
-    // Where the camera is, for the halfway vector.
-    vec4 eye;
 }
 push;
 
@@ -146,6 +148,15 @@ void main()
     // ge3.INI: Render.HDRExposure 2.85 and Render.HDRGamma 0.60. Without it a
     // texel of 0.15 stays 0.15 and the world reads as night; through it the same
     // texel lands at 0.53. The darkness was never in the textures.
+    if (push.collision > 0.5)
+    {
+        // Flat, and lit only enough to read the shape: this is being looked at,
+        // not rendered. Green because nothing in this world is.
+        float facing = 0.35 + 0.65 * abs(dot(normal, normalize(push.lightDirection.xyz)));
+        outColor = vec4(vec3(0.1, 0.9, 0.35) * facing, 1.0);
+        return;
+    }
+
     vec3 mapped = 1.0 - exp(-2.85 * lit);
     mapped = pow(max(mapped, vec3(1e-5)), vec3(0.60));
     outColor = vec4(mapped, 1.0);

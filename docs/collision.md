@@ -93,3 +93,39 @@ to be recovered by parsing whatever engine is chosen, and once they are
 recovered, feeding them to any engine is the same work.
 
 So the decision can be deferred, and the parsing could not be.
+
+## Looking at it
+
+Reading a format is not the same as reading it correctly, and the checks above
+are arithmetic. The overlay is the check that a person can fail: the collision
+of every placed object, drawn over the world at the transform the world gives
+it, in flat green. `--collision <pak>` loads it and `--collision-view N`, or the
+`C` key, cycles the world alone, the world with its collision over it, and the
+collision alone.
+
+![collision over the world](collision-overlay.png)
+
+It lands where it should. The wrought-iron candelabra keeps every curl of its
+frame, the candle has its own stand, the shelf has its plates, the rug is a
+disc on the floor and the banner hangs flat on the wall. Nothing floats, nothing
+is a hundred times out, nothing is rotated. This is the same claim the bounding
+boxes make, but a wrong transform or a swapped axis would survive that check and
+not this one.
+
+Two details make it work. The collision hugs the surface it belongs to, so drawn
+over the world the two fight for the same depth; the vertex shader nudges
+collision towards the eye by `0.0002 * w`, which holds at every distance and
+costs a push constant rather than a second pipeline. And the cooked mesh carries
+no normals, so flat ones are generated per triangle - enough shading to read a
+shape, and honest about being a debug view.
+
+The collision is an ordinary batch with a flag, so it streams, culls and draws
+through the machinery that already exists; hiding it is the cull rejecting whole
+batches by that flag. With the archive loaded and the view off, the frame is
+1.56 ms against 1.60 - the same frame, and the difference is noise.
+
+**215 of the 435 placed meshes still find no collision mesh**, including the
+walls and the floor of the room above. They are found by name in
+`_compiledPhysic.pak` and the ones that miss are not there under the name the
+placement uses. That is the next thing to find, and until it is found the green
+in the picture is what exists rather than what the game has.

@@ -78,6 +78,11 @@ struct MeshInstances
     // fair stand-in for a house and a poor one for a tree, whose box is mostly
     // air - so foliage is drawn but never rasterised as an occluder.
     bool occludes = true;
+
+    // The game's own collision geometry for the same object, drawn only when it
+    // is being looked at. It is a batch like any other so that it streams and
+    // culls with everything else rather than needing a path of its own.
+    bool collision = false;
 };
 
 class WorldRenderer
@@ -168,6 +173,11 @@ class WorldRenderer
 
     // Threads the cull runs on, the caller included. One means serial, which is
     // the comparison every parallel claim here rests on.
+    // What to draw: 0 the world, 1 the world with its collision over it, 2 the
+    // collision alone. Anything but 0 is for looking at, not for playing.
+    void setCollisionView(int view) { m_collisionView = view; }
+    int collisionView() const { return m_collisionView; }
+
     void setCullThreads(unsigned threads);
 
     // Makes each batch wait a pseudo-random moment before being culled, so the
@@ -490,6 +500,7 @@ class WorldRenderer
         // anything. Big enough for every instance, so a block is never
         // overrun; the gaps where instances were rejected are read by nothing.
         std::size_t instanceBase = 0;
+        bool collision = false;
         const genome::Mesh *mesh = nullptr;
 
         // Which sector put each instance here, in step with the transforms. A
@@ -582,6 +593,7 @@ class WorldRenderer
     // Where the camera was on the last cull, for the halfway vector.
     std::array<float, 4> m_eye{};
     unsigned m_cullJitter = 0;
+    int m_collisionView = 0;
     // Two batches at a time. Measured at eight threads with the heaviest first:
     // one, two and four all land on a 0.40 ms cull, but two burns the least
     // total thread time - 2.01 ms against 2.32 at one - and eight loses the
