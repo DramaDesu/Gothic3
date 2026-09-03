@@ -567,6 +567,8 @@ int main(int argc, char **argv)
     bool startWithOcclusion = true;
     // Below this many pixels an instance is not asked whether it is hidden.
     float occlusionPixels = 0.0f;
+    // Nought draws with the interpolated normal, one with the mapped one.
+    float normalStrength = 1.0f;
     // Runs the cull several times a frame. The cost of the extra passes is the
     // warm-cache cost; the difference from the first is what the memory costs.
     int cullRepeat = 1;
@@ -648,6 +650,8 @@ int main(int argc, char **argv)
             cullJitter = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--cull-repeat" && hasValue)
             cullRepeat = std::max(1, std::atoi(argv[index + 1]));
+        if (std::string(argv[index]) == "--normal-strength" && hasValue)
+            normalStrength = float(std::atof(argv[index + 1]));
         if (std::string(argv[index]) == "--occlusion-pixels" && hasValue)
             occlusionPixels = float(std::atof(argv[index + 1]));
         if (std::string(argv[index]) == "--stream")
@@ -1225,6 +1229,13 @@ int main(int argc, char **argv)
     // materials in the shipping data resolve to 634 distinct files, one of them
     // named twenty-five times.
     std::map<std::string, const genome::Image *> imageOfFile;
+    // What the materials in front of the camera actually offer. 633 across the
+    // archive is a number about the archive; this one is about the scene.
+    std::size_t materialsSeen = 0, materialsWithNormal = 0, normalsMissing = 0;
+    // Per material name, the normal map it resolved to. Kept beside the diffuse
+    // cache rather than inside it because a material can name one without the
+    // other.
+    std::map<std::string, const genome::Image *> normalOf;
     // Which materials throw away transparent pixels, remembered per name so
     // the answer survives the texture cache.
     std::map<std::string, bool> masked;
@@ -1248,6 +1259,7 @@ int main(int argc, char **argv)
         // sector, and running it twice over one list would double both vectors
         // and misalign every element index against the mesh.
         batch.textures.clear();
+        batch.normals.clear();
         batch.alphaTested.clear();
         for (const genome::MeshElement &element : batch.mesh->elements)
         {
@@ -1294,6 +1306,36 @@ int main(int argc, char **argv)
                     // The game says which surfaces mask; taking every alpha
                     // channel at face value punches holes through stone.
                     masked.emplace(element.materialName, material.blendMode == genome::BlendMode::Masked);
+                    ++materialsSeen;
+                    if (const genome::Sampler *bump = material.texture(genome::Slot::Normal))
+                    {
+                        const genome::TextureResolution resolvedBump = genome::resolveTexture(*bump, 0, exists);
+                        if (resolvedBump.fileName.empty())
+                            ++normalsMissing;
+                        else
+                        {
+                            ++materialsWithNormal;
+                            // Through the same by-file cache as the diffuse, so
+                            // a normal map named by twenty materials is loaded
+                            // once and uploaded once.
+                            const auto already = imageOfFile.find(resolvedBump.fileName);
+                            if (already != imageOfFile.end())
+                                normalOf.emplace(element.materialName, already->second);
+                            else
+                            {
+                                auto image = std::make_unique<genome::Image>();
+                                const genome::Image *loadedBump = nullptr;
+                                if (genome::loadImage(imageArchive->read(resolvedBump.fileName, &ignored), *image,
+                                                      &ignored))
+                                {
+                                    loadedBump = image.get();
+                                    images.push_back(std::move(image));
+                                }
+                                imageOfFile.emplace(resolvedBump.fileName, loadedBump);
+                                normalOf.emplace(element.materialName, loadedBump);
+                            }
+                        }
+                    }
                     if (material.kind == genome::ShaderKind::Water)
                         loaded = waterImage;
                     else if (const genome::Sampler *sampler = material.texture(genome::Slot::Diffuse))
@@ -1321,6 +1363,8 @@ int main(int argc, char **argv)
                 cache.emplace(element.materialName, loaded);
             }
             batch.textures.push_back(loaded);
+            const auto bumped = normalOf.find(element.materialName);
+            batch.normals.push_back(bumped != normalOf.end() ? bumped->second : nullptr);
             const auto isMasked = masked.find(element.materialName);
             batch.alphaTested.push_back(isMasked != masked.end() && isMasked->second ? 1 : 0);
         }
@@ -1337,6 +1381,8 @@ int main(int argc, char **argv)
     });
 
     std::printf("%zu distinct textures, %zu mesh elements left untextured\n", images.size(), untextured);
+    std::printf("%zu materials seen, %zu name a normal map that exists, %zu name one that does not\n",
+                materialsSeen, materialsWithNormal, normalsMissing);
     if (untextured != 0)
     {
         // Name a few so the gap is diagnosable rather than just white.
@@ -1532,6 +1578,7 @@ int main(int argc, char **argv)
         worldLights.insert(worldLights.end(), content.lights.begin(), content.lights.end());
     renderer.setLights(worldLights);
     renderer.setOcclusionThreshold(occlusionPixels);
+    renderer.setNormalStrength(normalStrength);
     if (cullThreads > 0)
         renderer.setCullThreads(unsigned(cullThreads));
     // Jitter sets the grain to one itself, so an explicit grain is applied

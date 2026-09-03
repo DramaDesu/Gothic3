@@ -9,10 +9,15 @@ layout(push_constant) uniform Push
     mat4 viewProjection;
     vec4 lightDirection;
     float alphaTested;
+    // Zero draws with the interpolated normal, one with the mapped one. A knob
+    // so that the same binary can be compared against itself.
+    float normalStrength;
 }
 push;
 
 layout(set = 0, binding = 0) uniform sampler2D diffuseMap;
+// The material's normal map, or a flat one where it names none.
+layout(set = 0, binding = 1) uniform sampler2D normalMap;
 
 // The lights nearest the camera, chosen per frame. count sits in x; the rest of
 // the first vector is spare.
@@ -38,10 +43,46 @@ layout(set = 1, binding = 4) uniform sampler2D lightmapAtlas;
 
 layout(location = 0) out vec4 outColor;
 
+// A tangent frame worked out from how the position and the texture coordinate
+// change across the screen. The meshes carry no tangents, and deriving them at
+// load would mean a pass over every triangle, a wider vertex and a bigger
+// arena; this needs none of that. It degenerates where the derivatives do - on
+// a triangle edge-on to the camera - which the length guard below handles.
+mat3 tangentFrame(vec3 normal, vec3 position, vec2 uv)
+{
+    vec3 dpx = dFdx(position);
+    vec3 dpy = dFdy(position);
+    vec2 duvx = dFdx(uv);
+    vec2 duvy = dFdy(uv);
+
+    vec3 perpY = cross(dpy, normal);
+    vec3 perpX = cross(normal, dpx);
+    vec3 tangent = perpY * duvx.x + perpX * duvy.x;
+    vec3 bitangent = perpY * duvx.y + perpX * duvy.y;
+
+    float longest = max(dot(tangent, tangent), dot(bitangent, bitangent));
+    if (longest < 1e-12)
+        return mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), normal);
+    float scale = inversesqrt(longest);
+    return mat3(tangent * scale, bitangent * scale, normal);
+}
+
 void main()
 {
     vec3 normal = normalize(inNormal);
     vec4 sampled = texture(diffuseMap, inTexCoord);
+
+    if (push.normalStrength > 0.0)
+    {
+        // Tangent space, so the flat value is 0.5,0.5,1 and decodes to a normal
+        // straight out of the surface.
+        vec3 tangentNormal = texture(normalMap, inTexCoord).xyz * 2.0 - 1.0;
+        if (dot(tangentNormal, tangentNormal) > 1e-4)
+        {
+            vec3 mapped = normalize(tangentFrame(normal, inWorld, inTexCoord) * tangentNormal);
+            normal = normalize(mix(normal, mapped, push.normalStrength));
+        }
+    }
 
     // Foliage is drawn as quads whose texture is mostly empty, so its
     // transparent pixels are thrown away rather than blended. Solid surfaces are

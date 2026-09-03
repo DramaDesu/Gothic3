@@ -41,6 +41,9 @@ struct MeshInstances
     // batch is always drawn.
     std::vector<std::array<float, 6>> bounds;
     std::vector<const genome::Image *> textures; // one per mesh element, may be null
+    // The normal map that goes with each element, where the material names one.
+    // 128 of the 189 materials in a resident set do.
+    std::vector<const genome::Image *> normals;
 
     // Which elements throw away their transparent pixels. Foliage must - it is
     // drawn as quads whose texture is mostly empty - and solid surfaces must not:
@@ -186,6 +189,10 @@ class WorldRenderer
 
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);
 
+    // How much of the mapped normal to use, nought to one. A knob rather than a
+    // constant so the same binary can be compared against itself.
+    void setNormalStrength(float strength) { m_normalStrength = strength; }
+
     // The world's static point lights. There are 588 of them across the whole
     // map, so the nearest handful to the camera are picked each frame and
     // handed to the shader; a light beyond its own range lights nothing.
@@ -280,9 +287,11 @@ class WorldRenderer
         std::uint32_t firstInstance = 0;
         std::uint32_t instanceCount = 0;
         VkDescriptorSet descriptor = VK_NULL_HANDLE;
-        // Which image that set was made from, so a batch that goes can give
-        // its textures back.
+        // The pair the set was made from, so a batch that goes can give both
+        // back. A set names two images now, which is why it can no longer be
+        // the thing a texture is counted by.
         const genome::Image *image = nullptr;
+        const genome::Image *normal = nullptr;
         bool alphaTested = false;
     };
 
@@ -397,19 +406,34 @@ class WorldRenderer
     // the route that did not exist before, and without which nothing could find
     // a texture to free. The count is of batches naming it, not sectors: a
     // batch is keyed by mesh and carries several sectors' transforms at once.
+    // A texture, counted by how many descriptor sets name it.
     struct TextureEntry
     {
         Texture texture{};
-        VkDescriptorSet set = VK_NULL_HANDLE;
         std::size_t refs = 0;
     };
     std::map<const genome::Image *, TextureEntry> m_textureOf;
-    VkDescriptorSet m_whiteSet = VK_NULL_HANDLE;
 
-    // Takes a reference, making the texture if this is the first. Null means
-    // the shared white one, which is never counted and never freed.
-    VkDescriptorSet acquireTexture(Device &device, const genome::Image *image, std::string *error);
-    void releaseTexture(const genome::Image *image);
+    // A descriptor set, counted by how many batches name it, and keyed by the
+    // pair of images it binds. Two materials sharing a diffuse and differing in
+    // their normal map are two sets.
+    struct SetEntry
+    {
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        std::size_t refs = 0;
+    };
+    std::map<std::pair<const genome::Image *, const genome::Image *>, SetEntry> m_setOf;
+    VkDescriptorSet m_whiteSet = VK_NULL_HANDLE;
+    // A flat tangent-space normal, for the materials that name none. Not the
+    // white texture: white decodes to a normal pointing nowhere useful.
+    Texture m_flatNormal;
+
+    // Takes a reference on the pair and on each image, making whatever is not
+    // there yet.
+    VkDescriptorSet acquireMaterial(Device &device, const genome::Image *diffuse, const genome::Image *normal,
+                                    std::string *error);
+    void releaseMaterial(const genome::Image *diffuse, const genome::Image *normal);
+    Texture *textureFor(Device &device, const genome::Image *image, bool srgb, std::string *error);
 
     // Handles a batch gave back. They cannot be destroyed at once: a submitted
     // frame may still be binding that set, which is
@@ -420,6 +444,7 @@ class WorldRenderer
         VkDescriptorSet set = VK_NULL_HANDLE;
         std::uint64_t frame = 0;
     };
+    std::size_t setCount() const { return m_setOf.size(); }
     // Destroying a texture is four driver calls, and a burst of departures
     // makes a burst of them come due together. Nothing waits on one being
     // destroyed promptly - it has already waited out the frames in flight - so
@@ -532,6 +557,7 @@ class WorldRenderer
     };
     std::vector<CullCounts> m_cullCounts;
     float m_occlusionPixels = 0.0f;
+    float m_normalStrength = 1.0f;
     unsigned m_cullJitter = 0;
     // Two batches at a time. Measured at eight threads with the heaviest first:
     // one, two and four all land on a 0.40 ms cull, but two burns the least
