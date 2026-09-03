@@ -730,6 +730,16 @@ void WorldRenderer::ensureDerived()
 // Extents, world bounds, occluders, the grid and the mesh-to-batch map are all
 // views of the batch list, so they are worked out again whenever it changes
 // rather than patched in a dozen places.
+std::vector<float> WorldRenderer::threadBusy() const
+{
+    std::vector<float> busy;
+    busy.reserve(m_cullCounts.size());
+    for (const CullCounts &counts : m_cullCounts)
+        busy.push_back(float(counts.seconds * 1000.0));
+    std::sort(busy.begin(), busy.end(), std::greater<float>());
+    return busy;
+}
+
 void WorldRenderer::setCullThreads(unsigned threads)
 {
     m_pool = std::make_unique<Pool>(threads);
@@ -748,6 +758,17 @@ void WorldRenderer::rebuildDerived()
             base += batch.transforms.size();
         }
     }
+
+    // Heaviest first. Eight threads were returning four because the wall was
+    // one thread still holding the biggest batch after the others had run out
+    // of work; starting with it puts that thread's tail in the middle of
+    // everyone else's rather than past the end.
+    m_cullOrder.resize(m_batches.size());
+    for (std::size_t index = 0; index < m_cullOrder.size(); ++index)
+        m_cullOrder[index] = index;
+    std::sort(m_cullOrder.begin(), m_cullOrder.end(), [this](std::size_t left, std::size_t right) {
+        return m_batches[left].transforms.size() > m_batches[right].transforms.size();
+    });
 
     m_batchOf.clear();
     m_occluders.clear();
@@ -1296,6 +1317,18 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     const unsigned jitter = m_cullJitter;
     const std::uint64_t jitterSeed = device.frameCounter();
     const auto cullBatch = [&](std::size_t batchIndex, unsigned thread) {
+        const auto batchStarted = std::chrono::steady_clock::now();
+        struct Timed
+        {
+            CullCounts &into;
+            std::chrono::steady_clock::time_point start;
+            ~Timed()
+            {
+                into.seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                ++into.batches;
+            }
+        } timed{m_cullCounts[thread], batchStarted};
+
         if (jitter != 0)
         {
             // Deliberately wasteful, and deliberately different for every
@@ -1471,9 +1504,10 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
 
     // Eight at a time, because a median batch of six instances would
     // otherwise be one atomic increment each.
-    // One batch at a time when shaking: it puts every thread on the shared
-    // counter far more often than a run of eight does.
-    m_pool->forEach(m_batches.size(), jitter != 0 ? 1 : 8, cullBatch);
+    // One batch at a time. With the heaviest first, a run of eight would hand
+    // one thread the eight biggest together, which is the pile-up being undone.
+    const auto cullInOrder = [&](std::size_t at, unsigned thread) { cullBatch(m_cullOrder[at], thread); };
+    m_pool->forEach(m_cullOrder.size(), m_cullGrain, cullInOrder);
 
     std::size_t visibleTotal = 0;
     for (const CullCounts &counts : m_cullCounts)

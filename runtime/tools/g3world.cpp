@@ -578,6 +578,7 @@ int main(int argc, char **argv)
     // Shakes the timing inside the cull so two runs never line up. For
     // comparisons only; it costs whatever it is set to.
     int cullJitter = 0;
+    int cullGrain = 0;
     // Residency is decided against a far plane of its own, not the one the
     // camera draws with: it is the game's number, and what made 36 sectors the
     // answer rather than some other count.
@@ -641,6 +642,8 @@ int main(int argc, char **argv)
         }
         if (std::string(argv[index]) == "--threads" && hasValue)
             cullThreads = std::atoi(argv[index + 1]);
+        if (std::string(argv[index]) == "--cull-grain" && hasValue)
+            cullGrain = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--cull-jitter" && hasValue)
             cullJitter = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--cull-repeat" && hasValue)
@@ -1531,6 +1534,8 @@ int main(int argc, char **argv)
     renderer.setOcclusionThreshold(occlusionPixels);
     if (cullThreads > 0)
         renderer.setCullThreads(unsigned(cullThreads));
+    if (cullGrain > 0)
+        renderer.setCullGrain(unsigned(cullGrain));
     if (cullJitter > 0)
     {
         renderer.setCullJitter(unsigned(cullJitter));
@@ -2067,6 +2072,16 @@ int main(int argc, char **argv)
                     std::printf("the last cull went: %.2f prologue, %.2f occluders, %.2f cells, %.2f instances, "
                                 "%.2f lights\n",
                                 split.prologue, split.occluders, split.cells, split.instances, split.lights);
+                    const std::vector<float> busy = renderer.threadBusy();
+                    if (busy.size() > 1)
+                    {
+                        float total = 0.0f;
+                        for (float one : busy)
+                            total += one;
+                        std::printf("threads were busy %.2f ms at most, %.2f at least, %.2f on average; "
+                                    "the sum is %.2f against %.2f of wall\n",
+                                    busy.front(), busy.back(), total / float(busy.size()), total, split.instances);
+                    }
                 }
 
                 // Which frame was the worst, and what it was doing.

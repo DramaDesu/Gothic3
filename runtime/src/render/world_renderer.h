@@ -167,8 +167,13 @@ class WorldRenderer
     // order they finish in and the overlap between threads vary. Purely a way
     // of shaking the timing for a comparison; zero is off, and off is normal.
     void setCullJitter(unsigned spins) { m_cullJitter = spins; }
+    void setCullGrain(unsigned grain) { m_cullGrain = grain; }
     unsigned cullThreads() const { return m_pool ? m_pool->threads() : 1; }
     std::size_t occlusionTests() const { return m_occlusionTests; }
+
+    // What each thread spent inside the batch loop on the last cull, in
+    // milliseconds, busiest first.
+    std::vector<float> threadBusy() const;
 
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);
 
@@ -356,6 +361,13 @@ class WorldRenderer
     // before the cull that reads them - a burst of departures would otherwise
     // pay for a full rebuild each.
     void rebuildDerived();
+
+    // Batch indices in decreasing order of how many instances they hold, so the
+    // cull starts on the heaviest and the light ones fill in behind. Rebuilt
+    // with the rest of the derived views; the order the cull works in is free,
+    // since each Range carries its own firstInstance and draw() walks
+    // m_batches by index whatever the cull did.
+    std::vector<std::size_t> m_cullOrder;
     void ensureDerived();
     bool m_derivedStale = false;
     // The grid says its size once. Saying it on every rebuild means saying it
@@ -483,13 +495,23 @@ class WorldRenderer
     {
         std::size_t visible = 0, tooSmall = 0, occluded = 0, tested = 0;
         std::size_t occlusionTests = 0, draws = 0, triangles = 0;
+        // How long this thread was actually inside batches, and how many it
+        // took. If the busiest is far above the mean, the loop is waiting on a
+        // tail rather than on memory.
+        double seconds = 0.0;
+        std::size_t batches = 0;
         // Kept a cache line apart: two threads' counts in one line would be
         // written by both on every instance.
-        char padding[64 - (7 * sizeof(std::size_t)) % 64]{};
+        char padding[64 - (9 * sizeof(std::size_t) + sizeof(double)) % 64]{};
     };
     std::vector<CullCounts> m_cullCounts;
     float m_occlusionPixels = 0.0f;
     unsigned m_cullJitter = 0;
+    // Two batches at a time. Measured at eight threads with the heaviest first:
+    // one, two and four all land on a 0.40 ms cull, but two burns the least
+    // total thread time - 2.01 ms against 2.32 at one - and eight loses the
+    // balance again, while sixteen hands one thread the sixteen biggest.
+    unsigned m_cullGrain = 2;
     std::size_t m_occlusionTests = 0;
 
     // Instances big enough to hide other things: rasterised first, then used to
