@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <cassert>
 #include <chrono>
 #include <map>
 #include <set>
@@ -1283,6 +1284,9 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
 
     m_visible.clear();
     m_tooSmall = 0;
+    m_rejectedWhole = 0;
+    m_outsideView = 0;
+    m_wrongLod = 0;
     m_submittedTriangles = 0;
     m_submittedDraws = 0;
     m_testedInstances = 0;
@@ -1355,9 +1359,10 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
         if (skipBatch[batchIndex] ||
             (batch.hasExtent && (outsideFrustum(batch.extent) || tooSmallOnScreen(batch.extent))))
         {
-            // Rejected whole. Its instances still have to be accounted for, or
-            // the counts stop adding up to what was loaded.
-            counts.tooSmall += batch.transforms.size();
+            // Rejected whole - by the cell it sits in, by the frustum, or by
+            // being too small. Its own bucket: calling all three "too small"
+            // reported a batch behind the camera as too small to see.
+            counts.rejectedWhole += batch.transforms.size();
             for (Range &range : batch.ranges)
             {
                 range.firstInstance = firstInstance;
@@ -1378,7 +1383,10 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
         {
             const bool hasBox = instance < boxCount;
             if (hasBox && outsideFrustum(batch.bounds[instance]))
+            {
+                ++counts.outsideView;
                 continue;
+            }
 
             // Which detail level draws this one. Measured to the nearest face of
             // the box rather than its centre, so a tall tree does not switch
@@ -1394,10 +1402,14 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
                     const float outside = std::max(0.0f, std::max(low, high));
                     distanceSquared += outside * outside;
                 }
-                if (distanceSquared < nearSquared)
+                if (distanceSquared < nearSquared || (farSquared > 0.0f && distanceSquared >= farSquared))
+                {
+                    // Drawn by the other detail level, or by the billboard. Two
+                    // thirds of a tree's instances leave here, since a kind is
+                    // three batches sharing one set of transforms.
+                    ++counts.wrongLod;
                     continue;
-                if (farSquared > 0.0f && distanceSquared >= farSquared)
-                    continue;
+                }
             }
 
             if (hasBox && tooSmallOnScreen(batch.bounds[instance]))
@@ -1512,6 +1524,9 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     std::size_t visibleTotal = 0;
     for (const CullCounts &counts : m_cullCounts)
     {
+        m_rejectedWhole += counts.rejectedWhole;
+        m_outsideView += counts.outsideView;
+        m_wrongLod += counts.wrongLod;
         visibleTotal += counts.visible;
         m_tooSmall += counts.tooSmall;
         m_occluded += counts.occluded;
@@ -1573,6 +1588,15 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
             colours[index * 4 + 3] = 0.0f;
         }
     }
+
+    // Every instance loaded left the loop through exactly one exit, so the
+    // buckets have to come to the total. If they do not, the parallel merge
+    // lost some - which is a stronger and much earlier signal than a screenshot
+    // that happens to differ.
+    const std::size_t accounted =
+        m_visibleInstances + m_rejectedWhole + m_tooSmall + m_occluded + m_outsideView + m_wrongLod;
+    m_unaccounted = std::ptrdiff_t(m_instanceCount) - std::ptrdiff_t(accounted);
+    assert(m_unaccounted == 0 && "the cull lost instances: a bucket is missing or the merge dropped a thread");
 
     m_cullPhases.lights = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() -
                                                                    lightStart).count();

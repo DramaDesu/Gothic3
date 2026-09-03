@@ -302,13 +302,26 @@ hash and the same counts, too-small and occluded included. Three is in the list
 on purpose: a bug that divides work by a power of two would pass the others.
 
 ```bash
-for t in 1 2 3 4 8 16 32; do ./g3world.exe ... --threads  --shot t.ppm; done
+for t in 1 2 3 4 8 16 32; do ./g3world.exe ... --threads $t --shot t$t.ppm; done
 ```
 
 That is seven comparisons rather than one, and a race in the block layout or the
 counters would have to survive all of them. It is still not a proof: they all
-ran on one machine, along one camera path, with the same timing. A race that
-needs an unlucky interleaving would not show.
+ran on one machine, along one camera path.
+
+The cheaper and stronger check runs every frame. Every way out of the loop has
+its own bucket - drawn, rejected whole, outside the frustum, wrong detail level,
+too small, hidden - and they must come to the number of instances loaded. A
+block-layout mistake, a counter merged twice, a batch culled by two threads or
+by none: all of them lose or double instances, and the assert fires on the frame
+it happens rather than in a hash compared at the end. At the fortress the split
+is 10365 drawn, 32242 rejected whole, 17967 outside, 1886 wrong detail, 1236 too
+small, 4365 hidden and 0 unaccounted, identical on 1, 8 and 32 threads.
+
+Three of those buckets did not exist until an adversarial review pointed out
+that the counters had never added up: rejected-whole was reported as too small,
+so a batch behind the camera was called too small to see, and the frustum and
+detail-level exits were counted nowhere at all.
 
 ## The bottleneck moved, and one decision reversed with it
 

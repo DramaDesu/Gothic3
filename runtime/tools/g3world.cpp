@@ -1534,12 +1534,18 @@ int main(int argc, char **argv)
     renderer.setOcclusionThreshold(occlusionPixels);
     if (cullThreads > 0)
         renderer.setCullThreads(unsigned(cullThreads));
+    // Jitter sets the grain to one itself, so an explicit grain is applied
+    // after it rather than before.
+    if (cullJitter > 0)
+    {
+        renderer.setCullJitter(unsigned(cullJitter));
+    }
     if (cullGrain > 0)
         renderer.setCullGrain(unsigned(cullGrain));
     if (cullJitter > 0)
     {
-        renderer.setCullJitter(unsigned(cullJitter));
-        std::printf("culling with jitter up to %d spins a batch, one batch at a time\n", cullJitter);
+        std::printf("culling with jitter up to %d spins a batch, %u batches at a time\n", cullJitter,
+                    renderer.cullGrain());
     }
     renderer.setLightmaps(std::move(lightmapColours));
     renderer.setLightmapDirections(std::move(lightmapIncident));
@@ -2132,8 +2138,12 @@ int main(int argc, char **argv)
                 std::printf("%.2fM instances walked by the cull\n", double(renderer.testedInstances()) / 1e6);
                 std::printf("%zu draws, %.2fM triangles submitted\n", renderer.submittedDraws(),
                             double(renderer.submittedTriangles()) / 1e6);
-                std::printf("%zu of %zu instances drawn\n", renderer.visibleInstances(),
-                            renderer.instanceCount());
+                std::printf("%zu of %zu instances drawn; %zu rejected whole, %zu outside, %zu wrong detail, "
+                            "%zu too small, %zu occluded, %td unaccounted\n",
+                            renderer.visibleInstances(), renderer.instanceCount(),
+                            renderer.rejectedWholeInstances(), renderer.outsideViewInstances(),
+                            renderer.wrongLodInstances(), renderer.tooSmallInstances(),
+                            renderer.occludedInstances(), renderer.unaccountedInstances());
                 if (streaming)
                 {
                     std::printf("%zu sectors arrived and %zu left while flying; %zu resident now\n", sectorsArrived,

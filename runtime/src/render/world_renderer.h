@@ -166,7 +166,16 @@ class WorldRenderer
     // Makes each batch wait a pseudo-random moment before being culled, so the
     // order they finish in and the overlap between threads vary. Purely a way
     // of shaking the timing for a comparison; zero is off, and off is normal.
-    void setCullJitter(unsigned spins) { m_cullJitter = spins; }
+    // Shaking the timing also means taking one batch at a time, which puts
+    // every thread on the shared counter as often as possible. Set here rather
+    // than assumed at the call site, which is how the two came apart before.
+    void setCullJitter(unsigned spins)
+    {
+        m_cullJitter = spins;
+        if (spins != 0)
+            m_cullGrain = 1;
+    }
+    unsigned cullGrain() const { return m_cullGrain; }
     void setCullGrain(unsigned grain) { m_cullGrain = grain; }
     unsigned cullThreads() const { return m_pool ? m_pool->threads() : 1; }
     std::size_t occlusionTests() const { return m_occlusionTests; }
@@ -209,6 +218,13 @@ class WorldRenderer
 
     std::size_t visibleInstances() const { return m_visibleInstances; }
     std::size_t tooSmallInstances() const { return m_tooSmall; }
+    std::size_t rejectedWholeInstances() const { return m_rejectedWhole; }
+    std::size_t outsideViewInstances() const { return m_outsideView; }
+    std::size_t wrongLodInstances() const { return m_wrongLod; }
+
+    // Instances that went into no bucket. Must be zero: every way out of the
+    // cull's loop is counted, so anything missing means the merge lost it.
+    std::ptrdiff_t unaccountedInstances() const { return m_unaccounted; }
     std::size_t occludedInstances() const { return m_occluded; }
 
     // Frees what has outlived the frames in flight. Called every frame.
@@ -476,6 +492,8 @@ class WorldRenderer
     std::vector<genome::WorldMatrix> m_visible; // scratch, refilled each frame
     std::size_t m_visibleInstances = 0;
     std::size_t m_tooSmall = 0;
+    std::size_t m_rejectedWhole = 0, m_outsideView = 0, m_wrongLod = 0;
+    std::ptrdiff_t m_unaccounted = 0;
     std::size_t m_occluded = 0;
     std::size_t m_submittedTriangles = 0;
     std::size_t m_submittedDraws = 0;
@@ -491,18 +509,25 @@ class WorldRenderer
 
     // One slot per thread, so the counters need no atomic. They are size_t
     // sums, so the total is the same however the threads interleave.
-    struct CullCounts
+    // alignas rather than a padding array: a char array raises no alignment, so
+    // the vector's block was free to start off a line however much the struct
+    // was padded - and the padding expression counted nine size_t where there
+    // are eight and a double, which came out 120 bytes and straddled a line at
+    // every alignment. alignas does both jobs and needs no arithmetic.
+    struct alignas(64) CullCounts
     {
         std::size_t visible = 0, tooSmall = 0, occluded = 0, tested = 0;
         std::size_t occlusionTests = 0, draws = 0, triangles = 0;
+        // Every way out of the loop has a bucket, so that visible plus all the
+        // rejections equals what was loaded. Three of these used to be counted
+        // as "too small", including batches behind the camera, and two were
+        // counted nowhere.
+        std::size_t rejectedWhole = 0, outsideView = 0, wrongLod = 0;
         // How long this thread was actually inside batches, and how many it
         // took. If the busiest is far above the mean, the loop is waiting on a
         // tail rather than on memory.
         double seconds = 0.0;
         std::size_t batches = 0;
-        // Kept a cache line apart: two threads' counts in one line would be
-        // written by both on every instance.
-        char padding[64 - (9 * sizeof(std::size_t) + sizeof(double)) % 64]{};
     };
     std::vector<CullCounts> m_cullCounts;
     float m_occlusionPixels = 0.0f;
