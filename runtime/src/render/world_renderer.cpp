@@ -1293,7 +1293,25 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
     if (!m_pool)
         m_pool = std::make_unique<Pool>();
     m_cullCounts.assign(m_pool->threads(), CullCounts{});
+    const unsigned jitter = m_cullJitter;
+    const std::uint64_t jitterSeed = device.frameCounter();
     const auto cullBatch = [&](std::size_t batchIndex, unsigned thread) {
+        if (jitter != 0)
+        {
+            // Deliberately wasteful, and deliberately different for every
+            // (batch, thread, frame): the point is that two runs never line up.
+            std::uint64_t state = jitterSeed * 0x9E3779B97F4A7C15ull + std::uint64_t(batchIndex) * 0xBF58476D1CE4E5B9ull +
+                                  std::uint64_t(thread) * 0x94D049BB133111EBull;
+            state ^= state >> 30;
+            state *= 0xBF58476D1CE4E5B9ull;
+            state ^= state >> 27;
+            volatile std::uint64_t sink = 0;
+            const std::uint64_t spins = state % (std::uint64_t(jitter) + 1);
+            for (std::uint64_t at = 0; at < spins; ++at)
+                sink = sink + at;
+            (void)sink;
+        }
+
         CullCounts &counts = m_cullCounts[thread];
         Batch &batch = m_batches[batchIndex];
         const std::uint32_t firstInstance = static_cast<std::uint32_t>(batch.instanceBase);
@@ -1453,7 +1471,9 @@ void WorldRenderer::cull(Device &device, const std::array<float, 16> &viewProjec
 
     // Eight at a time, because a median batch of six instances would
     // otherwise be one atomic increment each.
-    m_pool->forEach(m_batches.size(), 8, cullBatch);
+    // One batch at a time when shaking: it puts every thread on the shared
+    // counter far more often than a run of eight does.
+    m_pool->forEach(m_batches.size(), jitter != 0 ? 1 : 8, cullBatch);
 
     std::size_t visibleTotal = 0;
     for (const CullCounts &counts : m_cullCounts)

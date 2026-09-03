@@ -162,6 +162,11 @@ class WorldRenderer
     // Threads the cull runs on, the caller included. One means serial, which is
     // the comparison every parallel claim here rests on.
     void setCullThreads(unsigned threads);
+
+    // Makes each batch wait a pseudo-random moment before being culled, so the
+    // order they finish in and the overlap between threads vary. Purely a way
+    // of shaking the timing for a comparison; zero is off, and off is normal.
+    void setCullJitter(unsigned spins) { m_cullJitter = spins; }
     unsigned cullThreads() const { return m_pool ? m_pool->threads() : 1; }
     std::size_t occlusionTests() const { return m_occlusionTests; }
 
@@ -484,6 +489,7 @@ class WorldRenderer
     };
     std::vector<CullCounts> m_cullCounts;
     float m_occlusionPixels = 0.0f;
+    unsigned m_cullJitter = 0;
     std::size_t m_occlusionTests = 0;
 
     // Instances big enough to hide other things: rasterised first, then used to

@@ -370,10 +370,20 @@ same counts. All three are the same pair of eyes and the same machine. A review
 whose job was to break it was started and stopped before it finished, so the
 findings are unknown rather than absent. Worth restarting.
 
-**Nothing perturbs the timing.** The thread sweep varies the count, including
-oversubscribing 32 threads onto 16 cores, but every run has the same shape. A
-race needing an unlucky interleaving would not show. Injecting jitter into the
-batch body, or running under a race detector, would say more.
+**The timing is now shaken, though not hard.** `--cull-jitter N` makes each
+batch wait a pseudo-random moment seeded by the frame, the batch and the thread,
+and drops the grain to one batch at a time so every thread hits the shared
+counter far more often. Twenty-one configurations - 1, 2, 3, 5, 8, 13 and 32
+threads at jitter 0, 400 and 4000 - all give the same screenshot hash and the
+same counts as the serial reference.
+
+Be clear about what that does and does not shake. It changes which thread gets
+which batch and the order they finish in, differently every frame, so a bug in
+the block layout or the counters has many chances to show. It barely changes how
+much the threads overlap in time: the cull goes 0.44 ms to 0.52 at the strongest
+setting, so the delays are small next to the work. A race needing two threads
+inside the same few nanoseconds is still not being hunted. That wants a race
+detector, and there is none in this toolchain.
 
 **The card is the bottleneck and its time is geometry.** 2.25 times the pixels
 costs a fifth more frame, so fragments are not the cost - 1.84M triangles in 925
