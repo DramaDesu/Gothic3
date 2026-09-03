@@ -2005,6 +2005,10 @@ int main(int argc, char **argv)
         phases.retire = device.lastRetireMillis();
         phases.fence = device.lastFenceMillis();
         phases.acquire = device.lastAcquireMillis();
+        // Everything from here to the end of the cull is counted as the cull's,
+        // because beginning the pass and setting the viewport are the frame's
+        // work too and used to sit in a gap between two phases.
+        const auto cullStart = std::chrono::steady_clock::now();
         vkCmdBeginRendering(command, &rendering);
 
         VkViewport viewport{0.0f, 0.0f, float(extent.width), float(extent.height), 0.0f, 1.0f};
@@ -2014,7 +2018,6 @@ int main(int argc, char **argv)
 
         // A pixel and a half: below that an object is a speck, whatever it is.
         const float pixelsPerRadian = float(extent.height) * 0.5f / std::tan(0.5f);
-        const auto cullStart = std::chrono::steady_clock::now();
         for (int pass = 0; pass < cullRepeat; ++pass)
             renderer.cull(device, viewProjection, eye, pixelsPerRadian, 1.5f, occlusion);
         phases.cull = millisSince(cullStart);
@@ -2034,7 +2037,6 @@ int main(int argc, char **argv)
         }
         renderer.draw(device, viewProjection, {0.45f, 0.75f, 0.35f, lightmapReplaces});
 
-        phases.record = millisSince(recordStart);
         vkCmdEndRendering(command);
         // Outside the render pass, which is where the profiler may write to its
         // query pool.
@@ -2049,6 +2051,7 @@ int main(int argc, char **argv)
         vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &toPresent);
 
+        phases.record = millisSince(recordStart);
         const auto presentStart = std::chrono::steady_clock::now();
         device.endFrame();
         phases.present = millisSince(presentStart);
@@ -2121,7 +2124,9 @@ int main(int argc, char **argv)
                         std::sort(values.begin(), values.end());
                         return values[values.size() / 2];
                     };
-                    std::printf("a median frame goes: %.2f input, %.2f streaming, %.2f waiting to begin, %.2f cull, "
+                    // Each phase's own median, not one frame's: the parts come from
+                    // different frames and need not add up to any of them.
+                    std::printf("the median of each phase: %.2f input, %.2f streaming, %.2f waiting to begin, %.2f cull, "
                                 "%.2f recording, %.2f presenting\n",
                                 pick(&FramePhases::input), pick(&FramePhases::streaming), pick(&FramePhases::begin),
                                 pick(&FramePhases::cull), pick(&FramePhases::record), pick(&FramePhases::present));

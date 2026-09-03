@@ -373,6 +373,33 @@ everything, including all the instances behind the camera the frustum would have
 thrown away for the same price. Reverted - it changes what the counters mean for
 no measured gain.
 
+## Asking only about big things does not pay
+
+Occlusion is asked of every instance that survives the frustum, however small,
+and an instance covering a handful of pixels costs the card less to draw than
+the test costs to ask. `--occlusion-pixels N` skips the question below N pixels
+of screen radius. Measured on the dense scene, uncapped:
+
+| threshold | frame | cull | triangles |
+|-----------|-------|------|-----------|
+| 0         | 0.71  | 0.34 | 1.84M     |
+| 2         | 0.68  | 0.34 | 1.85M     |
+| 4         | 0.72  | 0.32 | 1.88M     |
+| 8         | 0.76  | 0.30 | 1.98M     |
+| 16        | 0.84  | 0.23 | 2.23M     |
+
+The cull falls the whole way and the frame turns around at two pixels. The
+processor's saving becomes the card's cost, roughly one for one, so the knob
+does nothing here and the default stays at zero. It is worth keeping because the
+balance is a property of the scene rather than of the code: when the shading
+gets heavier the card's side of that trade gets dearer and the threshold starts
+to pay. The number to watch is the fence wait, which is 0.20 ms today.
+
+When this was first tried the flag had no effect at all - the patch that added
+it had failed silently and every row of the sweep was identical. Rows that agree
+across a parameter are a reason to check the parameter is connected, not a
+result.
+
 ## Open ends
 
 **The parallel cull has never been attacked by anyone but its author.** Its
