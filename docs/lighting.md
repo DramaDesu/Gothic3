@@ -3,6 +3,44 @@
 The world had none until now: the fragment shader multiplied the diffuse map by a
 fixed directional term, and everything came out flat and dark.
 
+## The highlight, and how it was checked
+
+141 of the 189 materials in front of the camera name a specular map. 109 of
+those name the diffuse file again rather than one of their own, so a third
+texture binding is a duplicate three times in four - which costs nothing here,
+because textures are counted per image and binding the same one twice is one
+descriptor write and no memory. Textures went 218 MB to 221: the 32 that are
+real.
+
+The maps are dark, means of 13 to 32 out of 255, so this is a glint on wet stone
+and metal rather than a sheen on everything. There is no SpecularPower slot
+anywhere in the shipping data, so the exponent is a choice; --specular sets it
+and the strength.
+
+Two shaders in a row had been written ahead of the data by this point, so the
+term was checked rather than looked at.
+
+**It has the shape of a highlight.** Raising the exponent narrows the lobe and
+leaves the peak where it is, which is the one signature nothing else produces.
+Measured against the same frame with the strength at zero, so only what the term
+added is counted:
+
+| exponent | pixels brightened by more than 8 | peak | mean |
+|----------|----------------------------------|------|------|
+| 2        | 65.3%                            | +122 | +33.2 |
+| 8        | 35.8%                            | +119 | +13.3 |
+| 32       | 9.5%                             | +108 | +4.0 |
+| 128      | 3.5%                             | +108 | +1.3 |
+
+Nineteen times less area, the same peak.
+
+**And it is the eye that shapes it.** That table alone does not prove the camera
+is involved: a term using only the light and the normal would narrow the same
+way. So the eye position was set to the origin deliberately and the frame
+rendered again - the picture changed, which it could not have done if the eye
+were being ignored. Same method as removing the barrier to see whether the
+synchronisation check fires.
+
 ## The lamps
 
 Sectors carry `eCStaticPointLight_PS`, and nothing was reading it. A light is
