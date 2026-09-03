@@ -204,3 +204,33 @@ than as placements, so the name lookup never runs for them and nothing in the
 forest collides. That is the next thing to find, and it is a different question
 - a tree's collision in this engine is likely a shape in its own definition
 rather than a cooked mesh in an archive.
+
+## Trees: where the collision is not
+
+Trees are placed as entities that name a `.spt` definition rather than a mesh,
+and the geometry is grown at load time, so the name lookup above never runs for
+them. Two obvious places to look for their collision turned out to be empty, and
+ruling them out is worth writing down so nobody looks again.
+
+**Not in the archives.** Searching all 6736 entries of `_compiledPhysic.pak` and
+the mesh archive for the tree names - speedtree, douglasfir, longleafpine,
+broadleaf, italiancypress, honeylocust - finds nine files, and none of them is a
+SpeedTree: seven `g3_object_tree_mushrooms_*` and two spellings of
+`g3_object_varant_tree_01`. There is no cooked collision mesh for any tree in
+the game.
+
+**Not in the definitions.** SpeedTree's own SDK lets an artist put collision
+primitives on a tree, and a `.spt` stores them in token group 18000 - a marker,
+a type, three vectors and a name, which is the shape of the SDK's
+`SCollisionObject`. Our reader already kept every token in file order, so this
+cost no new parsing. `g3sptcol` walks the archive: all 98 definitions carry
+exactly one such object, and every one is empty - type 0, all three vectors
+zero.
+
+What is left is the engine deriving something at runtime.
+`eCSpeedTreeCollisionDesc` derives from `eCPolyGeometryCollisionDesc` and offers
+`GetLocalPolygon` / `GetWorldPolygon` / `GetIntersectionCount` over a
+`SetResourceSpeedTreeEntity` - polygons produced from the SpeedTree resource
+itself. That is a ray-intersection descriptor, though, and whether the physics
+simulation uses the same polygons, a primitive, or nothing at all is not yet
+established.

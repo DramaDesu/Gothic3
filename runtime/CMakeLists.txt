@@ -127,3 +127,6 @@ target_link_libraries(g3pool PRIVATE render)
 add_executable(g3view tools/g3view.cpp)
 target_link_libraries(g3view PRIVATE render)
 add_dependencies(g3view shaders)
+
+add_executable(g3sptcol tools/g3sptcol.cpp)
+target_link_libraries(g3sptcol PRIVATE genome)
