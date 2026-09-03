@@ -1232,6 +1232,7 @@ int main(int argc, char **argv)
     // What the materials in front of the camera actually offer. 633 across the
     // archive is a number about the archive; this one is about the scene.
     std::size_t materialsSeen = 0, materialsWithNormal = 0, normalsMissing = 0;
+    std::size_t normalsSwizzled = 0, normalsPlain = 0, normalsOdd = 0;
     // Per material name, the normal map it resolved to. Kept beside the diffuse
     // cache rather than inside it because a material can name one without the
     // other.
@@ -1333,6 +1334,45 @@ int main(int argc, char **argv)
                                 }
                                 imageOfFile.emplace(resolvedBump.fileName, loadedBump);
                                 normalOf.emplace(element.materialName, loadedBump);
+
+                                // How it is encoded. Plain tangent-space RGB
+                                // varies in red, green and blue; the swizzled
+                                // layout of the era pins red and blue and puts
+                                // X in alpha. Four samples of nature texture is
+                                // not a rule, so every one is classified.
+                                if (loadedBump)
+                                {
+                                    std::vector<std::uint8_t> decoded;
+                                    if (genome::decodeLevel(*loadedBump, 0, 0, decoded, &ignored))
+                                    {
+                                        std::uint8_t low[4] = {255, 255, 255, 255};
+                                        std::uint8_t high[4] = {0, 0, 0, 0};
+                                        const std::size_t texels = decoded.size() / 4;
+                                        for (std::size_t at = 0; at < texels; ++at)
+                                            for (int channel = 0; channel < 4; ++channel)
+                                            {
+                                                const std::uint8_t value = decoded[at * 4 + channel];
+                                                low[channel] = std::min(low[channel], value);
+                                                high[channel] = std::max(high[channel], value);
+                                            }
+                                        const bool redFlat = high[0] - low[0] < 8;
+                                        const bool blueFlat = high[2] - low[2] < 8;
+                                        const bool alphaVaries = high[3] - low[3] > 32;
+                                        if (redFlat && blueFlat && alphaVaries)
+                                            ++normalsSwizzled;
+                                        else if (!redFlat && !blueFlat)
+                                            ++normalsPlain;
+                                        else
+                                        {
+                                            ++normalsOdd;
+                                            if (normalsOdd <= 3)
+                                                std::printf("odd normal map %s: r %u..%u g %u..%u b %u..%u "
+                                                            "a %u..%u\n",
+                                                            resolvedBump.fileName.c_str(), low[0], high[0], low[1],
+                                                            high[1], low[2], high[2], low[3], high[3]);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1383,6 +1423,8 @@ int main(int argc, char **argv)
     std::printf("%zu distinct textures, %zu mesh elements left untextured\n", images.size(), untextured);
     std::printf("%zu materials seen, %zu name a normal map that exists, %zu name one that does not\n",
                 materialsSeen, materialsWithNormal, normalsMissing);
+    std::printf("of those normal maps %zu are swizzled (x in alpha), %zu plain rgb, %zu neither\n",
+                normalsSwizzled, normalsPlain, normalsOdd);
     if (untextured != 0)
     {
         // Name a few so the gap is diagnosable rather than just white.

@@ -168,9 +168,10 @@ bool WorldRenderer::create(Device &device, const Budget &budget, std::string *er
     poolInfo.pPoolSizes = &poolSize;
     vkCreateDescriptorPool(device.device(), &poolInfo, nullptr, &m_descriptorPool);
 
-    // Flat in tangent space: 128,128,255 decodes to a normal straight out of
-    // the surface. White would decode to one pointing nowhere useful.
-    const genome::Image flat = solidImage(128, 128, 255, 255);
+    // Flat in the layout the game actually uses: X in alpha and Y in green,
+    // both at the halfway value, which rebuilds to a normal straight out of the
+    // surface. Red and blue are not read.
+    const genome::Image flat = solidImage(0, 128, 0, 128);
     if (!createTexture(device, flat, false, m_flatNormal, error))
         return false;
 

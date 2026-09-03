@@ -74,14 +74,17 @@ void main()
 
     if (push.normalStrength > 0.0)
     {
-        // Tangent space, so the flat value is 0.5,0.5,1 and decodes to a normal
-        // straight out of the surface.
-        vec3 tangentNormal = texture(normalMap, inTexCoord).xyz * 2.0 - 1.0;
-        if (dot(tangentNormal, tangentNormal) > 1e-4)
-        {
-            vec3 mapped = normalize(tangentFrame(normal, inWorld, inTexCoord) * tangentNormal);
-            normal = normalize(mix(normal, mapped, push.normalStrength));
-        }
+        // Swizzled, not plain rgb: every one of the 76 normal maps in a
+        // resident set has red and blue pinned flat with X in alpha and Y in
+        // green, which is the layout of the era. Z is not stored at all - it
+        // is the third side of a unit vector, and rebuilding it is why the two
+        // channels are enough.
+        vec4 packed = texture(normalMap, inTexCoord);
+        vec2 xy = vec2(packed.a, packed.g) * 2.0 - 1.0;
+        vec3 tangentNormal = vec3(xy, sqrt(max(0.0, 1.0 - dot(xy, xy))));
+
+        vec3 mapped = normalize(tangentFrame(normal, inWorld, inTexCoord) * tangentNormal);
+        normal = normalize(mix(normal, mapped, push.normalStrength));
     }
 
     // Foliage is drawn as quads whose texture is mostly empty, so its
