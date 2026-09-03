@@ -1912,6 +1912,10 @@ int main(int argc, char **argv)
 
     auto previous = std::chrono::steady_clock::now();
     std::size_t frames = 0;
+    // What a sector holds once its instances are counted rather than its
+    // meshes: the number any collision structure would be built over.
+    std::vector<std::size_t> sectorTriangles;
+    std::vector<std::size_t> newTriangles;
     std::vector<std::string> arriving;
     // Atlas tiles a departed sector gave back, held until no submitted frame
     // can still be sampling them. The next arrival would otherwise take one and
@@ -2143,6 +2147,27 @@ int main(int argc, char **argv)
                         }
                         renderer.updatePatchAtlas(device, regions, &error);
                         arrivalPatches += since(patchStart);
+                        // Placed triangles, not distinct ones: a crate used
+                        // twenty times is one mesh to the renderer and twenty
+                        // sets of triangles to anything that has to collide.
+                        // And how much of it is geometry never seen before,
+                        // which is what a per-mesh structure would actually
+                        // have to build. The arena knows: it only grows for a
+                        // mesh that was not already there.
+                        const std::size_t indicesBefore = renderer.triangleCount();
+                        std::size_t placed = 0;
+                        for (const render::MeshInstances &batch : content.batches)
+                        {
+                            if (!batch.mesh)
+                                continue;
+                            std::size_t ofOne = 0;
+                            for (const genome::MeshElement &element : batch.mesh->elements)
+                                ofOne += element.indices.size() / 3;
+                            placed += ofOne * batch.transforms.size();
+                        }
+                        sectorTriangles.push_back(placed);
+                        newTriangles.push_back(renderer.triangleCount() - indicesBefore);
+
                         workThisFrame |= 1;
                         lightsStale = true;
                         residentSectors.push_back(std::move(content));
@@ -2399,6 +2424,26 @@ int main(int argc, char **argv)
                     if (sectorsUnwanted != 0)
                         std::printf("%zu sectors finished loading after the camera had left them\n",
                                     sectorsUnwanted);
+                    if (!sectorTriangles.empty())
+                    {
+                        std::vector<std::size_t> sorted = sectorTriangles;
+                        std::sort(sorted.begin(), sorted.end());
+                        std::size_t total = 0;
+                        for (std::size_t one : sorted)
+                            total += one;
+                        std::printf("a sector brings %zu triangles at the median, %zu at the 90th, %zu at most, "
+                                    "%zu at least; %zu across %zu arrivals\n",
+                                    sorted[sorted.size() / 2], sorted[sorted.size() * 9 / 10], sorted.back(),
+                                    sorted.front(), total, sorted.size());
+                        std::vector<std::size_t> fresh = newTriangles;
+                        std::sort(fresh.begin(), fresh.end());
+                        std::size_t freshTotal = 0;
+                        for (std::size_t one : fresh)
+                            freshTotal += one;
+                        std::printf("of those %zu are triangles never seen before: %zu at the median, %zu at the "
+                                    "90th, %zu at most\n",
+                                    freshTotal, fresh[fresh.size() / 2], fresh[fresh.size() * 9 / 10], fresh.back());
+                    }
                     if (sectorsRefused != 0)
                         std::printf("%zu sectors did not fit and were put back, costing %.0f ms in all\n",
                                     sectorsRefused, refusedCost);

@@ -20,7 +20,8 @@ add_library(genome STATIC
   src/genome/spt.cpp
   src/genome/tree.cpp
   src/genome/lightmap.cpp
-  src/genome/residency.cpp)
+  src/genome/residency.cpp
+  src/genome/collision.cpp)
 target_include_directories(genome PUBLIC src)
 target_link_libraries(genome PRIVATE miniz)
 
@@ -47,6 +48,9 @@ target_link_libraries(g3anim PRIVATE genome)
 
 add_executable(g3pose tools/g3pose.cpp)
 target_link_libraries(g3pose PRIVATE genome)
+
+add_executable(g3phys tools/g3phys.cpp)
+target_link_libraries(g3phys PRIVATE genome)
 
 add_executable(g3lightmap tools/g3lightmap.cpp)
 target_link_libraries(g3lightmap PRIVATE genome)
