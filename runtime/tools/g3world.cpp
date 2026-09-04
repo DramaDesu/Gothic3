@@ -506,7 +506,7 @@ int main(int argc, char **argv)
     // it: how many placements name a file, how many of those names resolve, and
     // how often the name and the rule disagree about which mesh it is.
     std::size_t namedPlacements = 0, namedShapes = 0, namedResolved = 0, namedDiffers = 0;
-    std::set<std::string> namedUnresolved, namedDisagreements;
+    std::set<std::string> namedUnresolved, namedDisagreements, namedStairs;
     // Every shape by kind, because a placement whose collision is a primitive
     // gets nothing from the name rule at all.
     std::map<int, std::size_t> shapesByKind;
@@ -1432,6 +1432,17 @@ int main(int argc, char **argv)
                                 there = true;
                             if (there)
                                 ++namedResolved;
+                            // A shape whose file is named for stairs, whatever
+                            // the visual it belongs to is called.
+                            if (bare.find("stair") != std::string::npos ||
+                                bare.find("Stair") != std::string::npos)
+                            {
+                                char where[96];
+                                std::snprintf(where, sizeof(where), "%.0f %.0f %.0f  ",
+                                              placement.world[12], placement.world[13],
+                                              placement.world[14]);
+                                namedStairs.insert(std::string(where) + placement.meshName);
+                            }
                             else if (namedUnresolved.size() < 8)
                                 namedUnresolved.insert(shape.meshName);
 
@@ -1720,6 +1731,8 @@ int main(int argc, char **argv)
                                 namedPlacements, namedShapes, namedResolved, namedDiffers);
                     for (const std::string &name : namedUnresolved)
                         std::printf("  names nothing: %s\n", name.c_str());
+                    for (const std::string &pair : namedStairs)
+                        std::printf("  stairs: %s\n", pair.c_str());
                     for (const std::string &pair : namedDisagreements)
                         std::printf("  rule vs name: %s\n", pair.c_str());
                     static const char *kindNames[] = {"none",    "trimesh", "plane",      "box",
@@ -2927,7 +2940,12 @@ int main(int argc, char **argv)
                     ++stepNoLift;
                 else if (travelled(wasAt) <= made + 1.0f)
                     ++stepNoGain;
-                if (!landing || lift <= 2.0f || travelled(wasAt) <= made + 1.0f)
+                // And no higher than a step. Raising the body then letting it
+                // settle can leave it standing on something well above the
+                // threshold - the first walk that ever took a step took one of
+                // 97, which is a climb rather than a stride.
+                if (!landing || lift <= 2.0f || lift > c_StepHeight ||
+                    travelled(wasAt) <= made + 1.0f)
                 {
                     feet = blocked;
                     onGround = blockedGround;

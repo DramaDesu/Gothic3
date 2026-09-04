@@ -470,12 +470,19 @@ It was not climbing anything; it was paying for a second sliding attempt every
 frame. A step now has to end the body higher than it started, and that is what
 the counter reports.
 
-**What is still unshown.** Step-down fires and works - it keeps a body grounded
-down slopes rather than launching it. Step-up has not yet been seen to succeed
-on real geometry: in every walk tested, every refusal was the correct one, a
-probe that came back at the height it left from, which is what a wall gives. The
-walks never met a staircase, and looking for one in the sectors we load turned
-up no placement whose mesh is named for stairs at all - which may mean we are
-not loading every layer of the world. That is the next thing to settle, and
-until it is, the positive case rests on the mechanism rather than on a
-measurement.
+**Finding a staircase to test on.** The first search said the world places no
+stairs at all, which would have been remarkable. It was a bad search: it looked
+at the visual mesh name a sector lists for each placement. Asking instead for the
+collision file each placement *names* - which we read now - found them at once:
+
+    59403 7899 58444  G3_Myrtana_Castle_Wall_Stairs_02.xcmsh
+    60253 7670 54880  G3_Myrtana_Faring_Stairs_01.xcmsh
+    34554 6704 49090  G3_Myrtana_Gotha_Stairs_01.xcmsh
+
+**What the first real step showed.** Walking at one of those took a step, and it
+lifted the body by 97 against a threshold of 70. Raising the capsule and letting
+it settle can leave it standing on something well above the threshold, so a climb
+passed as a stride; the lift is clamped to the step height now. Step-down fires
+and works. Step-up now rests on that one observed step - a body dropped near a
+staircase spends the run falling rather than walking, so a clean approach to
+measure many is still wanted.
