@@ -1878,6 +1878,68 @@ int main(int argc, char **argv)
     // materials in the shipping data resolve to 634 distinct files, one of them
     // named twenty-five times.
     std::map<std::string, const genome::Image *> imageOfFile;
+
+    // The hero's own textures, through those same caches. A submesh names a
+    // material, the material names source textures, and the skin variant
+    // decides which of them actually shipped - the hero's is zero.
+    std::vector<std::vector<render::CharacterRenderer::SubmeshTextures>> heroTextures;
+    const auto resolveActorTextures = [&](const genome::Actor &actor) {
+        std::vector<render::CharacterRenderer::SubmeshTextures> out(actor.submeshes.size());
+        if (!materials || !imageArchive)
+            return out;
+        const auto slot = [&](const genome::Material &material,
+                              genome::Slot which) -> const genome::Image * {
+            const genome::Sampler *sampler = material.texture(which);
+            if (!sampler)
+                return nullptr;
+            const genome::TextureResolution resolved = genome::resolveTexture(*sampler, 0, exists);
+            if (resolved.fileName.empty())
+                return nullptr;
+            const auto already = imageOfFile.find(resolved.fileName);
+            if (already != imageOfFile.end())
+                return already->second;
+
+            auto image = std::make_unique<genome::Image>();
+            std::string why;
+            if (!genome::loadImage(imageArchive->read(resolved.fileName, &why), *image, &why))
+                return nullptr;
+            const genome::Image *made = image.get();
+            images.push_back(std::move(image));
+            imageOfFile.emplace(resolved.fileName, made);
+            return made;
+        };
+
+        for (std::size_t index = 0; index < actor.submeshes.size(); ++index)
+        {
+            // The materials table is sparse: a submesh can name a slot that
+            // is empty, and reading it would be reading nothing.
+            const std::uint8_t which = actor.submeshes[index].materialIndex;
+            if (which >= actor.materials.size() || actor.materials[which].empty())
+                continue;
+            genome::Material material;
+            std::string why;
+            if (!genome::loadMaterial(materials->read(actor.materials[which], &why), material, &why))
+                continue;
+            out[index].diffuse = slot(material, genome::Slot::Diffuse);
+            out[index].normal = slot(material, genome::Slot::Normal);
+        }
+        return out;
+    };
+    if (!heroBody.submeshes.empty())
+    {
+        heroTextures.push_back(resolveActorTextures(heroBody));
+        heroTextures.push_back(resolveActorTextures(heroHead));
+        std::size_t withDiffuse = 0, withNormal = 0, total = 0;
+        for (const auto &piece : heroTextures)
+            for (const auto &submesh : piece)
+            {
+                ++total;
+                withDiffuse += submesh.diffuse != nullptr;
+                withNormal += submesh.normal != nullptr;
+            }
+        std::printf("hero textures: %zu submeshes, %zu with a diffuse, %zu with a normal\n",
+                    total, withDiffuse, withNormal);
+    }
     // What the materials in front of the camera actually offer. 633 across the
     // archive is a number about the archive; this one is about the scene.
     std::size_t materialsSeen = 0, materialsWithNormal = 0, normalsMissing = 0;
@@ -2452,6 +2514,20 @@ int main(int argc, char **argv)
         budget.indices = std::size_t(double(budgetIndices) * room) + 4096;
         budget.lightVertices = std::size_t(double(budgetLit) * room) + 4096;
         budget.instances = std::size_t(double(budgetInstances) * room) + 4096;
+    }
+
+    // The hero, on the device the world renderer is about to take. Both use
+    // dynamic rendering with the same colour and depth formats, so they share
+    // the device and the pass without either knowing about the other.
+    if (!heroTextures.empty())
+    {
+        std::vector<render::CharacterRenderer::Piece> pieces{{&heroBody, heroTextures[0]},
+                                                            {&heroHead, heroTextures[1]}};
+        if (!character.create(device, pieces, &error))
+            std::printf("hero: %s\n", error.c_str());
+        else
+            std::printf("hero: %zu vertices, %zu indices, %zu bones on the device\n",
+                        character.vertexCount(), character.indexCount(), character.boneCount());
     }
 
     if (!renderer.create(device, budget, &error))
