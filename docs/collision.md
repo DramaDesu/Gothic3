@@ -346,11 +346,29 @@ matrix, the inverse of its linear part and a world box - makes the same set
 65 thousand entries and **4 ms**, and the query goes the other way: into the
 instance's own space, where its triangles already are.
 
-A query touches 3.8 instances on average through a ten-metre grid, and costs
-**285 us**. That is fine for the one query a frame a camera makes and too slow
-for a character controller that sweeps. The cost is not the grid, which is doing
-its job, but that an instance is then tested triangle by triangle: the next
-thing this wants is an index inside the mesh, not a better one over the world.
+**Two indexes, and the second is the one that mattered.** The grid narrows a
+query to 3.8 instances, which is its job done; the cost was what happened next,
+because an instance was then tested triangle by triangle and some instances are
+buildings. So each distinct mesh now carries a bounding-volume tree over its own
+triangles, built once however many times it is placed - a median split on the
+widest axis, eight triangles a leaf, with the leaf triangles copied into the
+order the leaves read them.
+
+| | before | after |
+| --- | --- | --- |
+| a ground query | 285 us | **3 us** |
+| first build | 8 ms | 180 ms |
+| rebuild when the streamed set moves | 8 ms | **6 ms** |
+
+The 534 distinct meshes hold 565872 triangles between them and are placed
+5340859 times, so building the trees is the one-off and reusing them is the
+rebuild - `clear()` keeps them deliberately and `forget()` is there for when a
+mesh actually goes away. The first 180 ms is on the startup path and could be
+threaded; it has not been.
+
+The check that the tree did not change any answer is that the stack of surfaces
+under the test camera came back identical to the last digit. A faster wrong
+answer is easy to write and hard to notice.
 
 ### Two bugs, and what each looked like
 

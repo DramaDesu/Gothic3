@@ -10,11 +10,17 @@
 // instance is a pointer and a matrix, so the same set is 65 thousand of those,
 // and a query goes the other way - into the instance's own space, where its
 // triangles already are.
+//
+// Two indexes, then: a grid over the instances to find which ones a query could
+// touch, and a tree inside each distinct mesh to find which of its triangles.
+// The second is the one that matters - the grid narrows a query to a handful of
+// instances quickly, and some of those instances are buildings.
 
 #include "genome/mesh.h"
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -23,10 +29,35 @@ namespace physics
 
 using Matrix = std::array<float, 16>;
 
+// A bounding-volume tree over one mesh's triangles, in the mesh's own space.
+// Built once per distinct mesh however many times it is placed.
+struct MeshIndex
+{
+    struct Node
+    {
+        std::array<float, 6> bounds{}; // min then max
+        std::uint32_t child = 0;       // inner: the first of two adjacent children
+        std::uint32_t first = 0;       // leaf: where its triangles start
+        std::uint32_t count = 0;       // leaf: how many; zero marks an inner node
+    };
+
+    std::vector<Node> nodes;
+    // Nine floats a triangle, in the order the leaves want them, so a leaf reads
+    // one run of memory.
+    std::vector<float> triangles;
+
+    std::size_t triangleCount() const { return triangles.size() / 9; }
+};
+
 class CollisionWorld
 {
   public:
+    // Drops the instances and the grid, and keeps the per-mesh trees: the
+    // streamed set changes far more often than the set of distinct meshes, and
+    // rebuilding those trees each time cost 182 ms against 8. Call forget() as
+    // well if any mesh handed to add() is destroyed.
     void clear();
+    void forget();
 
     // One placement of a mesh. The matrix is the engine's own convention - row
     // major with the translation in the fourth row - so its rows apply the way
@@ -42,11 +73,14 @@ class CollisionWorld
 
     std::size_t instanceCount() const { return m_instances.size(); }
     std::size_t triangleCount() const { return m_triangles; }
+    std::size_t distinctTriangles() const;
+    std::size_t meshCount() const { return m_indexOf.size(); }
     std::size_t cellCount() const { return m_cells.size(); }
     std::size_t referenceCount() const { return m_references; }
-    // How many instances the last query had to look at, which is the number
-    // that says whether the grid is doing its job.
+    // What the last query had to look at: instances that passed the grid and the
+    // box, and triangles that reached an actual intersection test.
     std::size_t lastVisited() const { return m_visited; }
+    std::size_t lastTested() const { return m_tested; }
 
   private:
     // Ten metres across. Small enough that a query touches few instances, large
@@ -55,7 +89,7 @@ class CollisionWorld
 
     struct Instance
     {
-        const genome::Mesh *mesh = nullptr;
+        const MeshIndex *index = nullptr;
         Matrix world{};
         // The 3x3 that undoes the matrix's linear part, and the translation it
         // undoes, so a query can be asked in the instance's own space.
@@ -78,15 +112,15 @@ class CollisionWorld
         }
     };
 
-    // The local box of each distinct mesh, computed on its first placement.
-    // The meshes built for collision carry no bounds of their own, and a
-    // placement's box is what lets a query reject it without reading a triangle.
-    std::unordered_map<const genome::Mesh *, std::array<float, 6>> m_localBounds;
+    const MeshIndex *indexFor(const genome::Mesh &mesh);
+
+    std::unordered_map<const genome::Mesh *, std::unique_ptr<MeshIndex>> m_indexOf;
     std::vector<Instance> m_instances;
     std::unordered_map<Cell, std::vector<std::uint32_t>, CellHash> m_cells;
     std::size_t m_triangles = 0;
     std::size_t m_references = 0;
     mutable std::size_t m_visited = 0;
+    mutable std::size_t m_tested = 0;
 };
 
 } // namespace physics

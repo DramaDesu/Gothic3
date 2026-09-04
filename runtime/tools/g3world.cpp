@@ -2415,9 +2415,9 @@ int main(int argc, char **argv)
             addFrom(content.batches);
         solid.build();
         if (report)
-            std::printf("solid: %zu triangles in %zu cells, %zu references, built in %.0f ms\n",
-                        solid.triangleCount(), solid.cellCount(), solid.referenceCount(),
-                        since(start) * 1000.0);
+            std::printf("solid: %zu triangles placed from %zu distinct in %zu meshes, %zu cells, %zu references, built in %.0f ms\n",
+                        solid.triangleCount(), solid.distinctTriangles(), solid.meshCount(),
+                        solid.cellCount(), solid.referenceCount(), since(start) * 1000.0);
     };
 
     if (!batches.empty() && !renderer.addSector(device, 0, batches, {}, &error))
@@ -2433,6 +2433,10 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    rebuildSolid(true);
+    // Again, to show what a streaming rebuild costs: the first pass had to build
+    // a tree for every distinct mesh and the second reuses them, which is the
+    // difference between a one-off and a cost paid whenever the rectangle moves.
     rebuildSolid(true);
     renderer.reportArenas();
     if (const char *dump = std::getenv("G3_DUMP_ATLAS"))

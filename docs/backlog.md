@@ -44,11 +44,10 @@ zones. Roughly half the world's trees have an obstacle there and the other half
 is a statement about what the game considers an obstacle that our per-tree
 shapes do not make.
 
-**A ground query costs 285 us, and the cost is inside the mesh.** The grid over
-instances works - 3.8 candidates a query - but each candidate is then tested
-triangle by triangle, and some of them are buildings. A character controller
-sweeping a capsule needs several queries a frame, so this wants an index inside
-each mesh before it wants anything else.
+**Building the collision trees costs 180 ms at startup.** One-off, and on the
+startup path: 534 meshes, 565872 triangles. The worker pool is right there and
+each mesh is independent of every other, so this is a fan-out waiting to happen.
+A streaming rebuild is 6 ms and does not need it.
 
 **Nothing falls yet.** `--walk` snaps the eye to whatever is under its feet with
 no gravity, no step limit and no wall collision, so it teleports up cliffs and
