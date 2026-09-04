@@ -67,16 +67,27 @@ rather than sleeping blind:
 python .claude/skills/gothic3-live/scripts/g3.py wait --timeout 300
 ```
 
-**Loading a save has no command.** `load_game` does not exist on this channel.
-The way in is the game's own quickload key, **F9**, sent with `g3_input` - which
-is what `mcp/cycle.py` does. It only works once a world is loaded: **F9 at the
-main menu does nothing** (verified). So loading a specific save means starting a
-new game first, or adding a `load_game` handler to `Script_Mcp.dll`, whose
-sibling handlers are in `gothic3sdk-examples/examples/Script_RemoteControl/src/handler/`.
+**Loading a save does not work at all, by any route found so far.** There is no
+`load_game` on this channel. `mcp/cycle.py` sends **F9** and calls it a
+quickload, and that is worth not believing: F9 sent through `g3_input` loads
+nothing, at the menu or in a world.
 
-`list_saves` lists what exists. `save_game --name X` writes one, which is worth
-doing once the game is somewhere useful - it turns a three-minute setup into an
-F9.
+The two tests, so nobody has to repeat them. At the main menu, after F9 the state
+was still `MENU` two minutes later. In a world, F9 left `state_time` climbing -
+67 seconds before, 114 after - where a load would have reset it. It is the
+absence of that reset that settles it; the position and health look identical
+either way when the save was taken where the hero already stands, which is what
+makes this easy to get wrong.
+
+So the only way into a world is `new_game`, every time, at about 160 seconds.
+Making a save reachable means adding a `load_game` handler to `Script_Mcp.dll` -
+its sibling handlers are in
+`gothic3sdk-examples/examples/Script_RemoteControl/src/handler/` and are short.
+That is the single highest-value change available to this setup.
+
+`list_saves` lists what exists and `save_game --name X` writes one, and both
+work - a save is tracked in `ping`'s `last_save`. Writing one still costs
+nothing and will be worth having the day loading works.
 
 ## Do not drive the menu with the mouse
 
@@ -84,7 +95,7 @@ It looks like it should work and it does not. The in-game cursor is not drawn
 into `g3_screenshot` output, so its position cannot be seen, and `g3_input`'s
 `move` is relative, so a click lands somewhere unknown. Pinning the cursor to a
 corner with a large negative move first does not help either - tried, and the
-menu still took no hover. Use `new_game` and F9.
+menu still took no hover. Use `new_game`.
 
 ## Do not hammer the channel
 
@@ -130,5 +141,15 @@ g3.py new_game
 g3.py wait                    -> about 160 s to INGAME
 g3.py combat_state            -> where the hero is, what it is doing
 g3_screenshot                 -> look at it
-g3.py save_game --name probe  -> so the next session is an F9 away
+g3.py save_game --name probe  -> cheap, though nothing can load it yet
 ```
+
+## Reading whether something happened
+
+`ping` carries `last_load` and `last_save`, but they only record what the channel
+itself did - a load started from the keyboard leaves `last_load` untouched, so it
+cannot be used to tell whether one happened.
+
+`combat_state`'s `state_time` can: it counts up with the world and a load resets
+it. That is the reliable tell for "did the world restart", and it is how the F9
+claim above was disproved.
