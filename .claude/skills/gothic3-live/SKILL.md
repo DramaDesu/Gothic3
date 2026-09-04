@@ -97,6 +97,21 @@ into `g3_screenshot` output, so its position cannot be seen, and `g3_input`'s
 corner with a large negative move first does not help either - tried, and the
 menu still took no hover. Use `new_game`.
 
+## g3_input is real gameplay, not a sandbox
+
+Keys go to the running game and mean what they mean there. `return` is not
+"dismiss this box" - in a world it is use-and-talk, and sending it to close a
+tutorial popup opened a conversation with the nearest villager. Escape does not
+leave a Gothic 3 conversation either, so that is not the way back out.
+
+Before sending anything, read `combat_state`'s `task`: `PS_Normal` is ordinary
+play, `ZS_Talk` means the hero is in a dialogue and every key now picks an answer
+in someone's save. `current_target` names who.
+
+Also worth knowing: a key sent this way is a tap, press and release. There is no
+hold, so `w` steps once rather than walking, and a walking animation cannot be
+observed this way without sending a stream of taps.
+
 ## Do not hammer the channel
 
 The server is one connection at a time and it is inside the game's own tick.
