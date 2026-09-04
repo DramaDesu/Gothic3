@@ -19,6 +19,8 @@
 #include "genome/world.h"
 #include "render/window.h"
 #include "render/profile.h"
+#include "genome/motion.h"
+#include "render/renderer.h"
 #include "render/tree_atlas.h"
 #include "render/world_renderer.h"
 
@@ -1797,8 +1799,49 @@ int main(int argc, char **argv)
     // are shared across the meshes using them. Kept as a pass rather than a
     // phase, because a sector arriving later needs exactly the same work done
     // to it and the caches behind it are what make that cheap.
+    const auto animations = genome::PakArchive::open(dataDirectory + "/_compiledAnimation.pak", nullptr);
     const auto materials = genome::PakArchive::open(dataDirectory + "/_compiledMaterial.pak", nullptr);
     const auto imageArchive = genome::PakArchive::open(dataDirectory + "/_compiledImage.pak", nullptr);
+
+    // The hero: a body and a head, two actors that share one skeleton. The
+    // skeleton comes from the body alone - the head carries its own, shorter
+    // one, and posing the body with it puts bones tens of centimetres wrong.
+    genome::Actor heroBody, heroHead;
+    genome::Skeleton heroSkeleton;
+    std::vector<genome::Motion> heroClips;
+    if (animations)
+    {
+        std::string why;
+        const bool haveBody = genome::loadActor(animations->read("g3_hero_body_player.xact", &why),
+                                                heroBody, &why);
+        const bool haveHead = genome::loadActor(animations->read("g3_head_hero_hero_01.xact", &why),
+                                                heroHead, &why);
+        if (haveBody)
+            heroSkeleton = genome::buildSkeleton(heroBody);
+
+        // Idle, walk and run. The number at the end of each name is the ground
+        // speed the clip was authored for, in the world's own centimetres a
+        // second, which is what lets the controller's speed choose between
+        // them later. The '%' in these names is a literal character in the
+        // archive, not a format specifier.
+        static const char *const c_ClipNames[] = {
+            "hero_stand_none_none_p0_move_stand_n_fwd_00_%_00_p0_0.xmot",
+            "hero_stand_none_none_p0_move_walk_n_fwd_00_%_00_p0_160.xmot",
+            "hero_stand_none_none_p0_move_run_n_fwd_00_%_00_p0_400.xmot"};
+        for (const char *name : c_ClipNames)
+        {
+            genome::Motion clip;
+            if (genome::loadMotion(animations->read(name, &why), clip, &why))
+                heroClips.push_back(std::move(clip));
+        }
+
+        std::printf("hero: body %zu nodes %zu submeshes, head %zu nodes %zu submeshes, "
+                    "skeleton %zu bones, %zu of 3 clips\n",
+                    heroBody.nodes.size(), heroBody.submeshes.size(), heroHead.nodes.size(),
+                    heroHead.submeshes.size(), heroSkeleton.bones.size(), heroClips.size());
+    }
+    else
+        std::printf("hero: no _compiledAnimation.pak beside the mesh archive\n");
 
     std::set<std::string> imageNames;
     if (imageArchive)
@@ -2337,6 +2380,12 @@ int main(int argc, char **argv)
     // zeros - so the lighting was not wrong, it was absent, and every attempt to
     // change it changed nothing at all.
     render::WorldRenderer renderer;
+    // The skinned path, which g3view already uses and this viewer never has.
+    // Declared before anything is built with it so that the linker keeps the
+    // object at all: nothing here referenced CharacterRenderer, so its whole
+    // translation unit was dropped and the mesh shaders never reached the
+    // binary. Whether they do is the check that this step exists to pass.
+    render::CharacterRenderer character;
     // Everything that is not a sector's: the landscape's own lights and the
     // vegetation layers'. The rest are added back whenever the resident set
     // changes, which is the only way a sector's torches arrive with it.
@@ -3513,6 +3562,12 @@ int main(int argc, char **argv)
     vkDeviceWaitIdle(device.device());
     loader.stop();
     renderer.stopProfiling();
+    // Safe on an object that was never created - every handle inside is guarded
+    // - and it is what actually pulls the skinned renderer into this binary.
+    // Declaring the object was not enough: its constructor is implicit and
+    // inline, so nothing referred to the compiled object and the linker dropped
+    // it, mesh shaders and all.
+    character.destroy(device);
     renderer.destroy(device);
     render::destroyTreeAtlas(device, treeAtlas);
     device.destroy();
