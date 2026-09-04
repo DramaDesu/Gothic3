@@ -280,12 +280,18 @@ metres to centimetres, and the fraction of the tree's height that the canopy
 centre or the trunk top sits at. That a blind fit landed on a clean hundred is
 an independent check that these are metres, like every other collision here.
 
-**Two shape groups, and we draw both.** The engine distinguishes
-`eEShapeGroup_Tree_Trunk` from `eEShapeGroup_Tree_Branches`, so the trunk and the
-canopy are not the same kind of obstacle - a player walks into the first, and an
-arrow is stopped by the second. The picture above draws both, which is why a wood
-reads as a field of blocks. Whether to keep the canopy for the player is a
-decision we have not made yet.
+**Two shape groups, and only one of them stops you.** The engine distinguishes
+`eEShapeGroup_Tree_Trunk` from `eEShapeGroup_Tree_Branches`, and the difference
+turned out to matter more than it looked. Both are drawn - the picture above
+draws both, which is why a wood reads as a field of blocks - but only the trunk
+is solid.
+
+The measurement that decided it: walking eight headings from one spot in a wood
+covered 400 to 650 of the 1750 asked, while the same walk with tree collision
+left out covered 1741 and 1866. A canopy sphere's radius is about 27 per cent of
+the tree's height, so a wood is a field of overlapping balls at head height.
+With the canopy drawn but not collided with, the same headings cover 1741, 1884
+and 1735, and one aimed at a trunk still stops at 496.
 
 **How the engine gets there.** A shipped tree entity carries an
 `eCCollisionShape_PS` that is configured for collision - `Group` is

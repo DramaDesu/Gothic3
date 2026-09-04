@@ -83,6 +83,11 @@ struct MeshInstances
     // is being looked at. It is a batch like any other so that it streams and
     // culls with everything else rather than needing a path of its own.
     bool collision = false;
+    // Drawn as collision but not collided with. A tree's canopy is the case
+    // this exists for: the shape is real and worth seeing, and standing in it
+    // is what the engine's separate branch shape group says it is for - an
+    // arrow's business rather than a walker's.
+    bool solid = true;
 };
 
 class WorldRenderer

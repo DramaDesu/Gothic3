@@ -617,11 +617,14 @@ int main(int argc, char **argv)
     // per instance.
     std::map<std::string, genome::Mesh *> treeCollisionOf;
     std::size_t treeShapes = 0;
-    const auto collisionForTree = [&](const std::string &key,
-                                      const genome::SpeedTree &definition) -> genome::Mesh * {
+    // Two meshes a definition: the trunk, which a body walks into, and the
+    // canopy, which is drawn and stepped through.
+    const auto collisionForTree = [&](const std::string &key, const genome::SpeedTree &definition,
+                                      bool wantTrunk) -> genome::Mesh * {
         if (definition.collision.empty())
             return nullptr;
-        const auto cached = treeCollisionOf.find(key);
+        const std::string cacheKey = key + (wantTrunk ? "/trunk" : "/canopy");
+        const auto cached = treeCollisionOf.find(cacheKey);
         if (cached != treeCollisionOf.end())
             return cached->second;
 
@@ -638,6 +641,8 @@ int main(int argc, char **argv)
 
         for (const genome::CollisionPrimitive &shape : definition.collision)
         {
+            if (shape.isTrunk() != wantTrunk)
+                continue;
             // Metres to centimetres, and the third component is the one that
             // points up in a .spt.
             const float cx = shape.centre[0] * 100.0f;
@@ -717,11 +722,14 @@ int main(int argc, char **argv)
         }
 
         if (element.indices.empty())
+        {
+            treeCollisionOf.emplace(cacheKey, nullptr);
             return nullptr;
+        }
         mesh->elements.push_back(std::move(element));
         genome::Mesh *made = mesh.get();
         ownedMeshes.push_back(std::move(mesh));
-        treeCollisionOf.emplace(key, made);
+        treeCollisionOf.emplace(cacheKey, made);
         return made;
     };
 
@@ -1539,6 +1547,7 @@ int main(int argc, char **argv)
 
                         std::size_t slot = std::size_t(-1);
                         genome::Mesh *treeShape = nullptr;
+                        genome::Mesh *treeCanopy = nullptr;
                         std::array<genome::Mesh *, 2> grown{nullptr, nullptr};
                         const auto grownAlready = treeMeshOf.find(key);
                         if (grownAlready != treeMeshOf.end())
@@ -1575,7 +1584,8 @@ int main(int argc, char **argv)
                             // batch. Keyed without the variant digit: the
                             // collision is a property of the definition and does
                             // not change with which tree grew from it.
-                            treeShape = collisionForTree(key.substr(0, key.size() - 1), definition);
+                            treeShape = collisionForTree(key.substr(0, key.size() - 1), definition, true);
+                            treeCanopy = collisionForTree(key.substr(0, key.size() - 1), definition, false);
                         }
                         else
                             ++missingTrees;
@@ -1617,18 +1627,44 @@ int main(int argc, char **argv)
                         // the cache rather than from the load above.
                         if (treeShape == nullptr)
                         {
-                            const auto cached = treeCollisionOf.find(bare);
+                            const auto cached = treeCollisionOf.find(bare + "/trunk");
                             if (cached != treeCollisionOf.end())
                                 treeShape = cached->second;
                         }
-                        if (treeShape != nullptr && treeCollisionBatchOf.find(bare) == treeCollisionBatchOf.end())
+                        if (treeCanopy == nullptr)
                         {
-                            render::MeshInstances shape;
-                            shape.mesh = treeShape;
-                            shape.collision = true;
-                            shape.occludes = false;
+                            const auto cached = treeCollisionOf.find(bare + "/canopy");
+                            if (cached != treeCollisionOf.end())
+                                treeCanopy = cached->second;
+                        }
+                        if (treeCollisionBatchOf.find(bare) == treeCollisionBatchOf.end() &&
+                            (treeShape != nullptr || treeCanopy != nullptr))
+                        {
+                            // The trunk first, so its index is the one the
+                            // placement loop appends to; the canopy follows and
+                            // takes the same transforms.
                             treeCollisionBatchOf.emplace(bare, batches.size());
-                            batches.push_back(std::move(shape));
+                            for (int which = 0; which < 2; ++which)
+                            {
+                                genome::Mesh *mesh = which == 0 ? treeShape : treeCanopy;
+                                render::MeshInstances shape;
+                                shape.mesh = mesh != nullptr ? mesh : (which == 0 ? treeCanopy : treeShape);
+                                shape.collision = true;
+                                shape.occludes = false;
+                                shape.solid = which == 0 && treeShape != nullptr;
+                                if (which == 1 && treeCanopy == nullptr)
+                                    break;
+                                if (which == 0 && treeShape == nullptr)
+                                {
+                                    // No trunk in this definition: the canopy is
+                                    // all there is, and it is still not solid.
+                                    shape.mesh = treeCanopy;
+                                    shape.solid = false;
+                                    batches.push_back(std::move(shape));
+                                    break;
+                                }
+                                batches.push_back(std::move(shape));
+                            }
                         }
                     }
 
@@ -1652,10 +1688,14 @@ int main(int argc, char **argv)
 
                     const auto shape = treeCollisionBatchOf.find(key.substr(0, key.size() - 1));
                     if (shape != treeCollisionBatchOf.end())
-                    {
-                        batches[shape->second].transforms.push_back(tree.world);
-                        batches[shape->second].bounds.push_back(box);
-                    }
+                        for (std::size_t which = 0; which < 2; ++which)
+                        {
+                            const std::size_t at = shape->second + which;
+                            if (at >= batches.size() || !batches[at].collision)
+                                break;
+                            batches[at].transforms.push_back(tree.world);
+                            batches[at].bounds.push_back(box);
+                        }
                     ++planted;
                 }
 
@@ -2557,7 +2597,7 @@ int main(int argc, char **argv)
         const auto addFrom = [&](const std::vector<render::MeshInstances> &from) {
             for (const render::MeshInstances &batch : from)
             {
-                if (!batch.collision || batch.mesh == nullptr)
+                if (!batch.collision || !batch.solid || batch.mesh == nullptr)
                     continue;
                 for (const auto &transform : batch.transforms)
                     solid.add(*batch.mesh, transform);

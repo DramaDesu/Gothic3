@@ -5,13 +5,22 @@ something we found and chose not to do yet - not by being imaginable.
 
 ## Decisions waiting
 
-**The canopy should probably not be solid to the player.** The engine keeps the
-trunk and the branches in separate shape groups - `eEShapeGroup_Tree_Trunk` and
-`eEShapeGroup_Tree_Branches` - so they are not the same kind of obstacle: a
-player walks into the first, and an arrow is stopped by the second. We read and
-draw both today, which is why a wood reads as a field of blocks. The lean is to
-give the player the trunk only and keep the canopy for whatever else wants it.
-Not decided, and cheap to change once something actually collides.
+**The canopy is no longer solid, and the forest opened up.** This was the open
+decision here and the measurement settled it. Walking eight headings from one
+spot in a wood covered 400 to 650 of the 1750 asked; the same walk with tree
+collision left out entirely covered 1741 and 1866. A canopy sphere has a radius
+of about 27 per cent of the tree's height, so a wood is a field of overlapping
+balls at head height and nothing can get through.
+
+The trunk stays solid and the canopy is drawn but not collided with, which is
+what the engine's own split into `eEShapeGroup_Tree_Trunk` and
+`_Tree_Branches` says to do. Measured after: the same three headings cover 1741,
+1884 and 1735, and a heading aimed at a trunk still stops at 496. The trunks are
+demonstrably still there - the solid world holds 473 meshes with trees against
+440 without, a difference of 66120 triangles.
+
+What is deliberately not decided: whether anything else should collide with the
+canopy. An arrow probably should, and there is nothing to shoot yet.
 
 **Which physics engine, or none.** Deferred on purpose: no modern engine can
 load Gothic 3's cooked shapes, since PhysX 3.0 broke compatibility with the 2.x
