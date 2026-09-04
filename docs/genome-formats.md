@@ -1028,3 +1028,46 @@ The MaterialReference.lodIndex field is 0 in all 1136 shipped references, so the
 - Facial animation is out of scope of the files I scanned: eCVisualAnimation_PS.FacialAnimFilePath and the phoneme chunk id 12 exist in the enum, but no shipped .xact/.xmot in _compiledAnimation.pak contains chunk ids 5, 10, 11, 12 or 13.
 - The 'gena' actor's nativeFileSize equals the FXA payload size in the files I checked, and resourceSize is always 0 with a junk priority — whether the engine ever relies on those numbers (streaming budget?) is unknown.
 - How .xmot files are associated with an actor at runtime (name prefix? template list? both) was not established; motion-part names match node names, which is sufficient for a runtime that is told which pair to load.
+
+## `.lrentdat` - the people, and everything else that is not scenery
+
+A sector says what the world is built from: meshes, trees, lights. It says
+nothing about who is in it. That is in 115 `.lrentdat` files beside them, and
+their names say what they hold - `ardea_npc_01`, `faring_npc_02`,
+`cpt_quest_npc_01` through 05, `story_xardas`, `zarkos_camp`.
+
+`g3ent` reads them. Across the 97 that are wrapped: **35437 entities, 16604
+wearing an actor, 10279 carrying `gCNPC_PS`**, 17259 `gCItem_PS`, 8073 with
+dialogue and 7651 with a daily routine. `CPT_Goblin_01` sits at
+(-399, -318, -163225) wearing `G3_Goblin_Body_01.FXA`.
+
+The layout, which is a sector's with two differences:
+
+    GENOMFLE wrapper and string table   - the same sniff a sector uses
+    "GENOMEDL"                          - a sector does not name itself again
+    u16 83                              - the same archive version
+    eCEntityDynamicContext              - a sector goes straight to the count
+    i32 entityCount
+      each: u16 0x40, u16 0x53, a creator flag and 20 bytes if set,
+            then the same 298-byte entity body a sector has
+    pairs of (parent, child) indices, ended by -1
+
+Two things cost time and are worth stating.
+
+**A class header's size is a fallback, not an end.** `eCEntityDynamicContext`
+declares 6957 bytes and occupies 124. Seeking to the declared end lands in the
+string table at the back of the file and the entity count comes out as
+2147483848. The class has to be walked: its properties, its version, then its
+own tail of a flag, two culling factors and a box - thirty-three bytes.
+
+**The entity body cannot be walked field by field.** The engine's file order is
+not the member order in its headers, which is why the sector reader has fixed
+offsets taken from the data - guid at 4, name at 41, matrix at 43, property set
+count at 294, the whole body 298. Reading it in header order gives a render
+alpha of zero and a scale of NaN. The same offsets work here unchanged; only the
+prologue in front of the body differs.
+
+The 18 files that do not read are the ones named for a guid rather than a place,
+plus `g3_startup/sysdyn_*`. They are not wrapped at all - they open straight
+into `eCEntityDynamicContext` with no string table - so they are a second
+variant rather than a failure of this one.

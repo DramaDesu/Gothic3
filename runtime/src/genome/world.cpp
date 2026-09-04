@@ -584,4 +584,129 @@ bool loadWorldNode(const std::vector<std::uint8_t> &bytes, WorldLayer &layer, st
     return true;
 }
 
+bool DynamicEntity::has(const std::string &className) const
+{
+    return std::find(classes.begin(), classes.end(), className) != classes.end();
+}
+
+bool loadEntityFile(const std::vector<std::uint8_t> &bytes, std::vector<DynamicEntity> &out, std::string *error)
+{
+    const auto fail = [&](const char *why) {
+        if (error)
+            *error = why;
+        return false;
+    };
+
+    out.clear();
+    Reader reader(bytes);
+    const StringTable strings = StringTable::sniff(reader);
+    if (!reader.ok() || !strings.wrapped())
+        return fail("not a wrapped genome file");
+
+    // Where a sector goes straight from the wrapper to its version, an entity
+    // file names itself again first.
+    char marker[8] = {};
+    reader.array(marker, 8);
+    if (std::string(marker, 8) != "GENOMEDL")
+        return fail("not an entity file");
+    if (reader.u16() != c_ArchiveVersion)
+        return fail("unexpected entity file version");
+
+    // The context, walked rather than skipped. The size in a class header is a
+    // fallback for a damaged file rather than the end of the class - this one
+    // declares 6957 bytes and occupies 124 - so seeking to it lands in the
+    // string table at the back of the file.
+    reader.skip(6);        // subclass identifier
+    strings.entry(reader); // the class's name
+    reader.skip(5);        // filler
+    reader.skip(2);        // class version
+    reader.u32();          // the declared size, which is not the end
+    reader.skip(2);        // property block version
+    const std::uint32_t contextProperties = reader.u32();
+    if (!reader.ok() || contextProperties > 64)
+        return fail("implausible context property count");
+    for (std::uint32_t which = 0; which < contextProperties && reader.ok(); ++which)
+    {
+        strings.entry(reader); // name
+        strings.entry(reader); // type
+        reader.skip(2);
+        reader.skip(reader.u32());
+    }
+    reader.skip(2);              // the class version, again
+    reader.skip(1 + 4 + 4 + 24); // enabled, two culling factors, and the context's box
+
+    const std::uint32_t count = reader.u32();
+    if (!reader.ok() || count > 65536)
+        return fail("implausible entity count");
+
+    std::vector<Property> properties;
+    out.reserve(count);
+    for (std::uint32_t index = 0; index < count && reader.ok(); ++index)
+    {
+        DynamicEntity entity;
+        // The prologue is all that differs from a sector's entity: a version
+        // apiece for gCEntity and eCDynamicEntity, and a creator's guid when
+        // there is one.
+        reader.skip(2);
+        reader.skip(2);
+        // Twenty, not the sixteen a guid is: the sector reader found the same,
+        // and an entity with a creator is the common case here where in a
+        // sector it never happens.
+        if (reader.u8() != 0)
+            reader.skip(20);
+
+        const std::size_t bodyStart = reader.tell();
+        if (bodyStart + c_EntityBodySize > reader.size())
+            return fail("an entity body runs past the end of the file");
+
+        reader.seek(bodyStart + c_GuidOffset);
+        entity.guid = readGuid(reader);
+        reader.seek(bodyStart + c_NameOffset);
+        entity.name = strings.entry(reader);
+        reader.seek(bodyStart + c_WorldMatrixOffset);
+        reader.array(entity.world.data(), 16);
+
+        reader.seek(bodyStart + c_PropertySetCountOffset);
+        const std::uint32_t classCount = reader.u32();
+        if (!reader.ok() || classCount > 256)
+        {
+            if (error)
+                *error = "entity " + std::to_string(index) + " of " + std::to_string(count) +
+                         " (" + entity.name + ") claims " + std::to_string(classCount) + " property sets";
+            return false;
+        }
+        for (std::uint32_t which = 0; which < classCount && reader.ok(); ++which)
+        {
+            std::string className;
+            if (!readEntityPropertySet(reader, strings, className, properties))
+                return fail("bad property set");
+            entity.classes.push_back(className);
+
+            if (className == "eCVisualAnimation_PS")
+                for (const Property &property : properties)
+                {
+                    if (property.name != "ResourceFilePath" || property.value.size() < 2)
+                        continue;
+                    Reader value(property.value);
+                    entity.actorName = strings.entry(value);
+                }
+        }
+        out.push_back(std::move(entity));
+    }
+
+    // Then the tree, as pairs: a parent's index and a child's, until a -1.
+    while (reader.ok())
+    {
+        const std::uint32_t parent = reader.u32();
+        if (parent == 0xFFFFFFFFu)
+            break;
+        const std::uint32_t child = reader.u32();
+        if (child >= out.size())
+            return fail("a child index points nowhere");
+        out[child].parent = int(parent);
+    }
+
+    return reader.ok();
+}
+
 } // namespace genome

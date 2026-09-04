@@ -158,6 +158,39 @@ struct WorldLayer
     std::size_t meshCount() const;
 };
 
+// One entity out of a .lrentdat - an NPC, an item, an interactable. The static
+// world is in the sectors; these are the things in it.
+struct DynamicEntity
+{
+    std::string name;
+    std::string guid;
+    WorldMatrix world{};
+
+    // eCVisualAnimation_PS: the .xact this one wears. Empty for the many
+    // entities that are not drawn as characters - waypoints, spawn markers,
+    // routine anchors.
+    std::string actorName;
+
+    // Which property sets it carries, in the order the file lists them. Kept
+    // whole rather than reduced to flags: what an entity is, is mostly which of
+    // these it has - gCNPC_PS and gCDialog_PS make a person, gCInventoryStack
+    // an item lying on the ground.
+    std::vector<std::string> classes;
+
+    // Its place in the file's tree, which is how a routine point knows the
+    // character it belongs to. -1 for the root.
+    int parent = -1;
+
+    std::array<float, 3> translation() const { return {world[12], world[13], world[14]}; }
+    bool has(const std::string &className) const;
+};
+
+// Parses a .lrentdat. The entity tree is flattened: each entity records its
+// parent's index rather than owning its children, since every use so far reads
+// the list and looks up parents rather than walking down.
+bool loadEntityFile(const std::vector<std::uint8_t> &bytes, std::vector<DynamicEntity> &out,
+                    std::string *error = nullptr);
+
 // Parses a .node sector. Entities without a static mesh are kept, since their
 // names and transforms still describe the level.
 bool loadWorldNode(const std::vector<std::uint8_t> &bytes, WorldLayer &layer, std::string *error = nullptr);
