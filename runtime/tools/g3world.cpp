@@ -936,6 +936,8 @@ int main(int argc, char **argv)
     // How high the eye rides above the ground when walking, in world units.
     // A Gothic 3 character is about 180 tall.
     float walkHeight = 0.0f;
+    // How far the camera starts behind the character. V toggles it while running.
+    float thirdPersonArgument = 0.0f;
     // Hold forward for a headless run, so walking into things can be
     // measured without anyone at the keyboard.
     bool walkForward = false;
@@ -1014,6 +1016,10 @@ int main(int argc, char **argv)
         }
         if (std::string(argv[index]) == "--walk")
             walkHeight = hasValue && argv[index + 1][0] != '-' ? float(std::atof(argv[index + 1])) : 180.0f;
+        if (std::string(argv[index]) == "--third-person")
+            thirdPersonArgument = hasValue && argv[index + 1][0] != '-'
+                                      ? float(std::atof(argv[index + 1]))
+                                      : 350.0f;
         if (std::string(argv[index]) == "--collision-view" && hasValue)
             collisionView = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--threads" && hasValue)
@@ -2782,6 +2788,15 @@ int main(int argc, char **argv)
     constexpr float c_StepHeight = 70.0f;
     std::array<float, 3> feet{eye[0], eye[1] - c_EyeHeight, eye[2]};
     float fallSpeed = 0.0f;
+    // How far the camera sits behind the character. Zero is first person,
+    // which is what the controller was built with and is no use for looking
+    // at him.
+    float thirdPerson = thirdPersonArgument;
+    float clipTime = 0.0f;
+    // How fast the body actually moved this frame, which is what picks the clip.
+    // Taken after the collision resolve rather than from the input, so walking
+    // into a wall plays standing rather than running on the spot.
+    float pace = 0.0f;
     bool onGround = false;
     bool landed = false;
     double asked = 0.0, covered = 0.0;
@@ -2945,6 +2960,11 @@ int main(int argc, char **argv)
                 onGround = false;
             }
             std::printf("walking: %s\n", walkHeight > 0.0f ? "on" : "off");
+        }
+        if (window.keyPressed('V'))
+        {
+            thirdPerson = thirdPerson > 0.0f ? 0.0f : 350.0f;
+            std::printf("camera: %s\n", thirdPerson > 0.0f ? "behind" : "first person");
         }
 
         if (solidStale)
@@ -3127,6 +3147,8 @@ int main(int argc, char **argv)
                             solid.lastTested(), micros);
             }
 
+            const float movedX = feet[0] - wasAt[0], movedZ = feet[2] - wasAt[2];
+            pace = std::sqrt(movedX * movedX + movedZ * movedZ) / std::max(delta, 1e-4f);
             eye = {feet[0], feet[1] + c_EyeHeight, feet[2]};
 
             // What was asked for against what was covered. They part company at
@@ -3327,12 +3349,39 @@ int main(int argc, char **argv)
             lightsMost = std::max(lightsMost, lightsNow);
         }
 
-        const std::array<float, 3> target{eye[0] + forward[0], eye[1] + forward[1], eye[2] + forward[2]};
+        // The character stands where the controller does and faces where it
+        // looks. The clip is chosen by how fast he is actually moving, using
+        // the speed each was authored for - the number at the end of its name.
+        if (character.boneCount() != 0 && !heroClips.empty() && walkHeight > 0.0f)
+        {
+            static const float c_ClipSpeeds[] = {0.0f, 160.0f, 400.0f};
+            std::size_t clip = 0;
+            for (std::size_t which = 0; which < heroClips.size(); ++which)
+                if (pace >= c_ClipSpeeds[which] * 0.6f)
+                    clip = which;
+            clipTime += delta;
+
+            const float facing = yaw;
+            const float cosine = std::cos(facing), sine = std::sin(facing);
+            const genome::Matrix4 world{cosine,  0.0f, -sine,   0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                        sine,    0.0f, cosine,  0.0f, feet[0], feet[1], feet[2], 1.0f};
+            std::vector<render::CharacterRenderer::Piece> pieces{{&heroBody, heroTextures[0]},
+                                                                {&heroHead, heroTextures[1]}};
+            character.update(device, pieces, heroSkeleton, heroClips[clip], clipTime, world);
+        }
+
+        // Behind the character, along the way the camera looks, so he is in
+        // front of it rather than around it.
+        const std::array<float, 3> station{eye[0] - forward[0] * thirdPerson,
+                                           eye[1] - forward[1] * thirdPerson + thirdPerson * 0.25f,
+                                           eye[2] - forward[2] * thirdPerson};
+        const std::array<float, 3> target{station[0] + forward[0], station[1] + forward[1],
+                                          station[2] + forward[2]};
 
         const VkExtent2D extent = device.extent();
         const float aspect = float(extent.width) / float(extent.height);
         const std::array<float, 16> viewProjection =
-            multiply(perspective(1.0f, aspect, 50.0f, span * 4.0f), lookAt(eye, target));
+            multiply(perspective(1.0f, aspect, 50.0f, span * 4.0f), lookAt(station, target));
 
         phases.streaming = millisSince(streamingStart);
         const auto beginStart = std::chrono::steady_clock::now();
@@ -3406,6 +3455,8 @@ int main(int argc, char **argv)
                         occlusion ? "" : ", occlusion off");
         }
         renderer.draw(device, viewProjection, {0.45f, 0.75f, 0.35f, lightmapReplaces});
+        if (character.boneCount() != 0 && walkHeight > 0.0f)
+            character.draw(device, viewProjection, {0.45f, 0.75f, 0.35f, 0.0f});
 
         vkCmdEndRendering(command);
         // Outside the render pass, which is where the profiler may write to its

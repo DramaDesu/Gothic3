@@ -349,8 +349,28 @@ bool CharacterRenderer::createPipeline(Device &device, std::string *error)
     return result == VK_SUCCESS;
 }
 
+namespace
+{
+// Column major, the way genome::Matrix4 is: c[col][row] = sum over k of
+// a[k][row] * b[col][k]. genome has one of these in motion.cpp but it is in an
+// anonymous namespace there and not exported.
+genome::Matrix4 concat(const genome::Matrix4 &a, const genome::Matrix4 &b)
+{
+    genome::Matrix4 out{};
+    for (int column = 0; column < 4; ++column)
+        for (int row = 0; row < 4; ++row)
+        {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k)
+                sum += a[k * 4 + row] * b[column * 4 + k];
+            out[column * 4 + row] = sum;
+        }
+    return out;
+}
+} // namespace
+
 void CharacterRenderer::update(Device &device, const std::vector<Piece> &pieces, const genome::Skeleton &skeleton,
-                               const genome::Motion &motion, float time)
+                               const genome::Motion &motion, float time, const genome::Matrix4 &world)
 {
     const std::vector<genome::Matrix4> pose = genome::samplePose(skeleton, motion, time);
 
@@ -363,7 +383,8 @@ void CharacterRenderer::update(Device &device, const std::vector<Piece> &pieces,
         if (!piece.actor)
             continue;
         const std::vector<genome::Matrix4> skinning = genome::skinningMatrices(*piece.actor, skeleton, pose);
-        std::copy(skinning.begin(), skinning.end(), m_matrices.begin() + base);
+        for (std::size_t bone = 0; bone < skinning.size(); ++bone)
+            m_matrices[base + bone] = concat(world, skinning[bone]);
         base += skinning.size();
     }
 

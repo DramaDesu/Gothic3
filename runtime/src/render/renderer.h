@@ -63,8 +63,13 @@ class CharacterRenderer
 
     // Poses every piece from the same skeleton and uploads this frame's bone
     // matrices. The vertex data itself never changes.
+    // The world transform is folded in here rather than into the view matrix,
+    // because the vertex shader carries the normal through the skinning matrix
+    // separately from the position: a rotation applied only to the view would
+    // turn the body and leave its lighting pointing the old way.
     void update(Device &device, const std::vector<Piece> &pieces, const genome::Skeleton &skeleton,
-                const genome::Motion &motion, float time);
+                const genome::Motion &motion, float time,
+                const genome::Matrix4 &world = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
 
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);
 
