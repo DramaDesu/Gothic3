@@ -2797,6 +2797,9 @@ int main(int argc, char **argv)
     // frame that found it because the next frame's movement is projected
     // onto it.
     std::array<float, 3> support{0.0f, 0.0f, 0.0f};
+    // Whether something unwalkable pushed back this frame. A slope is not that,
+    // and telling them apart is what keeps the step attempt off a ramp.
+    bool blockedByWall = false;
     // How fast the body actually moved this frame, which is what picks the clip.
     // Taken after the collision resolve rather than from the input, so walking
     // into a wall plays standing rather than running on the spot.
@@ -3058,6 +3061,8 @@ int main(int argc, char **argv)
                         feet[axis] += worst->normal[axis] * worst->depth;
                     if (worst->normal[1] > c_StandableY)
                         grounded = true;
+                    else
+                        blockedByWall = true;
                     // The ground is the most upward-facing thing pushing back,
                     // not whichever contact happened to be deepest. In a corner
                     // the wall is usually deeper than the floor, so taking the
@@ -3071,8 +3076,9 @@ int main(int argc, char **argv)
             };
 
             const bool wasGrounded = onGround;
-            // Forgotten each frame, so it describes what is underfoot now.
+            // Forgotten each frame, so they describe this frame.
             support = {0.0f, 0.0f, 0.0f};
+            blockedByWall = false;
             onGround = settle();
 
             // How far along the ground the body actually got. A step is worth
@@ -3083,7 +3089,11 @@ int main(int argc, char **argv)
                                  (feet[2] - from[2]) * (feet[2] - from[2]));
             };
             const float wanted = std::sqrt(along[0] * along[0] + along[2] * along[2]);
-            if (wasGrounded && wanted > 1e-3f && travelled(wasAt) < wanted * 0.9f)
+            // Gated on something unwalkable having pushed back, not on having
+            // covered less than it asked for: the second is true on every slope,
+            // where it fired every frame, took nothing, and - worse - took the
+            // frame away from the ground snap that was doing the real work.
+            if (wasGrounded && blockedByWall && wanted > 1e-3f && travelled(wasAt) < wanted * 0.9f)
             {
                 // The same move from a step higher, then let it down again. Kept
                 // only if it got further, so a wall costs one extra query pair

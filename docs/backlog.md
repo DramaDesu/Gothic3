@@ -90,14 +90,18 @@ ground it wanted at 4024. Starting the probe at the feet rather than a step
 above them fixes that arithmetic and made everything worse - 3991 down to 784 -
 so the eight-unit miss was not what the refusals were about.
 
-**Open ground still stalls.** A walk across the meadow covers 565 of 3500 and
-stops dead at 52994 3971 50323, grounded on a normal that is nearly flat
-(0.02, 1.00, 0.10), with the step refused 545 times for want of ground. Nothing
-here changed that, and the near-flat normal says it is pressed against something
-vertical rather than standing on something steep. That is the next thing to look
-at, and the way in is the one-shot diagnostic this work added: it prints, on the
-first refusal, where the body stood, where it was lifted to, how far the probe
-reached and whether anything is below at all.
+**The open-ground stall was a tree.** A walk across the meadow covers 565 of
+3500 and stops at 52994 3971 50323, and the picture from behind the character
+shows him pressed against a trunk that fills half the frame. Walking straight
+into a cylinder and stopping is the right answer, and it is also the first proof
+that the tree collision read out of the `.spt` primitives actually stops the
+player rather than merely drawing.
+
+What is still open is what a body should do *alongside* an obstacle rather than
+head-on. The resolve removes the component into the surface, which is sliding,
+but nothing has been measured at an angle - the walk-forward harness only ever
+walks one way. A harness that walks a few headings from the same spot would say
+whether sliding works or whether it only looks like it should.
 
 ## Renderer
 
