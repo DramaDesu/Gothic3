@@ -64,26 +64,40 @@ positive case rests on that single observed step.
 
 ## The character controller
 
-**The walk stalls on slopes, and the step logic is not what fixes it.** A
-measured walk-forward into the tallest step the finder reported covered 1211 of
-the 2100 it asked for and then stopped dead. The stack at the stall is a single
-face with normal (0.15, 0.76, -0.64) - a forty-degree ramp. Walking is purely
-horizontal, so on a ramp the whole step is spent pushing into the surface and
-being pushed back out.
+**Walking up a slope works now; walking into things still does not.** The stall
+was never a stair. The surface at it is a single face with normal
+(0.15, 0.76, -0.64) - a forty-degree ramp - and movement was purely horizontal,
+so the whole step went into pushing at the surface and being pushed back out.
 
-Two facts to keep. The step attempt is gated on "covered less than it asked
-for", which is true on *every* slope: 247 attempts and none taken in that run,
-two wasted queries a frame. And the climbing that did happen, 6965 to 7184, came
-from the collision resolve sliding the body up rather than from the step logic,
-which reported none.
+Two changes fixed it, and it took three attempts to find out which. Movement is
+projected onto the plane underfoot, and the ground snap that catches a body
+walking off a tread was moved out of the `else` it sat in - on a slope the step
+attempt fires every frame and was swallowing the snap with it, so the body left
+the ground and never came back. Either alone is worse than neither: projection
+without the snap launches the body and it walks on air, covering 448 where it
+had covered 1211.
 
-Projecting movement onto the ground plane is the textbook fix, and a first
-attempt made it worse - covered fell from 1211 to 324. That attempt changed the
-projection and the step gate together, so it says nothing about either, and was
-reverted rather than committed. The next try should change one at a time, and
-should check whether `support` is even the surface being stood on: it is updated
-only when a standable contact is the deepest one, so at a wall-and-floor corner
-it can be a frame stale.
+Measured on the same walk: **1211 of 2100 and stalled, against 3991 of 5250 and
+still climbing.**
+
+Two hypotheses tested and refuted along the way, both worth not retesting.
+`support` was suspected of being a frame stale, since it was only updated when a
+standable contact was the deepest; it is now the most upward-facing standable
+normal instead, which is more correct but changed no measurement - the value was
+already right here. And the step probe was suspected of falling short: one
+measured refusal probed from 4207 with 175 of reach, stopping at 4032, with the
+ground it wanted at 4024. Starting the probe at the feet rather than a step
+above them fixes that arithmetic and made everything worse - 3991 down to 784 -
+so the eight-unit miss was not what the refusals were about.
+
+**Open ground still stalls.** A walk across the meadow covers 565 of 3500 and
+stops dead at 52994 3971 50323, grounded on a normal that is nearly flat
+(0.02, 1.00, 0.10), with the step refused 545 times for want of ground. Nothing
+here changed that, and the near-flat normal says it is pressed against something
+vertical rather than standing on something steep. That is the next thing to look
+at, and the way in is the one-shot diagnostic this work added: it prints, on the
+first refusal, where the body stood, where it was lifted to, how far the probe
+reached and whether anything is below at all.
 
 ## Renderer
 

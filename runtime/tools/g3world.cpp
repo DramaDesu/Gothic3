@@ -2793,6 +2793,10 @@ int main(int argc, char **argv)
     // at him.
     float thirdPerson = thirdPersonArgument;
     float clipTime = 0.0f;
+    // What the body is standing on, read after the resolve. It outlives the
+    // frame that found it because the next frame's movement is projected
+    // onto it.
+    std::array<float, 3> support{0.0f, 0.0f, 0.0f};
     // How fast the body actually moved this frame, which is what picks the clip.
     // Taken after the collision resolve rather than from the input, so walking
     // into a wall plays standing rather than running on the spot.
@@ -3002,8 +3006,28 @@ int main(int argc, char **argv)
             // through a wall before anything has a chance to push it back.
             fallSpeed = std::max(fallSpeed, -3000.0f);
 
+            // Along the ground rather than into it. Horizontal movement into a
+            // ramp spends itself pushing at the surface and being pushed back
+            // out; projecting onto the plane underfoot turns the same effort
+            // into a climb. The horizontal length is preserved, so a slope costs
+            // ground covered rather than pace.
+            if (onGround && support[1] > c_StandableY)
+            {
+                const float into = along[0] * support[0] + along[2] * support[2];
+                std::array<float, 3> flat{along[0] - support[0] * into, -support[1] * into,
+                                          along[2] - support[2] * into};
+                const float was = std::sqrt(along[0] * along[0] + along[2] * along[2]);
+                const float now = std::sqrt(flat[0] * flat[0] + flat[2] * flat[2]);
+                if (now > 1e-6f && was > 1e-6f)
+                {
+                    const float scale = was / now;
+                    along = {flat[0] * scale, flat[1] * scale, flat[2] * scale};
+                }
+            }
+
             const std::array<float, 3> wasAt = feet;
             feet[0] += along[0];
+            feet[1] += along[1];
             feet[2] += along[2];
             feet[1] += fallSpeed * delta;
 
@@ -3011,7 +3035,6 @@ int main(int argc, char **argv)
             // from the normals that did the pushing. Four passes: one contact
             // resolved can press the body into another, and a corner is two
             // walls that each want the whole displacement.
-            std::array<float, 3> support{0.0f, 0.0f, 0.0f};
             const auto settle = [&]() {
                 bool grounded = false;
                 for (int pass = 0; pass < 4; ++pass)
@@ -3034,15 +3057,22 @@ int main(int argc, char **argv)
                     for (int axis = 0; axis < 3; ++axis)
                         feet[axis] += worst->normal[axis] * worst->depth;
                     if (worst->normal[1] > c_StandableY)
-                    {
                         grounded = true;
-                        support = worst->normal;
-                    }
+                    // The ground is the most upward-facing thing pushing back,
+                    // not whichever contact happened to be deepest. In a corner
+                    // the wall is usually deeper than the floor, so taking the
+                    // deepest left support holding a wall - or a stale value
+                    // from an earlier frame - which is no plane to walk along.
+                    for (const auto &contact : contacts)
+                        if (contact.normal[1] > c_StandableY && contact.normal[1] > support[1])
+                            support = contact.normal;
                 }
                 return grounded;
             };
 
             const bool wasGrounded = onGround;
+            // Forgotten each frame, so it describes what is underfoot now.
+            support = {0.0f, 0.0f, 0.0f};
             onGround = settle();
 
             // How far along the ground the body actually got. A step is worth
@@ -3080,7 +3110,23 @@ int main(int argc, char **argv)
                 // 198 accepted in one run and the largest lift among them zero.
                 const float lift = landing ? ground - wasAt[1] : 0.0f;
                 if (!landing)
+                {
                     ++stepNoGround;
+                    // Once, with the numbers: this is the step's commonest
+                    // refusal by far and the reason has never been looked at.
+                    if (stepNoGround == 1)
+                    {
+                        float anywhere = 0.0f;
+                        const bool anyBelow =
+                            solid.groundBelow({feet[0], feet[1] + c_StepHeight, feet[2]}, 10000.0f,
+                                              anywhere);
+                        std::printf("step refused: stood %.0f, lifted to %.0f, probe from %.0f reach %.0f; "
+                                    "anything below? %s at %.0f\n",
+                                    double(wasAt[1]), double(feet[1]), double(feet[1] + c_StepHeight),
+                                    double(c_StepHeight * 2.0f + c_BodyRadius), anyBelow ? "yes" : "no",
+                                    double(anywhere));
+                    }
+                }
                 else if (lift <= 2.0f)
                     ++stepNoLift;
                 else if (travelled(wasAt) <= made + 1.0f)
@@ -3105,7 +3151,11 @@ int main(int argc, char **argv)
                     fallSpeed = 0.0f;
                 }
             }
-            else if (wasGrounded && !onGround && fallSpeed <= 0.0f)
+            // Not an else: a frame that tried to step also needs this. On a
+            // slope the step attempt fires every frame and used to swallow the
+            // snap with it, so a body walking up a ramp left the ground and
+            // never came back to it.
+            if (wasGrounded && !onGround && fallSpeed <= 0.0f)
             {
                 // Walking off a step should be a step down, not the start of a
                 // fall: without this the body leaves the ground at every tread
@@ -3159,9 +3209,10 @@ int main(int argc, char **argv)
                 covered += std::sqrt((feet[0] - wasAt[0]) * (feet[0] - wasAt[0]) +
                                      (feet[2] - wasAt[2]) * (feet[2] - wasAt[2]));
                 if (++walkFrames % 60 == 0)
-                    std::printf("walk %4zu: at %.0f %.0f %.0f, asked %.0f covered %.0f, %s, %zu tried %zu climbed %zu descended, lifted %.0f biggest %.0f, refused %zu no-ground %zu no-lift %zu no-gain\n",
+                    std::printf("walk %4zu: at %.0f %.0f %.0f, asked %.0f covered %.0f, %s on %.2f %.2f %.2f, %zu tried %zu climbed %zu descended, lifted %.0f biggest %.0f, refused %zu no-ground %zu no-lift %zu no-gain\n",
                                 walkFrames, double(feet[0]), double(feet[1]), double(feet[2]), asked,
-                                covered, onGround ? "grounded" : "airborne", stepTried, stepTaken, stepDown,
+                                covered, onGround ? "grounded" : "airborne", double(support[0]),
+                                double(support[1]), double(support[2]), stepTried, stepTaken, stepDown,
                                 double(stepLift), double(stepBiggest), stepNoGround, stepNoLift,
                                 stepNoGain);
             }
