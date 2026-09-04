@@ -501,6 +501,15 @@ int main(int argc, char **argv)
     std::unique_ptr<genome::PakArchive> collisionArchive;
     std::map<std::string, genome::Mesh *> collisionOf;
     std::size_t collisionFound = 0, collisionMissing = 0, collisionTriangles = 0;
+    // How the entity's own reference fares against the rule that stands in for
+    // it: how many placements name a file, how many of those names resolve, and
+    // how often the name and the rule disagree about which mesh it is.
+    std::size_t namedPlacements = 0, namedShapes = 0, namedResolved = 0, namedDiffers = 0;
+    std::set<std::string> namedUnresolved, namedDisagreements;
+    // Every shape by kind, because a placement whose collision is a primitive
+    // gets nothing from the name rule at all.
+    std::map<int, std::size_t> shapesByKind;
+    std::map<std::uint32_t, std::size_t> shapesByGroup;
     std::vector<std::string> collisionMissingNames;
     const auto collisionFor = [&](const std::string &meshName) -> genome::Mesh * {
         if (!collisionArchive)
@@ -710,6 +719,122 @@ int main(int argc, char **argv)
         genome::Mesh *made = mesh.get();
         ownedMeshes.push_back(std::move(mesh));
         treeCollisionOf.emplace(key, made);
+        return made;
+    };
+
+    // The primitives an entity authors on itself, as a mesh in its own frame.
+    // Keyed by the numbers rather than by the object, since a box is a box:
+    // hundreds of placements share a handful of distinct ones.
+    std::map<std::string, genome::Mesh *> primitiveOf;
+    std::size_t primitiveShapes = 0, primitivePlacements = 0;
+    const auto primitiveMesh = [&](const std::vector<genome::CollisionShape> &shapes,
+                                   const std::string &signature) -> genome::Mesh * {
+        const auto cached = primitiveOf.find(signature);
+        if (cached != primitiveOf.end())
+            return cached->second;
+
+        auto mesh = std::make_unique<genome::Mesh>();
+        genome::MeshElement element;
+        const auto place = [&](const genome::CollisionShape &shape, float x, float y, float z, float nx,
+                               float ny, float nz) {
+            // The rows of the orientation apply directly, as the entity
+            // matrices' rows do.
+            const auto &m = shape.orientation;
+            element.positions.push_back({shape.centre[0] + m[0] * x + m[3] * y + m[6] * z,
+                                         shape.centre[1] + m[1] * x + m[4] * y + m[7] * z,
+                                         shape.centre[2] + m[2] * x + m[5] * y + m[8] * z});
+            element.normals.push_back(
+                {m[0] * nx + m[3] * ny + m[6] * nz, m[1] * nx + m[4] * ny + m[7] * nz,
+                 m[2] * nx + m[5] * ny + m[8] * nz});
+            element.texCoords.push_back({0.0f, 0.0f});
+        };
+        const auto quad = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t d) {
+            element.indices.insert(element.indices.end(), {a, b, c, a, c, d});
+        };
+
+        for (const genome::CollisionShape &shape : shapes)
+        {
+            if (!shape.meshName.empty())
+                continue;
+            const std::uint32_t base = std::uint32_t(element.positions.size());
+
+            if (shape.kind == genome::CollisionShape::Kind::Box)
+            {
+                for (int corner = 0; corner < 8; ++corner)
+                {
+                    const float sx = (corner & 1) ? 1.0f : -1.0f;
+                    const float sy = (corner & 2) ? 1.0f : -1.0f;
+                    const float sz = (corner & 4) ? 1.0f : -1.0f;
+                    place(shape, sx * shape.extent[0], sy * shape.extent[1], sz * shape.extent[2], sx, sy, sz);
+                }
+                quad(base + 0, base + 2, base + 3, base + 1);
+                quad(base + 5, base + 7, base + 6, base + 4);
+                quad(base + 4, base + 6, base + 2, base + 0);
+                quad(base + 1, base + 3, base + 7, base + 5);
+                quad(base + 0, base + 1, base + 5, base + 4);
+                quad(base + 6, base + 7, base + 3, base + 2);
+                ++primitiveShapes;
+                continue;
+            }
+
+            const int around = 12;
+            if (shape.kind == genome::CollisionShape::Kind::Capsule)
+            {
+                // A capsule stands along its own y, centred: the cylinder is
+                // the height and the caps are drawn as flat rings, which is
+                // enough to read the shape.
+                const float half = shape.height * 0.5f;
+                for (int step = 0; step < around; ++step)
+                {
+                    const float angle = 6.2831853f * float(step) / float(around);
+                    const float nx = std::cos(angle), nz = std::sin(angle);
+                    place(shape, nx * shape.radius, -half, nz * shape.radius, nx, 0.0f, nz);
+                    place(shape, nx * shape.radius, half, nz * shape.radius, nx, 0.0f, nz);
+                }
+                for (int step = 0; step < around; ++step)
+                {
+                    const std::uint32_t a = base + std::uint32_t(step * 2);
+                    const std::uint32_t b = base + std::uint32_t(((step + 1) % around) * 2);
+                    quad(a, b, b + 1, a + 1);
+                }
+                ++primitiveShapes;
+                continue;
+            }
+
+            if (shape.kind != genome::CollisionShape::Kind::Sphere)
+                continue;
+            const int rings = 8;
+            for (int ring = 0; ring <= rings; ++ring)
+            {
+                const float phi = 3.14159265f * float(ring) / float(rings);
+                for (int step = 0; step <= around; ++step)
+                {
+                    const float angle = 6.2831853f * float(step) / float(around);
+                    const float nx = std::sin(phi) * std::cos(angle);
+                    const float ny = std::cos(phi);
+                    const float nz = std::sin(phi) * std::sin(angle);
+                    place(shape, nx * shape.radius, ny * shape.radius, nz * shape.radius, nx, ny, nz);
+                }
+            }
+            for (int ring = 0; ring < rings; ++ring)
+                for (int step = 0; step < around; ++step)
+                {
+                    const std::uint32_t a = base + std::uint32_t(ring * (around + 1) + step);
+                    const std::uint32_t b = a + std::uint32_t(around + 1);
+                    quad(a, a + 1, b + 1, b);
+                }
+            ++primitiveShapes;
+        }
+
+        if (element.indices.empty())
+        {
+            primitiveOf.emplace(signature, nullptr);
+            return nullptr;
+        }
+        mesh->elements.push_back(std::move(element));
+        genome::Mesh *made = mesh.get();
+        ownedMeshes.push_back(std::move(mesh));
+        primitiveOf.emplace(signature, made);
         return made;
     };
 
@@ -1032,6 +1157,7 @@ int main(int argc, char **argv)
                 // world but a batch index only means anything in the sector
                 // whose batch vector it indexes.
                 std::map<std::string, std::size_t> treeCollisionBatchOf;
+                std::map<std::string, std::size_t> primitiveBatchOf;
 
                 genome::WorldLayer layer;
                 std::string ignored;
@@ -1045,6 +1171,58 @@ int main(int argc, char **argv)
                 {
                     if (placement.meshName.empty())
                         continue;
+
+                    // The primitives the entity authors on itself. They are
+                    // handled here rather than beside the cooked meshes because
+                    // they belong to the placement, not to its visual.
+                    if (!placement.shapes.empty())
+                    {
+                        char number[64];
+                        std::string signature;
+                        for (const genome::CollisionShape &shape : placement.shapes)
+                        {
+                            if (!shape.meshName.empty())
+                                continue;
+                            std::snprintf(number, sizeof(number), "%d/%.2f/%.2f/%.2f/%.2f/%.2f/%.2f/%.2f/%.2f|",
+                                          int(shape.kind), shape.centre[0], shape.centre[1], shape.centre[2],
+                                          shape.extent[0], shape.extent[1], shape.extent[2], shape.radius,
+                                          shape.height);
+                            signature += number;
+                            // The orientation belongs in the key too: the same
+                            // box turned a different way is a different mesh.
+                            for (float value : shape.orientation)
+                            {
+                                std::snprintf(number, sizeof(number), "%.3f,", value);
+                                signature += number;
+                            }
+                        }
+                        if (!signature.empty())
+                        {
+                            auto known = primitiveBatchOf.find(signature);
+                            if (known == primitiveBatchOf.end())
+                            {
+                                std::size_t at = std::size_t(-1);
+                                if (genome::Mesh *shape = primitiveMesh(placement.shapes, signature))
+                                {
+                                    render::MeshInstances batch;
+                                    batch.mesh = shape;
+                                    batch.collision = true;
+                                    batch.occludes = false;
+                                    at = batches.size();
+                                    batches.push_back(std::move(batch));
+                                }
+                                known = primitiveBatchOf.emplace(signature, at).first;
+                            }
+                            if (known->second != std::size_t(-1))
+                            {
+                                ++primitivePlacements;
+                                batches[known->second].transforms.push_back(placement.world);
+                                batches[known->second].bounds.push_back(
+                                    {placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
+                                     placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
+                            }
+                        }
+                    }
 
                     // The baked lighting of this instance, attached once its
                     // mesh is known: the charts that address the patches are in
@@ -1212,6 +1390,63 @@ int main(int argc, char **argv)
                     batch.transforms.push_back(placement.world);
                     batch.bounds.push_back({placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
                                             placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
+                    // What the entity itself says it collides with, checked
+                    // against the archive rather than believed.
+                    if (!placement.shapes.empty())
+                    {
+                        bool named = false;
+                        for (const genome::CollisionShape &shape : placement.shapes)
+                        {
+                            ++shapesByKind[int(shape.kind)];
+                            ++shapesByGroup[shape.group];
+                            if (shape.meshName.empty())
+                                continue;
+                            named = true;
+                            ++namedShapes;
+
+                            std::string bare = shape.meshName;
+                            const std::size_t dot = bare.find_last_of('.');
+                            if (dot != std::string::npos)
+                                bare = bare.substr(0, dot);
+
+                            std::string why;
+                            bool there = false;
+                            if (collisionArchive && !collisionArchive->read(bare + ".xnvmsh", &why).empty())
+                                there = true;
+                            else if (!archive->read(bare + ".xnvmsh", &why).empty())
+                                there = true;
+                            if (there)
+                                ++namedResolved;
+                            else if (namedUnresolved.size() < 8)
+                                namedUnresolved.insert(shape.meshName);
+
+                            // The suffix rule's answer for this placement, for
+                            // comparison: the visual's stem, bare or with _col.
+                            std::string guess = placement.meshName;
+                            const std::size_t slash = guess.find_last_of('/');
+                            if (slash != std::string::npos)
+                                guess = guess.substr(slash + 1);
+                            const std::size_t guessDot = guess.find_last_of('.');
+                            if (guessDot != std::string::npos)
+                                guess = guess.substr(0, guessDot);
+
+                            std::string lowered = bare, loweredGuess = guess;
+                            for (char &c : lowered)
+                                c = char(std::tolower(static_cast<unsigned char>(c)));
+                            for (char &c : loweredGuess)
+                                c = char(std::tolower(static_cast<unsigned char>(c)));
+                            if (lowered != loweredGuess && lowered != loweredGuess + "_col" &&
+                                lowered != loweredGuess + "_cv")
+                            {
+                                ++namedDiffers;
+                                if (namedDisagreements.size() < 8)
+                                    namedDisagreements.insert(guess + "  ->  " + bare);
+                            }
+                        }
+                        if (named)
+                            ++namedPlacements;
+                    }
+
                     batchOf.emplace(placement.meshName, batches.size());
                     batches.push_back(std::move(batch));
                     ++placed;
@@ -1463,6 +1698,28 @@ int main(int argc, char **argv)
                             collisionFound, collisionMissing, collisionTriangles);
                 for (const std::string &name : collisionMissingNames)
                     std::printf("  no collision: %s\n", name.c_str());
+                if (namedShapes != 0)
+                {
+                    std::printf("named shapes: %zu placements name %zu files, %zu resolve, %zu differ from "
+                                "the rule\n",
+                                namedPlacements, namedShapes, namedResolved, namedDiffers);
+                    for (const std::string &name : namedUnresolved)
+                        std::printf("  names nothing: %s\n", name.c_str());
+                    for (const std::string &pair : namedDisagreements)
+                        std::printf("  rule vs name: %s\n", pair.c_str());
+                    static const char *kindNames[] = {"none",    "trimesh", "plane",      "box",
+                                                      "capsule", "sphere",  "convexhull", "point"};
+                    std::printf("  by kind:");
+                    for (const auto &[kind, count] : shapesByKind)
+                        std::printf(" %s x%zu", kind >= 0 && kind < 8 ? kindNames[kind] : "?", count);
+                    std::printf("\n  by group:");
+                    for (const auto &[group, count] : shapesByGroup)
+                        std::printf(" %u x%zu", group, count);
+                    std::printf("\n");
+                }
+                if (primitiveShapes != 0)
+                    std::printf("primitives: %zu placements carry %zu distinct shape sets, %zu shapes\n",
+                                primitivePlacements, primitiveOf.size(), primitiveShapes);
                 if (treeShapes != 0)
                     std::printf("trees: %zu definitions declare %zu shapes\n", treeCollisionOf.size(),
                                 treeShapes);

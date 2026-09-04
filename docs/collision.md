@@ -205,6 +205,42 @@ forest collides. That is the next thing to find, and it is a different question
 - a tree's collision in this engine is likely a shape in its own definition
 rather than a cooked mesh in an archive.
 
+## What the entity says, and what the name rule guesses
+
+Finding the cooked mesh by appending `""`, `"_col"` and `"_cv"` to the visual's
+name is a convention. The reference is in the entity: an `eCCollisionShape_PS`
+holds a list of `eCCollisionShape`, and each one carries its type, its shape
+group, its material, and - when the shape is a triangle mesh or a convex hull -
+the cooked file named outright with a `u16` selecting one sub-mesh inside it.
+
+We read that list now. The schema is g3dit's, which is an open reading of the
+same files rather than an authority, so it is checked instead of trusted: every
+named file is looked up in the archive, and a misread record would produce
+strings that resolve to nothing. Across four streamed rectangles, **4012 named
+files, all 4012 resolve.**
+
+**The rule and the reference agree everywhere we have looked** - zero
+disagreements in those same 4012. So the suffix convention was not luck holding
+by a thread; it is what the data does. We keep it, because only about two thirds
+of placements name a file at all, and prefer nothing over it yet.
+
+What the reference gives that the rule cannot is the rest of the record. In one
+rectangle:
+
+    by kind: trimesh 387, convexhull 810, box 253, capsule 46
+
+The first two are the 1197 that name a file. **The other 299 name nothing** -
+they are primitives authored on the entity, with their numbers in the record: a
+box carries a centre, half extents and a 3x3 orientation; a capsule carries a
+height, a radius, an orientation and a centre. No name rule can find those,
+and until now we drew nothing for them at all.
+
+They are placed now, in the same collision view as everything else - 1181
+placements in that rectangle carry between them 66 distinct shape sets, which is
+what a box being a box gets you. In the room above they are the slab on the wall
+banner, the box on the corner cabinet, the shelf, the cylinder standing on the
+candle, and the disc under the rug.
+
 ## Trees
 
 Trees are placed as entities that name a `.spt` definition rather than a mesh,

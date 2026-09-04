@@ -20,6 +20,54 @@ namespace genome
 // how the engine stores it.
 using WorldMatrix = std::array<float, 16>;
 
+// One collision shape an entity declares. The engine's own list of kinds, and
+// the two that name a file are the ones that carry the game's cooked geometry;
+// the rest are primitives with their numbers in the record.
+struct CollisionShape
+{
+    enum class Kind
+    {
+        None = 0,
+        TriMesh = 1,
+        Plane = 2,
+        Box = 3,
+        Capsule = 4,
+        Sphere = 5,
+        ConvexHull = 6,
+        Point = 7,
+    };
+
+    Kind kind = Kind::None;
+
+    // TriMesh and ConvexHull: the cooked file named outright, and which of its
+    // sub-meshes this shape is. This is the authority the suffix rule stands in
+    // for - a placement whose visual is a LOD set names a different mesh here
+    // than appending "_col" to the visual's name would find.
+    std::string meshName;
+    std::uint16_t meshIndex = 0;
+
+    // eEShapeGroup: what part of the thing this is. Trees have their own two -
+    // trunk and branches - which is how the engine tells a trunk you walk into
+    // from a canopy an arrow stops in.
+    std::uint32_t group = 0;
+    // eEShapeMaterial: wood, stone, foliage and the rest, in the order rmtools
+    // documents for the material names inside a .xnvmsh.
+    std::uint32_t material = 0;
+
+    bool disableCollision = false;
+    bool ignoredByTraceRay = false;
+
+    // Box, Capsule and Sphere carry their numbers here instead of naming a
+    // file, in the entity's own frame and in world units. The box and the
+    // capsule are oriented; the rows of this apply the way the entity matrices'
+    // rows do, and it is the identity for a sphere.
+    std::array<float, 3> centre{};
+    std::array<float, 3> extent{}; // box: half extents
+    std::array<float, 9> orientation{1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    float radius = 0.0f; // capsule and sphere
+    float height = 0.0f; // capsule
+};
+
 struct Placement
 {
     std::string name;
@@ -35,6 +83,10 @@ struct Placement
     // is exactly what visibility tests want.
     std::array<float, 3> boundsMin{};
     std::array<float, 3> boundsMax{};
+
+    // What the entity says to collide with. Empty for most placements, which
+    // is why the name rule is still needed.
+    std::vector<CollisionShape> shapes;
 
     // The engine's own hints for when this object stops being worth drawing.
     float visualLodFactor = 1.0f;

@@ -174,6 +174,105 @@ template <typename T> void readPrefixedList(Reader &reader, std::vector<T> &out,
     reader.array(reinterpret_cast<float *>(out.data()), count * components);
 }
 
+// eCCollisionShape_PS: the shapes an entity collides with, listed after its
+// properties. A file-backed shape names the cooked mesh outright, which is the
+// reference the "_col" naming convention stands in for.
+//
+// The per-shape values live in its property block rather than its body - the
+// type most of all, because the body cannot be read without knowing it.
+bool readCollisionShapes(Reader &reader, const StringTable &strings, std::vector<CollisionShape> &out)
+{
+    reader.skip(2); // class version, which the caller stops just short of
+    const std::uint32_t count = reader.u32();
+    if (!reader.ok() || count > 256)
+        return false;
+
+    for (std::uint32_t index = 0; index < count && reader.ok(); ++index)
+    {
+        std::string className;
+        std::size_t shapeEnd = 0;
+        if (!readSubClassHeader(reader, strings, className, shapeEnd))
+            return false;
+        if (className != "eCCollisionShape")
+        {
+            reader.seek(shapeEnd);
+            continue;
+        }
+
+        CollisionShape shape;
+        reader.skip(2); // property block version
+        const std::uint32_t propertyCount = reader.u32();
+        if (!reader.ok() || propertyCount > 256)
+            return false;
+        for (std::uint32_t property = 0; property < propertyCount && reader.ok(); ++property)
+        {
+            const std::string name = strings.entry(reader);
+            strings.entry(reader); // the declared type, which the name already implies
+            reader.skip(2);
+            const std::uint32_t valueSize = reader.u32();
+            if (!reader.ok() || valueSize > reader.remaining())
+                return false;
+            const std::size_t after = reader.tell() + valueSize;
+
+            // An enum is written as a version and a signed value; a flag is one
+            // byte. Anything else is stepped over by its declared size.
+            if (name == "ShapeType" || name == "Group" || name == "Material")
+            {
+                reader.skip(2);
+                const std::uint32_t value = reader.u32();
+                if (name == "ShapeType")
+                    shape.kind = CollisionShape::Kind(value);
+                else if (name == "Group")
+                    shape.group = value;
+                else
+                    shape.material = value;
+            }
+            else if (name == "DisableCollision" || name == "IgnoredByTraceRay")
+            {
+                const bool set = reader.u8() != 0;
+                (name == "DisableCollision" ? shape.disableCollision : shape.ignoredByTraceRay) = set;
+            }
+            reader.seek(after);
+        }
+
+        reader.skip(2); // class version
+        switch (shape.kind)
+        {
+        case CollisionShape::Kind::TriMesh:
+        case CollisionShape::Kind::ConvexHull:
+            shape.meshName = strings.entry(reader);
+            shape.meshIndex = reader.u16();
+            break;
+        case CollisionShape::Kind::Box:
+            reader.array(shape.centre.data(), 3);
+            reader.array(shape.extent.data(), 3);
+            reader.array(shape.orientation.data(), 9);
+            break;
+        case CollisionShape::Kind::Capsule:
+            shape.height = reader.f32();
+            shape.radius = reader.f32();
+            reader.array(shape.orientation.data(), 9);
+            reader.array(shape.centre.data(), 3);
+            break;
+        case CollisionShape::Kind::Sphere:
+            shape.radius = reader.f32();
+            reader.array(shape.centre.data(), 3);
+            break;
+        case CollisionShape::Kind::Point:
+            reader.array(shape.centre.data(), 3);
+            break;
+        default:
+            break;
+        }
+
+        // The rest of the body is the shape's own numbers and a cached box; the
+        // declared end is what makes it skippable without reading them.
+        reader.seek(shapeEnd);
+        out.push_back(std::move(shape));
+    }
+    return reader.ok();
+}
+
 // eCVegetation_PS: a table of plant meshes, then a grid that scatters them.
 // The meshes are templates - a single clump of blades in local space - and the
 // grid entries place them, so a sector of grass costs 59 meshes rather than
@@ -386,6 +485,17 @@ bool loadWorldNode(const std::vector<std::uint8_t> &bytes, WorldLayer &layer, st
             std::size_t vegetationBody = 0, vegetationEnd = 0;
             if (!readEntityPropertySet(reader, strings, className, properties, &vegetationBody, &vegetationEnd))
                 return fail("bad entity property set");
+
+            if (className == "eCCollisionShape_PS")
+            {
+                // As with vegetation: the record has already been stepped past,
+                // so rewind to its body, read the list, and carry on.
+                const std::size_t resume = reader.tell();
+                reader.seek(vegetationBody);
+                readCollisionShapes(reader, strings, placement.shapes);
+                reader.seek(resume);
+                continue;
+            }
 
             if (className == "eCVegetation_PS")
             {
