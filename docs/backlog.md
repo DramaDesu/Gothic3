@@ -49,11 +49,17 @@ startup path: 534 meshes, 565872 triangles. The worker pool is right there and
 each mesh is independent of every other, so this is a fan-out waiting to happen.
 A streaming rebuild is 6 ms and does not need it.
 
-**Stairs are walls to the controller.** The capsule falls, slides and knows
-when it is standing, but there is no step-up: it rides over a lip its bottom
-sphere can reach and stops at anything taller. Needs no new query - a probe
-forward and down from the step height, and a lift when that finds standable
-ground.
+**We may not be loading every layer of the world.** Looking for a staircase to
+test the controller's step-up against found no placement named for stairs in any
+`.node` file we read, although `_compiledPhysic.pak` holds a dozen cooked stair
+meshes. Either the architecture lives in a layer we skip, or it is placed under
+names we did not think to look for. Worth settling: it decides whether the world
+we walk is the whole one.
+
+**Step-up is unconfirmed in the positive case.** It refuses correctly - every
+refusal measured was a probe returning to the height it left, which is a wall -
+but it has never been seen to succeed, because no walk met a real step. Follows
+from the item above.
 
 ## Renderer
 

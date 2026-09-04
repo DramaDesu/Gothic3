@@ -447,3 +447,35 @@ says so - either alone could be explained by something else.
 What it does not do yet: steps and stairs. A capsule rides over a lip it can
 reach and stops at anything taller, with no step-up logic at all, so a staircase
 is a wall. That is the next thing, and it needs no new query.
+
+## Steps
+
+A capsule rides over a lip its bottom sphere can reach and stops at anything
+taller, so a staircase is a wall. The fix needs no new query: try the move a
+second time from a step higher, drop back down, and keep whichever attempt did
+better. Going down needs the mirror, or a body walks off every tread and arrives
+at the bottom of a flight in the air.
+
+**How tall is a step?** Measured rather than assumed. Across the game's own
+stair meshes, half to two thirds of the triangles are near-vertical - these are
+real risers, not ramps - and their vertical extent is a median 44 to 52 with a
+ninetieth percentile of 64. A capsule of radius 35 does not ride over that by
+itself, so the threshold is 70. The comment that first stood here said the
+treads rise "about 20 to 25", which was a guess and was wrong by half.
+
+**What the measurement caught.** The first acceptance rule kept a step whenever
+it bought a centimetre of horizontal distance. Pressed against a wall, the body
+accepted 198 of them in one run - and the largest lift among all 198 was zero.
+It was not climbing anything; it was paying for a second sliding attempt every
+frame. A step now has to end the body higher than it started, and that is what
+the counter reports.
+
+**What is still unshown.** Step-down fires and works - it keeps a body grounded
+down slopes rather than launching it. Step-up has not yet been seen to succeed
+on real geometry: in every walk tested, every refusal was the correct one, a
+probe that came back at the height it left from, which is what a wall gives. The
+walks never met a staircase, and looking for one in the sectors we load turned
+up no placement whose mesh is named for stairs at all - which may mean we are
+not loading every layer of the world. That is the next thing to settle, and
+until it is, the positive case rests on the mechanism rather than on a
+measurement.

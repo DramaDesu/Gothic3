@@ -2533,6 +2533,81 @@ int main(int argc, char **argv)
                     answered, asked, double(lowest), double(highest), double(visited) / double(asked),
                     seconds / double(asked) * 1e6);
 
+        // A lip a body could climb: neighbours on a fine grid that differ by
+        // a stair's rise over a stride's width. Reported so a walk can be
+        // aimed at one rather than sent hunting.
+        {
+            constexpr float c_Spacing = 25.0f;
+            constexpr int c_Half = 60; // three thousand units across
+            std::vector<float> heights(std::size_t(2 * c_Half + 1) * (2 * c_Half + 1), -1e9f);
+            const auto sampleAt = [&](int ix, int iz) -> float & {
+                return heights[std::size_t(ix + c_Half) * (2 * c_Half + 1) + (iz + c_Half)];
+            };
+            for (int ix = -c_Half; ix <= c_Half; ++ix)
+                for (int iz = -c_Half; iz <= c_Half; ++iz)
+                {
+                    float ground = 0.0f;
+                    const std::array<float, 3> probe{eye[0] + float(ix) * c_Spacing, eye[1] + 400.0f,
+                                                     eye[2] + float(iz) * c_Spacing};
+                    if (solid.groundBelow(probe, 2000.0f, ground))
+                        sampleAt(ix, iz) = ground;
+                }
+
+            float bestRise = 0.0f;
+            std::array<float, 3> bestAt{};
+            float bestYaw = 0.0f;
+            std::size_t lips = 0;
+            for (int ix = -c_Half; ix < c_Half; ++ix)
+                for (int iz = -c_Half; iz < c_Half; ++iz)
+                {
+                    const float here = sampleAt(ix, iz);
+                    if (here < -1e8f)
+                        continue;
+                    for (int side = 0; side < 2; ++side)
+                    {
+                        const float there = side == 0 ? sampleAt(ix + 1, iz) : sampleAt(ix, iz + 1);
+                        if (there < -1e8f)
+                            continue;
+                        const float rise = there - here;
+                        // A stair, not a cliff and not a slope.
+                        if (rise < 12.0f || rise > 50.0f)
+                            continue;
+
+                        // Halfway between the two samples. On a ramp it
+                        // lands halfway up; on a step it is still at the
+                        // bottom or already at the top. Only the second
+                        // is something to climb.
+                        float middle = 0.0f;
+                        const std::array<float, 3> between{
+                            eye[0] + (float(ix) + (side == 0 ? 0.5f : 0.0f)) * c_Spacing,
+                            here + 200.0f,
+                            eye[2] + (float(iz) + (side == 1 ? 0.5f : 0.0f)) * c_Spacing};
+                        if (!solid.groundBelow(between, 400.0f, middle))
+                            continue;
+                        const float part = (middle - here) / rise;
+                        if (part > 0.25f && part < 0.75f)
+                            continue; // a ramp
+
+                        ++lips;
+                        if (rise <= bestRise)
+                            continue;
+                        bestRise = rise;
+                        bestAt = {eye[0] + float(ix) * c_Spacing, here,
+                                  eye[2] + float(iz) * c_Spacing};
+                        // Face the higher neighbour: yaw 0 looks along +z
+                        // and yaw 90 along +x.
+                        bestYaw = side == 0 ? 90.0f : 0.0f;
+                    }
+                }
+            std::printf("steps: %zu within 1500 of the camera; the tallest rises %.0f\n",
+                        lips, double(bestRise));
+            if (lips != 0)
+                std::printf("  to meet it: --camera %.0f %.0f %.0f %.0f 0\n",
+                            double(bestAt[0] - (bestYaw > 45.0f ? 150.0f : 0.0f)),
+                            double(bestAt[1] + 200.0f),
+                            double(bestAt[2] - (bestYaw > 45.0f ? 0.0f : 150.0f)), double(bestYaw));
+        }
+
         // Every surface under the camera in turn, by starting the next probe
         // just under the last hit. One probe from the sky finds the roof and
         // says nothing about what a character could stand on.
@@ -2562,12 +2637,20 @@ int main(int argc, char **argv)
     // Steeper than this is a wall to stand on, however level its normal looks:
     // about fifty degrees.
     constexpr float c_StandableY = 0.64f;
+    // Measured, not guessed. The near-vertical faces of the game's own stair
+    // meshes rise a median 44 to 52 with a ninetieth percentile of 64, so a
+    // capsule of radius 35 does not ride over them by itself and the threshold
+    // has to clear a real tread. Taller than this should be a climb.
+    constexpr float c_StepHeight = 70.0f;
     std::array<float, 3> feet{eye[0], eye[1] - c_EyeHeight, eye[2]};
     float fallSpeed = 0.0f;
     bool onGround = false;
     bool landed = false;
     double asked = 0.0, covered = 0.0;
     std::size_t walkFrames = 0;
+    std::size_t stepTried = 0, stepTaken = 0, stepDown = 0;
+    float stepLift = 0.0f, stepBiggest = 0.0f;
+    std::size_t stepNoGround = 0, stepNoLift = 0, stepNoGain = 0;
     std::vector<physics::CollisionWorld::Contact> contacts;
 
     bool looking = false;
@@ -2770,31 +2853,108 @@ int main(int argc, char **argv)
             // from the normals that did the pushing. Four passes: one contact
             // resolved can press the body into another, and a corner is two
             // walls that each want the whole displacement.
-            onGround = false;
             std::array<float, 3> support{0.0f, 0.0f, 0.0f};
-            for (int pass = 0; pass < 4; ++pass)
-            {
-                contacts.clear();
-                const std::array<float, 3> low{feet[0], feet[1] + c_BodyRadius, feet[2]};
-                const std::array<float, 3> high{feet[0], feet[1] + c_BodyHeight - c_BodyRadius, feet[2]};
-                if (solid.capsuleContacts(low, high, c_BodyRadius, contacts) == 0)
-                    break;
-
-                // The deepest contact first: resolving it often settles the
-                // shallow ones, and pushing along every normal at once
-                // over-corrects a corner.
-                const physics::CollisionWorld::Contact *worst = nullptr;
-                for (const auto &contact : contacts)
-                    if (worst == nullptr || contact.depth > worst->depth)
-                        worst = &contact;
-                if (worst == nullptr || worst->depth <= 0.001f)
-                    break;
-                for (int axis = 0; axis < 3; ++axis)
-                    feet[axis] += worst->normal[axis] * worst->depth;
-                if (worst->normal[1] > c_StandableY)
+            const auto settle = [&]() {
+                bool grounded = false;
+                for (int pass = 0; pass < 4; ++pass)
                 {
+                    contacts.clear();
+                    const std::array<float, 3> low{feet[0], feet[1] + c_BodyRadius, feet[2]};
+                    const std::array<float, 3> high{feet[0], feet[1] + c_BodyHeight - c_BodyRadius, feet[2]};
+                    if (solid.capsuleContacts(low, high, c_BodyRadius, contacts) == 0)
+                        break;
+
+                    // The deepest contact first: resolving it often settles the
+                    // shallow ones, and pushing along every normal at once
+                    // over-corrects a corner.
+                    const physics::CollisionWorld::Contact *worst = nullptr;
+                    for (const auto &contact : contacts)
+                        if (worst == nullptr || contact.depth > worst->depth)
+                            worst = &contact;
+                    if (worst == nullptr || worst->depth <= 0.001f)
+                        break;
+                    for (int axis = 0; axis < 3; ++axis)
+                        feet[axis] += worst->normal[axis] * worst->depth;
+                    if (worst->normal[1] > c_StandableY)
+                    {
+                        grounded = true;
+                        support = worst->normal;
+                    }
+                }
+                return grounded;
+            };
+
+            const bool wasGrounded = onGround;
+            onGround = settle();
+
+            // How far along the ground the body actually got. A step is worth
+            // trying when it got much less than it asked for and it was walking
+            // rather than falling.
+            const auto travelled = [&](const std::array<float, 3> &from) {
+                return std::sqrt((feet[0] - from[0]) * (feet[0] - from[0]) +
+                                 (feet[2] - from[2]) * (feet[2] - from[2]));
+            };
+            const float wanted = std::sqrt(along[0] * along[0] + along[2] * along[2]);
+            if (wasGrounded && wanted > 1e-3f && travelled(wasAt) < wanted * 0.9f)
+            {
+                // The same move from a step higher, then let it down again. Kept
+                // only if it got further, so a wall costs one extra query pair
+                // and changes nothing.
+                ++stepTried;
+                const std::array<float, 3> blocked = feet;
+                const bool blockedGround = onGround;
+                const float made = travelled(wasAt);
+
+                feet = {wasAt[0] + along[0], wasAt[1] + c_StepHeight, wasAt[2] + along[2]};
+                const bool steppedGround = settle();
+
+                float ground = 0.0f;
+                const bool landing =
+                    solid.groundBelow({feet[0], feet[1] + c_StepHeight, feet[2]},
+                                      c_StepHeight * 2.0f + c_BodyRadius, ground);
+                if (landing)
+                    feet[1] = ground;
+
+                // A step counts only if the body ended up higher and further
+                // along. Accepting it for the distance alone was the mistake
+                // the measurement caught: pressed against a wall it accepted a
+                // step that lowered the body, every frame, gaining nothing -
+                // 198 accepted in one run and the largest lift among them zero.
+                const float lift = landing ? ground - wasAt[1] : 0.0f;
+                if (!landing)
+                    ++stepNoGround;
+                else if (lift <= 2.0f)
+                    ++stepNoLift;
+                else if (travelled(wasAt) <= made + 1.0f)
+                    ++stepNoGain;
+                if (!landing || lift <= 2.0f || travelled(wasAt) <= made + 1.0f)
+                {
+                    feet = blocked;
+                    onGround = blockedGround;
+                }
+                else
+                {
+                    ++stepTaken;
+                    stepLift += lift;
+                    stepBiggest = std::max(stepBiggest, lift);
+                    settle();
                     onGround = true;
-                    support = worst->normal;
+                    fallSpeed = 0.0f;
+                }
+            }
+            else if (wasGrounded && !onGround && fallSpeed <= 0.0f)
+            {
+                // Walking off a step should be a step down, not the start of a
+                // fall: without this the body leaves the ground at every tread
+                // and arrives at the bottom of a flight in the air.
+                float ground = 0.0f;
+                if (solid.groundBelow({feet[0], feet[1] + 1.0f, feet[2]}, c_StepHeight + 1.0f, ground))
+                {
+                    ++stepDown;
+                    feet[1] = ground;
+                    settle();
+                    onGround = true;
+                    fallSpeed = 0.0f;
                 }
             }
 
@@ -2834,9 +2994,11 @@ int main(int argc, char **argv)
                 covered += std::sqrt((feet[0] - wasAt[0]) * (feet[0] - wasAt[0]) +
                                      (feet[2] - wasAt[2]) * (feet[2] - wasAt[2]));
                 if (++walkFrames % 60 == 0)
-                    std::printf("walk %4zu: at %.0f %.0f %.0f, asked %.0f covered %.0f, %s\n",
+                    std::printf("walk %4zu: at %.0f %.0f %.0f, asked %.0f covered %.0f, %s, %zu tried %zu climbed %zu descended, lifted %.0f biggest %.0f, refused %zu no-ground %zu no-lift %zu no-gain\n",
                                 walkFrames, double(feet[0]), double(feet[1]), double(feet[2]), asked,
-                                covered, onGround ? "grounded" : "airborne");
+                                covered, onGround ? "grounded" : "airborne", stepTried, stepTaken, stepDown,
+                                double(stepLift), double(stepBiggest), stepNoGround, stepNoLift,
+                                stepNoGain);
             }
         }
         if (window.keyPressed('O'))
