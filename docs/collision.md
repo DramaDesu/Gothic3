@@ -392,3 +392,58 @@ first, by starting each probe just below the last hit. Under that camera:
     9133 roof, 8749 ceiling, 8402 / 8399 / 8379 floor layers, 7979, 7909
 
 One number from a query says very little; the stack says where you are.
+
+## A body, not a camera
+
+A spectator camera goes where it is told. A character says where it would like
+to go and the world decides the rest, and the difference is one loop: move, push
+out of everything the body is now inside, and read the ground off the normals
+that did the pushing rather than from a separate question.
+
+![walked across the room and stopped at the furniture](collision-walked.png)
+
+The body is a capsule a metre eighty tall and seventy across, eyes at 165 -
+Gothic's unit is a centimetre, so those are the numbers a person has. Gravity is
+981, which is the same statement. `--walk` turns it on, `G` toggles it while
+running, and `--walk-forward` holds the forward key for a headless run.
+
+**The contact query.** A downward ray finds the floor and is blind to the wall
+beside it, so the collision world answers a second question: which surfaces is
+this capsule overlapping, and which way does each push. The two indexes serve it
+unchanged - the grid picks the instances, the mesh tree picks the triangles -
+and the exact test happens back in world space, so a placement with a
+non-uniform scale is handled rather than assumed away. Only the broad phase goes
+into the instance's own space, where a radius does not survive scaling; the
+local radius is an upper bound from the Frobenius norm, which widens the search
+and cannot narrow it.
+
+Each triangle is measured against the capsule's core the way the geometry
+actually works: the three edges against the core as segment to segment, and each
+end of the core against the face. The smallest of those is the distance,
+whichever feature owns it - a vertex, an edge, or the face.
+
+**Resolution is one contact at a time, deepest first.** Pushing along every
+normal at once over-corrects a corner, where two walls each want the whole
+displacement. Four passes, because resolving one contact can press the body into
+another. Standing on the floor of the test room, a query looks at 3 instances
+and 14 triangles and costs 4 us.
+
+### What the measurements say
+
+Dropped in, the body falls and stops at 7979 - the same floor the surface stack
+named, reached by falling rather than by being told. Then, told to hold forward:
+
+    walk   60: at 58589 7979 56461, asked 350  covered 361, grounded
+    walk  120: at 58469 7982 56132, asked 700  covered 711, grounded
+    walk  180: at 58450 7981 56023, asked 1050 covered 827, grounded
+    walk  600: at 58450 7981 56023, asked 3500 covered 827, grounded
+
+It walks, stays on the floor, and stops dead against a wall - dead is right,
+because walking straight into a wall should slide nowhere. Turned to meet the
+same room obliquely, it keeps going after contact: covered 632, then 813, then
+946, against 2100 asked. That is sliding, and the two runs together are what
+says so - either alone could be explained by something else.
+
+What it does not do yet: steps and stairs. A capsule rides over a lip it can
+reach and stops at anything taller, with no step-up logic at all, so a staircase
+is a wall. That is the next thing, and it needs no new query.

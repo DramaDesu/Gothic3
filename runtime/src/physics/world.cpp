@@ -176,6 +176,110 @@ std::uint32_t buildNode(MeshIndex &index, std::vector<std::uint32_t> &order, con
     return self;
 }
 
+// The closest point of a triangle to a point. Ericson's routine: decide which
+// feature owns the projection - a vertex, an edge, or the face - by the sign of
+// the barycentric coordinates rather than by clamping and hoping.
+std::array<float, 3> closestOnTriangle(const std::array<float, 3> &p, const std::array<float, 3> &a,
+                                       const std::array<float, 3> &b, const std::array<float, 3> &c)
+{
+    const auto sub = [](const std::array<float, 3> &l, const std::array<float, 3> &r) {
+        return std::array<float, 3>{l[0] - r[0], l[1] - r[1], l[2] - r[2]};
+    };
+    const auto dot = [](const std::array<float, 3> &l, const std::array<float, 3> &r) {
+        return l[0] * r[0] + l[1] * r[1] + l[2] * r[2];
+    };
+    const auto step = [](const std::array<float, 3> &from, const std::array<float, 3> &along, float scale) {
+        return std::array<float, 3>{from[0] + along[0] * scale, from[1] + along[1] * scale,
+                                    from[2] + along[2] * scale};
+    };
+
+    const std::array<float, 3> ab = sub(b, a), ac = sub(c, a), ap = sub(p, a);
+    const float d1 = dot(ab, ap), d2 = dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f)
+        return a;
+
+    const std::array<float, 3> bp = sub(p, b);
+    const float d3 = dot(ab, bp), d4 = dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3)
+        return b;
+
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f)
+        return step(a, ab, d1 / (d1 - d3));
+
+    const std::array<float, 3> cp = sub(p, c);
+    const float d5 = dot(ab, cp), d6 = dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6)
+        return c;
+
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f)
+        return step(a, ac, d2 / (d2 - d6));
+
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f)
+        return step(b, sub(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6)));
+
+    const float denominator = 1.0f / (va + vb + vc);
+    return step(step(a, ab, vb * denominator), ac, vc * denominator);
+}
+
+// Where two segments come closest. Degenerate cases - either segment a point,
+// or the two parallel - fall out of the clamping rather than needing a branch
+// of their own.
+void closestBetweenSegments(const std::array<float, 3> &p1, const std::array<float, 3> &q1,
+                            const std::array<float, 3> &p2, const std::array<float, 3> &q2,
+                            std::array<float, 3> &c1, std::array<float, 3> &c2)
+{
+    const std::array<float, 3> d1{q1[0] - p1[0], q1[1] - p1[1], q1[2] - p1[2]};
+    const std::array<float, 3> d2{q2[0] - p2[0], q2[1] - p2[1], q2[2] - p2[2]};
+    const std::array<float, 3> r{p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2]};
+    const auto dot = [](const std::array<float, 3> &l, const std::array<float, 3> &m) {
+        return l[0] * m[0] + l[1] * m[1] + l[2] * m[2];
+    };
+    const float a = dot(d1, d1), e = dot(d2, d2), f = dot(d2, r);
+
+    float s = 0.0f, t = 0.0f;
+    if (a <= 1e-12f && e <= 1e-12f)
+    {
+        c1 = p1;
+        c2 = p2;
+        return;
+    }
+    if (a <= 1e-12f)
+        t = std::clamp(f / e, 0.0f, 1.0f);
+    else
+    {
+        const float c = dot(d1, r);
+        if (e <= 1e-12f)
+            s = std::clamp(-c / a, 0.0f, 1.0f);
+        else
+        {
+            const float b = dot(d1, d2);
+            const float denominator = a * e - b * b;
+            s = denominator > 1e-12f ? std::clamp((b * f - c * e) / denominator, 0.0f, 1.0f) : 0.0f;
+            t = (b * s + f) / e;
+            if (t < 0.0f)
+            {
+                t = 0.0f;
+                s = std::clamp(-c / a, 0.0f, 1.0f);
+            }
+            else if (t > 1.0f)
+            {
+                t = 1.0f;
+                s = std::clamp((b - c) / a, 0.0f, 1.0f);
+            }
+        }
+    }
+    c1 = {p1[0] + d1[0] * s, p1[1] + d1[1] * s, p1[2] + d1[2] * s};
+    c2 = {p2[0] + d2[0] * t, p2[1] + d2[1] * t, p2[2] + d2[2] * t};
+}
+
+bool overlapBounds(const std::array<float, 6> &a, const std::array<float, 6> &b)
+{
+    return a[0] <= b[3] && a[3] >= b[0] && a[1] <= b[4] && a[4] >= b[1] && a[2] <= b[5] && a[5] >= b[2];
+}
+
 } // namespace
 
 const MeshIndex *CollisionWorld::indexFor(const genome::Mesh &mesh)
@@ -387,6 +491,166 @@ bool CollisionWorld::groundBelow(const std::array<float, 3> &at, float reach, fl
         *normal = n;
     }
     return true;
+}
+
+
+std::size_t CollisionWorld::capsuleContacts(const std::array<float, 3> &low, const std::array<float, 3> &high,
+                                            float radius, std::vector<Contact> &out) const
+{
+    m_visited = 0;
+    m_tested = 0;
+    const std::size_t before = out.size();
+
+    std::array<float, 6> query{std::min(low[0], high[0]) - radius, std::min(low[1], high[1]) - radius,
+                               std::min(low[2], high[2]) - radius, std::max(low[0], high[0]) + radius,
+                               std::max(low[1], high[1]) + radius, std::max(low[2], high[2]) + radius};
+
+    std::uint32_t stack[64];
+    // An instance can be in several of the cells the query covers, and a contact
+    // counted twice pushes twice.
+    std::vector<std::uint32_t> seen;
+
+    const std::int32_t firstX = std::int32_t(std::floor(query[0] / c_CellSize));
+    const std::int32_t lastX = std::int32_t(std::floor(query[3] / c_CellSize));
+    const std::int32_t firstZ = std::int32_t(std::floor(query[2] / c_CellSize));
+    const std::int32_t lastZ = std::int32_t(std::floor(query[5] / c_CellSize));
+
+    for (std::int32_t x = firstX; x <= lastX; ++x)
+        for (std::int32_t z = firstZ; z <= lastZ; ++z)
+        {
+            const auto cell = m_cells.find(Cell{x, z});
+            if (cell == m_cells.end())
+                continue;
+
+            for (std::uint32_t index : cell->second)
+            {
+                if (std::find(seen.begin(), seen.end(), index) != seen.end())
+                    continue;
+                seen.push_back(index);
+
+                const Instance &instance = m_instances[index];
+                if (!overlapBounds(query, instance.bounds))
+                    continue;
+                ++m_visited;
+
+                // The capsule carried into the instance's space. A radius does
+                // not survive a non-uniform scale, so the local one is an upper
+                // bound - the Frobenius norm bounds the operator norm - and only
+                // widens the search; the test itself happens back in world space
+                // where the shape is still a capsule.
+                float squared = 0.0f;
+                for (float value : instance.inverse)
+                    squared += value * value;
+                const float localRadius = radius * std::sqrt(squared);
+
+                const auto toLocal = [&](const std::array<float, 3> &p) {
+                    return apply(instance.inverse, {p[0] - instance.translation[0], p[1] - instance.translation[1],
+                                                    p[2] - instance.translation[2]});
+                };
+                const std::array<float, 3> localLow = toLocal(low), localHigh = toLocal(high);
+                const std::array<float, 6> localQuery{
+                    std::min(localLow[0], localHigh[0]) - localRadius,
+                    std::min(localLow[1], localHigh[1]) - localRadius,
+                    std::min(localLow[2], localHigh[2]) - localRadius,
+                    std::max(localLow[0], localHigh[0]) + localRadius,
+                    std::max(localLow[1], localHigh[1]) + localRadius,
+                    std::max(localLow[2], localHigh[2]) + localRadius};
+
+                const MeshIndex &tree = *instance.index;
+                std::size_t depth = 0;
+                stack[depth++] = 0;
+                while (depth != 0)
+                {
+                    const std::uint32_t which = stack[--depth];
+                    const MeshIndex::Node &node = tree.nodes[which];
+                    if (!overlapBounds(localQuery, node.bounds))
+                        continue;
+                    if (node.count == 0)
+                    {
+                        if (depth + 2 <= std::size(stack))
+                        {
+                            stack[depth++] = node.child;
+                            stack[depth++] = which + 1;
+                        }
+                        continue;
+                    }
+
+                    for (std::uint32_t triangle = 0; triangle < node.count; ++triangle)
+                    {
+                        const float *t = &tree.triangles[(std::size_t(node.first) + triangle) * 9];
+                        ++m_tested;
+                        const std::array<float, 3> a = place(instance.world, {t[0], t[1], t[2]});
+                        const std::array<float, 3> b = place(instance.world, {t[3], t[4], t[5]});
+                        const std::array<float, 3> c = place(instance.world, {t[6], t[7], t[8]});
+
+                        // The closest pair between the capsule's core and the
+                        // triangle: the three edges against the core, and each
+                        // end of the core against the face. The smallest of
+                        // those is the distance, whichever feature owns it.
+                        std::array<float, 3> onCore{}, onFace{};
+                        float bestSquared = std::numeric_limits<float>::max();
+                        const std::array<float, 3> *corners[3] = {&a, &b, &c};
+                        for (int edge = 0; edge < 3; ++edge)
+                        {
+                            std::array<float, 3> c1{}, c2{};
+                            closestBetweenSegments(low, high, *corners[edge], *corners[(edge + 1) % 3], c1, c2);
+                            const float d[3] = {c1[0] - c2[0], c1[1] - c2[1], c1[2] - c2[2]};
+                            const float distance = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                            if (distance < bestSquared)
+                            {
+                                bestSquared = distance;
+                                onCore = c1;
+                                onFace = c2;
+                            }
+                        }
+                        for (const std::array<float, 3> &end : {low, high})
+                        {
+                            const std::array<float, 3> onIt = closestOnTriangle(end, a, b, c);
+                            const float d[3] = {end[0] - onIt[0], end[1] - onIt[1], end[2] - onIt[2]};
+                            const float distance = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                            if (distance < bestSquared)
+                            {
+                                bestSquared = distance;
+                                onCore = end;
+                                onFace = onIt;
+                            }
+                        }
+
+                        if (bestSquared >= radius * radius)
+                            continue;
+
+                        Contact contact;
+                        const float distance = std::sqrt(bestSquared);
+                        if (distance > 1e-4f)
+                        {
+                            contact.normal = {(onCore[0] - onFace[0]) / distance,
+                                              (onCore[1] - onFace[1]) / distance,
+                                              (onCore[2] - onFace[2]) / distance};
+                        }
+                        else
+                        {
+                            // The core is on the surface, so which way out is
+                            // not a difference of two points any more: the face
+                            // decides.
+                            const std::array<float, 3> u{b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+                            const std::array<float, 3> v{c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+                            std::array<float, 3> n{u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+                                                   u[0] * v[1] - u[1] * v[0]};
+                            const float length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                            if (length < 1e-9f)
+                                continue;
+                            for (float &component : n)
+                                component /= length;
+                            contact.normal = n;
+                        }
+                        contact.depth = radius - distance;
+                        out.push_back(contact);
+                    }
+                }
+            }
+        }
+
+    return out.size() - before;
 }
 
 } // namespace physics

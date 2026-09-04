@@ -71,6 +71,20 @@ class CollisionWorld
     bool groundBelow(const std::array<float, 3> &at, float reach, float &height,
                      std::array<float, 3> *normal = nullptr) const;
 
+    // A surface the body is inside, and how far out of it that surface pushes.
+    // The normal points away from the surface, towards the capsule.
+    struct Contact
+    {
+        std::array<float, 3> normal{};
+        float depth = 0.0f;
+    };
+
+    // Every surface overlapping the capsule whose core runs from low to high.
+    // Appends rather than clears, so a caller can gather several bodies, and
+    // returns how many it added.
+    std::size_t capsuleContacts(const std::array<float, 3> &low, const std::array<float, 3> &high,
+                                float radius, std::vector<Contact> &out) const;
+
     std::size_t instanceCount() const { return m_instances.size(); }
     std::size_t triangleCount() const { return m_triangles; }
     std::size_t distinctTriangles() const;

@@ -49,10 +49,11 @@ startup path: 534 meshes, 565872 triangles. The worker pool is right there and
 each mesh is independent of every other, so this is a fan-out waiting to happen.
 A streaming rebuild is 6 ms and does not need it.
 
-**Nothing falls yet.** `--walk` snaps the eye to whatever is under its feet with
-no gravity, no step limit and no wall collision, so it teleports up cliffs and
-down them. It exists to prove the geometry is where the world says it is, not to
-be a character.
+**Stairs are walls to the controller.** The capsule falls, slides and knows
+when it is standing, but there is no step-up: it rides over a lip its bottom
+sphere can reach and stops at anything taller. Needs no new query - a probe
+forward and down from the step height, and a lift when that finds standable
+ground.
 
 ## Renderer
 

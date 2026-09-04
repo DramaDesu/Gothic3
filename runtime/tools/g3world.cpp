@@ -934,6 +934,9 @@ int main(int argc, char **argv)
     // How high the eye rides above the ground when walking, in world units.
     // A Gothic 3 character is about 180 tall.
     float walkHeight = 0.0f;
+    // Hold forward for a headless run, so walking into things can be
+    // measured without anyone at the keyboard.
+    bool walkForward = false;
     // Shakes the timing inside the cull so two runs never line up. For
     // comparisons only; it costs whatever it is set to.
     int cullJitter = 0;
@@ -1001,6 +1004,12 @@ int main(int argc, char **argv)
         }
         if (std::string(argv[index]) == "--collision" && hasValue)
             collisionArgument = index + 1;
+        if (std::string(argv[index]) == "--walk-forward")
+        {
+            walkForward = true;
+            if (walkHeight <= 0.0f)
+                walkHeight = 180.0f;
+        }
         if (std::string(argv[index]) == "--walk")
             walkHeight = hasValue && argv[index + 1][0] != '-' ? float(std::atof(argv[index + 1])) : 180.0f;
         if (std::string(argv[index]) == "--collision-view" && hasValue)
@@ -2541,6 +2550,26 @@ int main(int argc, char **argv)
             from = here - 1.0f;
         }
     }
+    // The character, when walking. Gothic's unit is a centimetre, so these are
+    // a person: a metre eighty tall, seventy across, eyes a little below the
+    // top of the head.
+    constexpr float c_BodyHeight = 180.0f;
+    constexpr float c_BodyRadius = 35.0f;
+    constexpr float c_EyeHeight = 165.0f;
+    constexpr float c_Gravity = 981.0f;   // a centimetre is a centimetre
+    constexpr float c_WalkSpeed = 350.0f; // per second
+    constexpr float c_JumpSpeed = 420.0f;
+    // Steeper than this is a wall to stand on, however level its normal looks:
+    // about fifty degrees.
+    constexpr float c_StandableY = 0.64f;
+    std::array<float, 3> feet{eye[0], eye[1] - c_EyeHeight, eye[2]};
+    float fallSpeed = 0.0f;
+    bool onGround = false;
+    bool landed = false;
+    double asked = 0.0, covered = 0.0;
+    std::size_t walkFrames = 0;
+    std::vector<physics::CollisionWorld::Contact> contacts;
+
     bool looking = false;
     bool occlusion = startWithOcclusion;
     POINT lastCursor{};
@@ -2662,10 +2691,15 @@ int main(int argc, char **argv)
         if (GetAsyncKeyState(VK_CONTROL) & 0x8000)
             speed *= 0.15f;
 
+        // What the player asked for. The spectator applies it outright; the
+        // character asks the world first.
+        std::array<float, 3> wish{0.0f, 0.0f, 0.0f};
         const auto move = [&](const std::array<float, 3> &direction, float scale) {
             for (int axis = 0; axis < 3; ++axis)
-                eye[axis] += direction[axis] * scale;
+                wish[axis] += direction[axis] * scale;
         };
+        if (walkForward)
+            move(forward, speed);
         if (window.keyDown('W'))
             move(forward, speed);
         if (window.keyDown('S'))
@@ -2675,12 +2709,20 @@ int main(int argc, char **argv)
         if (window.keyDown('A'))
             move(right, -speed);
         if (window.keyDown('E'))
-            eye[1] += speed;
+            wish[1] += speed;
         if (window.keyDown('Q'))
-            eye[1] -= speed;
+            wish[1] -= speed;
         if (window.keyPressed('G'))
         {
-            walkHeight = walkHeight > 0.0f ? 0.0f : 180.0f;
+            walkHeight = walkHeight > 0.0f ? 0.0f : c_BodyHeight;
+            if (walkHeight > 0.0f)
+            {
+                // Take up the body where the camera is looking from, and let it
+                // fall to whatever is under it.
+                feet = {eye[0], eye[1] - c_EyeHeight, eye[2]};
+                fallSpeed = 0.0f;
+                onGround = false;
+            }
             std::printf("walking: %s\n", walkHeight > 0.0f ? "on" : "off");
         }
 
@@ -2689,19 +2731,113 @@ int main(int argc, char **argv)
             rebuildSolid(false);
             solidStale = false;
         }
-        if (walkHeight > 0.0f)
+        if (walkHeight <= 0.0f)
         {
-            // From the feet, plus enough to step up a stair and no more.
-            // Starting above the head instead meant the first surface below
-            // it could be a shelf, and standing on that raised the eye,
-            // which raised the next frame's start: the camera climbed the
-            // furniture. Falling is not limited the same way - there is no
-            // gravity yet, so a step off a cliff is a single long drop.
-            const float step = 60.0f;
-            float ground = 0.0f;
-            const std::array<float, 3> feet{eye[0], eye[1] - walkHeight + step, eye[2]};
-            if (solid.groundBelow(feet, 4000.0f, ground))
-                eye[1] = ground + walkHeight;
+            for (int axis = 0; axis < 3; ++axis)
+                eye[axis] += wish[axis];
+        }
+        else
+        {
+            // Horizontal only, at a person's pace rather than the spectator's,
+            // which scales with the world and would be a sprint indoors.
+            std::array<float, 3> along{wish[0], 0.0f, wish[2]};
+            const float length = std::sqrt(along[0] * along[0] + along[2] * along[2]);
+            if (length > 1e-6f)
+            {
+                float pace = c_WalkSpeed * delta;
+                if (window.keyDown(VK_SHIFT))
+                    pace *= 3.0f;
+                along[0] = along[0] / length * pace;
+                along[2] = along[2] / length * pace;
+            }
+
+            if (onGround && window.keyPressed(' '))
+            {
+                fallSpeed = c_JumpSpeed;
+                onGround = false;
+            }
+            fallSpeed -= c_Gravity * delta;
+            // A body moving further than its own radius in one step can pass
+            // through a wall before anything has a chance to push it back.
+            fallSpeed = std::max(fallSpeed, -3000.0f);
+
+            const std::array<float, 3> wasAt = feet;
+            feet[0] += along[0];
+            feet[2] += along[2];
+            feet[1] += fallSpeed * delta;
+
+            // Push out of everything the body is inside, and take the ground
+            // from the normals that did the pushing. Four passes: one contact
+            // resolved can press the body into another, and a corner is two
+            // walls that each want the whole displacement.
+            onGround = false;
+            std::array<float, 3> support{0.0f, 0.0f, 0.0f};
+            for (int pass = 0; pass < 4; ++pass)
+            {
+                contacts.clear();
+                const std::array<float, 3> low{feet[0], feet[1] + c_BodyRadius, feet[2]};
+                const std::array<float, 3> high{feet[0], feet[1] + c_BodyHeight - c_BodyRadius, feet[2]};
+                if (solid.capsuleContacts(low, high, c_BodyRadius, contacts) == 0)
+                    break;
+
+                // The deepest contact first: resolving it often settles the
+                // shallow ones, and pushing along every normal at once
+                // over-corrects a corner.
+                const physics::CollisionWorld::Contact *worst = nullptr;
+                for (const auto &contact : contacts)
+                    if (worst == nullptr || contact.depth > worst->depth)
+                        worst = &contact;
+                if (worst == nullptr || worst->depth <= 0.001f)
+                    break;
+                for (int axis = 0; axis < 3; ++axis)
+                    feet[axis] += worst->normal[axis] * worst->depth;
+                if (worst->normal[1] > c_StandableY)
+                {
+                    onGround = true;
+                    support = worst->normal;
+                }
+            }
+
+            // Landing stops the fall; being pushed up by a slope does not turn
+            // into a climb.
+            if (onGround && fallSpeed < 0.0f)
+                fallSpeed = 0.0f;
+
+            // Say so once: that the body fell and stopped is the whole claim,
+            // and a headless run can make it without anyone watching.
+            if (onGround && !landed)
+            {
+                landed = true;
+                // The clock is shadowed in this scope by the frame's own
+                // timestamp, so it is read directly.
+                const auto started = std::chrono::steady_clock::now();
+                contacts.clear();
+                solid.capsuleContacts({feet[0], feet[1] + c_BodyRadius, feet[2]},
+                                      {feet[0], feet[1] + c_BodyHeight - c_BodyRadius, feet[2]},
+                                      c_BodyRadius, contacts);
+                const double micros =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() * 1e6;
+                std::printf("landed at %.0f %.0f %.0f on a surface facing %.2f %.2f %.2f, "
+                            "%zu contacts, %zu instances, %zu triangles, %.0f us\n",
+                            double(feet[0]), double(feet[1]), double(feet[2]), double(support[0]),
+                            double(support[1]), double(support[2]), contacts.size(), solid.lastVisited(),
+                            solid.lastTested(), micros);
+            }
+
+            eye = {feet[0], feet[1] + c_EyeHeight, feet[2]};
+
+            // What was asked for against what was covered. They part company at
+            // a wall, which is the point of asking.
+            if (walkForward)
+            {
+                asked += std::sqrt(along[0] * along[0] + along[2] * along[2]);
+                covered += std::sqrt((feet[0] - wasAt[0]) * (feet[0] - wasAt[0]) +
+                                     (feet[2] - wasAt[2]) * (feet[2] - wasAt[2]));
+                if (++walkFrames % 60 == 0)
+                    std::printf("walk %4zu: at %.0f %.0f %.0f, asked %.0f covered %.0f, %s\n",
+                                walkFrames, double(feet[0]), double(feet[1]), double(feet[2]), asked,
+                                covered, onGround ? "grounded" : "airborne");
+            }
         }
         if (window.keyPressed('O'))
             occlusion = !occlusion;
@@ -3080,6 +3216,10 @@ int main(int argc, char **argv)
                             : did == 1 ? "took a sector in"
                             : did == 2 ? "dropped sectors"
                                        : "neither took nor dropped anything");
+                if (walkForward)
+                    std::printf("walked: asked for %.0f, covered %.0f, ended at %.0f %.0f %.0f, %s\n",
+                                asked, covered, double(feet[0]), double(feet[1]), double(feet[2]),
+                                onGround ? "on the ground" : "in the air");
                 std::printf("%.2fM instances walked by the cull\n", double(renderer.testedInstances()) / 1e6);
                 std::printf("%zu draws, %.2fM triangles submitted\n", renderer.submittedDraws(),
                             double(renderer.submittedTriangles()) / 1e6);
