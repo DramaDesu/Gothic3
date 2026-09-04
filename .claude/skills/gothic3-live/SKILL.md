@@ -67,27 +67,32 @@ rather than sleeping blind:
 python .claude/skills/gothic3-live/scripts/g3.py wait --timeout 300
 ```
 
-**Loading a save does not work at all, by any route found so far.** There is no
-`load_game` on this channel. `mcp/cycle.py` sends **F9** and calls it a
-quickload, and that is worth not believing: F9 sent through `g3_input` loads
-nothing, at the menu or in a world.
+**Loading a save is `load_save`**, and it takes seconds rather than the three
+minutes a new game costs:
 
-The two tests, so nobody has to repeat them. At the main menu, after F9 the state
-was still `MENU` two minutes later. In a world, F9 left `state_time` climbing -
-67 seconds before, 114 after - where a load would have reset it. It is the
-absence of that reset that settles it; the position and health look identical
-either way when the save was taken where the hero already stands, which is what
-makes this easy to get wrong.
+```bash
+python .claude/skills/gothic3-live/scripts/g3.py load_save --name probe
+python .claude/skills/gothic3-live/scripts/g3.py wait
+```
 
-So the only way into a world is `new_game`, every time, at about 160 seconds.
-Making a save reachable means adding a `load_game` handler to `Script_Mcp.dll` -
-its sibling handlers are in
-`gothic3sdk-examples/examples/Script_RemoteControl/src/handler/` and are short.
-That is the single highest-value change available to this setup.
+It also gets the hero out of whatever he was doing - a conversation included.
 
-`list_saves` lists what exists and `save_game --name X` writes one, and both
-work - a save is tracked in `ping`'s `last_save`. Writing one still costs
-nothing and will be worth having the day loading works.
+Two earlier readings of this page said loading was impossible, first via a
+quickload key and then not at all. Both were wrong, and from the same cause:
+the command names were guessed at and probed for, rather than read. **The server
+is ours.** It is `scripts/Script_Mcp/src/mcp_server.cpp` in this repository, the
+dispatch is a run of `if (Command == "...")`, and the answer to "what can I ask
+it" is one grep:
+
+```bash
+grep -oE 'Command == "[a-z_]+"' scripts/Script_Mcp/src/mcp_server.cpp
+```
+
+For the record, F9 through `g3_input` really does load nothing - that part held
+up - but it never mattered, because `load_save` was there the whole time.
+
+`list_saves` lists what exists and `save_game --name X` writes one. Saving where
+the game is useful and loading back into it is the normal working loop.
 
 ## Do not drive the menu with the mouse
 
@@ -95,7 +100,10 @@ It looks like it should work and it does not. The in-game cursor is not drawn
 into `g3_screenshot` output, so its position cannot be seen, and `g3_input`'s
 `move` is relative, so a click lands somewhere unknown. Pinning the cursor to a
 corner with a large negative move first does not help either - tried, and the
-menu still took no hover. Use `new_game`.
+menu still took no hover.
+
+There is no need for it: `load_save` and `new_game` do what the menu is for, and
+`close_menu` closes one that is in the way.
 
 ## g3_input is real gameplay, not a sandbox
 
@@ -120,8 +128,18 @@ first few answered `unknown command` harmlessly, then the process died. If the
 set of commands has to be explored, do it one at a time with a pause, and expect
 to lose the session anyway.
 
-Known commands: `ping`, `list_saves`, `save_game`, `new_game`, `combat_state`,
-`attack_speed`. Anything else answers `unknown command`.
+The commands, from the source rather than from probing: `aggro`, `attack_speed`,
+`attributes`, `close_menu`, `combat_state`, `list_saves`, `load_save`,
+`nearby_npcs`, `new_game`, `ping`, `save_game`, `spawn`, `teleport`, `tips`.
+Anything else answers `unknown command`.
+
+`teleport` is the one that is easy to miss and hardest to do any other way. It
+takes either `x`/`y`/`z` or `to` naming an entity, so a coordinate computed in
+our own runtime can be handed to the shipping game and looked at:
+
+```bash
+python .claude/skills/gothic3-live/scripts/g3.py teleport --x 59403 --y 7899 --z 58444
+```
 
 ## What `combat_state` gives you
 
@@ -152,11 +170,11 @@ whatever we computed.
 g3_status                     -> running? if yes, check its Script_* modules
 g3_launch  1280x720 windowed  -> only after the old one is closed
 g3.py ping                    -> state MENU means the channel is up
-g3.py new_game
-g3.py wait                    -> about 160 s to INGAME
+g3.py load_save --name probe  -> seconds; new_game only if no save will do
+g3.py wait
 g3.py combat_state            -> where the hero is, what it is doing
 g3_screenshot                 -> look at it
-g3.py save_game --name probe  -> cheap, though nothing can load it yet
+g3.py save_game --name probe  -> so the next session starts here
 ```
 
 ## Reading whether something happened
