@@ -599,6 +599,120 @@ int main(int argc, char **argv)
         return made;
     };
 
+    // The shapes a tree definition declares, as a mesh in the grown tree's own
+    // frame: metres to centimetres, and SpeedTree's z-up to the world's y-up.
+    // The instance's scale is already in its world matrix, so nothing here is
+    // per instance.
+    std::map<std::string, genome::Mesh *> treeCollisionOf;
+    std::size_t treeShapes = 0;
+    const auto collisionForTree = [&](const std::string &key,
+                                      const genome::SpeedTree &definition) -> genome::Mesh * {
+        if (definition.collision.empty())
+            return nullptr;
+        const auto cached = treeCollisionOf.find(key);
+        if (cached != treeCollisionOf.end())
+            return cached->second;
+
+        auto mesh = std::make_unique<genome::Mesh>();
+        genome::MeshElement element;
+        const auto vertex = [&](float x, float y, float z, float nx, float ny, float nz) {
+            element.positions.push_back({x, y, z});
+            element.normals.push_back({nx, ny, nz});
+            element.texCoords.push_back({0.0f, 0.0f});
+        };
+        const auto quad = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t d) {
+            element.indices.insert(element.indices.end(), {a, b, c, a, c, d});
+        };
+
+        for (const genome::CollisionPrimitive &shape : definition.collision)
+        {
+            // Metres to centimetres, and the third component is the one that
+            // points up in a .spt.
+            const float cx = shape.centre[0] * 100.0f;
+            const float cy = shape.centre[2] * 100.0f;
+            const float cz = shape.centre[1] * 100.0f;
+            const std::uint32_t base = std::uint32_t(element.positions.size());
+
+            if (shape.kind == genome::CollisionPrimitive::Kind::Box)
+            {
+                const float ex = shape.extent[0] * 100.0f;
+                const float ey = shape.extent[2] * 100.0f;
+                const float ez = shape.extent[1] * 100.0f;
+                for (int corner = 0; corner < 8; ++corner)
+                {
+                    const float sx = (corner & 1) ? 1.0f : -1.0f;
+                    const float sy = (corner & 2) ? 1.0f : -1.0f;
+                    const float sz = (corner & 4) ? 1.0f : -1.0f;
+                    vertex(cx + sx * ex, cy + sy * ey, cz + sz * ez, sx, sy, sz);
+                }
+                quad(base + 0, base + 2, base + 3, base + 1); // -z
+                quad(base + 5, base + 7, base + 6, base + 4); // +z
+                quad(base + 4, base + 6, base + 2, base + 0); // -x
+                quad(base + 1, base + 3, base + 7, base + 5); // +x
+                quad(base + 0, base + 1, base + 5, base + 4); // -y
+                quad(base + 6, base + 7, base + 3, base + 2); // +y
+                ++treeShapes;
+                continue;
+            }
+
+            const int around = 12;
+            if (shape.kind == genome::CollisionPrimitive::Kind::Cylinder)
+            {
+                // The trunk. It stands on its centre rather than being centred
+                // on it: the base sits at the centre and the height goes up.
+                const float radius = shape.radius * 100.0f;
+                const float height = shape.height * 100.0f;
+                for (int step = 0; step < around; ++step)
+                {
+                    const float angle = 6.2831853f * float(step) / float(around);
+                    const float nx = std::cos(angle), nz = std::sin(angle);
+                    vertex(cx + nx * radius, cy, cz + nz * radius, nx, 0.0f, nz);
+                    vertex(cx + nx * radius, cy + height, cz + nz * radius, nx, 0.0f, nz);
+                }
+                for (int step = 0; step < around; ++step)
+                {
+                    const std::uint32_t a = base + std::uint32_t(step * 2);
+                    const std::uint32_t b = base + std::uint32_t(((step + 1) % around) * 2);
+                    quad(a, b, b + 1, a + 1);
+                }
+                ++treeShapes;
+                continue;
+            }
+
+            // A canopy sphere.
+            const int rings = 8;
+            const float radius = shape.radius * 100.0f;
+            for (int ring = 0; ring <= rings; ++ring)
+            {
+                const float phi = 3.14159265f * float(ring) / float(rings);
+                for (int step = 0; step <= around; ++step)
+                {
+                    const float angle = 6.2831853f * float(step) / float(around);
+                    const float nx = std::sin(phi) * std::cos(angle);
+                    const float ny = std::cos(phi);
+                    const float nz = std::sin(phi) * std::sin(angle);
+                    vertex(cx + nx * radius, cy + ny * radius, cz + nz * radius, nx, ny, nz);
+                }
+            }
+            for (int ring = 0; ring < rings; ++ring)
+                for (int step = 0; step < around; ++step)
+                {
+                    const std::uint32_t a = base + std::uint32_t(ring * (around + 1) + step);
+                    const std::uint32_t b = a + std::uint32_t(around + 1);
+                    quad(a, a + 1, b + 1, b);
+                }
+            ++treeShapes;
+        }
+
+        if (element.indices.empty())
+            return nullptr;
+        mesh->elements.push_back(std::move(element));
+        genome::Mesh *made = mesh.get();
+        ownedMeshes.push_back(std::move(mesh));
+        treeCollisionOf.emplace(key, made);
+        return made;
+    };
+
     // Tree kinds in the order they were grown - the billboard atlas is baked
     // from exactly these, and a cell is found by a kind's place in this list.
     std::vector<std::string> treeKinds;
@@ -914,6 +1028,10 @@ int main(int argc, char **argv)
                 std::map<std::string, std::size_t> batchOf;
                 std::map<std::string, std::size_t> collisionBatchOf;
                 std::map<std::string, std::size_t> treeBatchOf;
+                // Per sector, like the two above: the mesh is shared across the
+                // world but a batch index only means anything in the sector
+                // whose batch vector it indexes.
+                std::map<std::string, std::size_t> treeCollisionBatchOf;
 
                 genome::WorldLayer layer;
                 std::string ignored;
@@ -1151,6 +1269,7 @@ int main(int argc, char **argv)
                             path = found->second;
 
                         std::size_t slot = std::size_t(-1);
+                        genome::Mesh *treeShape = nullptr;
                         std::array<genome::Mesh *, 2> grown{nullptr, nullptr};
                         const auto grownAlready = treeMeshOf.find(key);
                         if (grownAlready != treeMeshOf.end())
@@ -1182,6 +1301,12 @@ int main(int argc, char **argv)
                                 ownedMeshes.push_back(std::move(mesh));
                             }
                             timeTrees += since(treeStart);
+
+                            // The shapes the definition declares, in their own
+                            // batch. Keyed without the variant digit: the
+                            // collision is a property of the definition and does
+                            // not change with which tree grew from it.
+                            treeShape = collisionForTree(key.substr(0, key.size() - 1), definition);
                         }
                         else
                             ++missingTrees;
@@ -1216,6 +1341,26 @@ int main(int argc, char **argv)
                             }
                         }
                         known = treeBatchOf.emplace(key, slot).first;
+
+                        const std::string bare = key.substr(0, key.size() - 1);
+                        // The definition is only read once for the whole world,
+                        // so every sector after the first takes its shapes from
+                        // the cache rather than from the load above.
+                        if (treeShape == nullptr)
+                        {
+                            const auto cached = treeCollisionOf.find(bare);
+                            if (cached != treeCollisionOf.end())
+                                treeShape = cached->second;
+                        }
+                        if (treeShape != nullptr && treeCollisionBatchOf.find(bare) == treeCollisionBatchOf.end())
+                        {
+                            render::MeshInstances shape;
+                            shape.mesh = treeShape;
+                            shape.collision = true;
+                            shape.occludes = false;
+                            treeCollisionBatchOf.emplace(bare, batches.size());
+                            batches.push_back(std::move(shape));
+                        }
                     }
 
                     if (known->second == std::size_t(-1))
@@ -1234,6 +1379,13 @@ int main(int argc, char **argv)
                             break;
                         batches[at].transforms.push_back(tree.world);
                         batches[at].bounds.push_back(box);
+                    }
+
+                    const auto shape = treeCollisionBatchOf.find(key.substr(0, key.size() - 1));
+                    if (shape != treeCollisionBatchOf.end())
+                    {
+                        batches[shape->second].transforms.push_back(tree.world);
+                        batches[shape->second].bounds.push_back(box);
                     }
                     ++planted;
                 }
@@ -1311,6 +1463,9 @@ int main(int argc, char **argv)
                             collisionFound, collisionMissing, collisionTriangles);
                 for (const std::string &name : collisionMissingNames)
                     std::printf("  no collision: %s\n", name.c_str());
+                if (treeShapes != 0)
+                    std::printf("trees: %zu definitions declare %zu shapes\n", treeCollisionOf.size(),
+                                treeShapes);
             }
             if (planted != 0 || missingTrees != 0)
                 std::printf("%zu trees planted from %zu grown kinds, %zu definitions missing\n", planted,

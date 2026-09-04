@@ -299,6 +299,17 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
         case 3002:
             out.leafProbability = token.floats.empty() ? 1.0f : token.floats[0];
             break;
+        case 12004:
+            // A box: centre, then half extents.
+            if (token.floats.size() >= 6)
+            {
+                CollisionPrimitive box;
+                box.kind = CollisionPrimitive::Kind::Box;
+                box.centre = {token.floats[0], token.floats[1], token.floats[2]};
+                box.extent = {token.floats[3], token.floats[4], token.floats[5]};
+                out.collision.push_back(box);
+            }
+            break;
         case 12002:
             // The 12000 band records the tree's extents, and this component
             // tracks the height the game's own instances reached at r = 0.90
@@ -312,10 +323,27 @@ bool loadSpeedTree(const std::vector<std::uint8_t> &bytes, SpeedTree &out, std::
             // constant does. Measured, not reasoned.
             if (token.floats.size() > 2 && token.floats[2] > 0.01f)
                 out.recordedHeight = token.floats[2] * 175.5f;
+            if (token.floats.size() >= 4)
+            {
+                CollisionPrimitive sphere;
+                sphere.kind = CollisionPrimitive::Kind::Sphere;
+                sphere.centre = {token.floats[0], token.floats[1], token.floats[2]};
+                sphere.radius = token.floats[3];
+                out.collision.push_back(sphere);
+            }
             break;
         case 12003:
             if (token.floats.size() > 4 && token.floats[4] > 0.01f && out.recordedHeight == 0.0f)
                 out.recordedHeight = token.floats[4] * 208.0f; // only where 12002 is absent
+            if (token.floats.size() >= 5)
+            {
+                CollisionPrimitive trunk;
+                trunk.kind = CollisionPrimitive::Kind::Cylinder;
+                trunk.centre = {token.floats[0], token.floats[1], token.floats[2]};
+                trunk.radius = token.floats[3];
+                trunk.height = token.floats[4];
+                out.collision.push_back(trunk);
+            }
             break;
         case 14002:
             out.frond.texture = token.text;

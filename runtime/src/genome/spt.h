@@ -106,6 +106,33 @@ struct SpeedTreeToken
     std::string text;            // for string values
 };
 
+// A collision shape the definition declares. SpeedTree offers three kinds and
+// Gothic 3 uses all three: a cylinder for the trunk and spheres or a box for the
+// canopy. Every one of the 98 shipping definitions carries at least one.
+//
+// The numbers are in metres, in SpeedTree's own z-up frame - so the centre's
+// third component is the height above the base, and it is what the height
+// estimate below was already being fitted against.
+struct CollisionPrimitive
+{
+    enum class Kind
+    {
+        Sphere,   // id 12002: centre and radius
+        Cylinder, // id 12003: centre, radius and height, standing on the centre
+        Box,      // id 12004: centre and half extents
+    };
+
+    Kind kind = Kind::Sphere;
+    std::array<float, 3> centre{};
+    float radius = 0.0f;          // sphere and cylinder
+    float height = 0.0f;          // cylinder
+    std::array<float, 3> extent{}; // box
+
+    // The trunk is the one a player walks into; the canopy shapes are what a
+    // thrown thing or an arrow hits.
+    bool isTrunk() const { return kind == Kind::Cylinder; }
+};
+
 struct SpeedTree
 {
     std::string barkTexture;
@@ -145,6 +172,9 @@ struct SpeedTree
     std::array<float, 8> billboardCorners{};
     bool billboardCornersAuthored = false;
     std::string shadowTexture;       // id 18005
+
+    // What the definition says to collide with, in metres and z-up.
+    std::vector<CollisionPrimitive> collision;
 
     std::vector<SpeedTreeToken> tokens;   // everything, in file order
 };

@@ -205,32 +205,90 @@ forest collides. That is the next thing to find, and it is a different question
 - a tree's collision in this engine is likely a shape in its own definition
 rather than a cooked mesh in an archive.
 
-## Trees: where the collision is not
+## Trees
 
 Trees are placed as entities that name a `.spt` definition rather than a mesh,
 and the geometry is grown at load time, so the name lookup above never runs for
-them. Two obvious places to look for their collision turned out to be empty, and
-ruling them out is worth writing down so nobody looks again.
+them. They have collision all the same, and it is in the definition.
 
 **Not in the archives.** Searching all 6736 entries of `_compiledPhysic.pak` and
 the mesh archive for the tree names - speedtree, douglasfir, longleafpine,
 broadleaf, italiancypress, honeylocust - finds nine files, and none of them is a
 SpeedTree: seven `g3_object_tree_mushrooms_*` and two spellings of
-`g3_object_varant_tree_01`. There is no cooked collision mesh for any tree in
-the game.
+`g3_object_varant_tree_01`. There is no cooked collision mesh for any tree.
 
-**Not in the definitions.** SpeedTree's own SDK lets an artist put collision
-primitives on a tree, and a `.spt` stores them in token group 18000 - a marker,
-a type, three vectors and a name, which is the shape of the SDK's
-`SCollisionObject`. Our reader already kept every token in file order, so this
-cost no new parsing. `g3sptcol` walks the archive: all 98 definitions carry
-exactly one such object, and every one is empty - type 0, all three vectors
-zero.
+**In the definition, as primitives.** SpeedTree lets a definition carry
+collision shapes, and Gothic 3 uses all three kinds. Ids 12002, 12003 and 12004
+are a sphere, a cylinder and a box:
 
-What is left is the engine deriving something at runtime.
-`eCSpeedTreeCollisionDesc` derives from `eCPolyGeometryCollisionDesc` and offers
-`GetLocalPolygon` / `GetWorldPolygon` / `GetIntersectionCount` over a
-`SetResourceSpeedTreeEntity` - polygons produced from the SpeedTree resource
-itself. That is a ray-intersection descriptor, though, and whether the physics
-simulation uses the same polygons, a primitive, or nothing at all is not yet
-established.
+| id | floats | shape | what it is |
+| --- | --- | --- | --- |
+| 12002 | 4 | centre, radius | a canopy sphere, top at 0.86 of the tree's height |
+| 12003 | 5 | centre, radius, height | the trunk, standing on its centre, top at 0.48 |
+| 12004 | 6 | centre, half extents | a canopy box, top at 0.88, half-width 0.24 |
+
+Every one of the 98 shipping definitions carries at least one, and 83 carry the
+trunk cylinder. The combinations are a canopy sphere with a trunk (37), a box
+with a trunk (27), two spheres with a trunk (16), a sphere alone (11) and a box
+alone (3). The numbers are in metres, in SpeedTree's z-up frame, so placing them
+is a hundred and an axis swap - the instance's own scale is already in its world
+matrix.
+
+![the trees' own collision over a wood](collision-trees.png)
+
+The units are not assumed. Our `.spt` reader had been eating two of these
+numbers blind for a while, as height estimates fitted against the game's own
+instance heights: the sphere's centre times 175.5, and the trunk's height times
+208.0. Each of those constants is two things multiplied - the hundred that takes
+metres to centimetres, and the fraction of the tree's height that the canopy
+centre or the trunk top sits at. That a blind fit landed on a clean hundred is
+an independent check that these are metres, like every other collision here.
+
+**Two shape groups, and we draw both.** The engine distinguishes
+`eEShapeGroup_Tree_Trunk` from `eEShapeGroup_Tree_Branches`, so the trunk and the
+canopy are not the same kind of obstacle - a player walks into the first, and an
+arrow is stopped by the second. The picture above draws both, which is why a wood
+reads as a field of blocks. Whether to keep the canopy for the player is a
+decision we have not made yet.
+
+**How the engine gets there.** A shipped tree entity carries an
+`eCCollisionShape_PS` that is configured for collision - `Group` is
+`eECollisionGroup_Tree`, `Range` is `ProcessingRange`, and none of the disable
+flags is set - with **no shapes serialized in it at all**. They are built when
+the tree streams in: `eCSpeedTree_PS::CreateEntityCollsionGeometry` (the typo is
+the engine's), over `eCWraper_SpeedTreeRT::GetCollisionShapeCount` and
+`CreateCollisionShape`, which are the only two collision-construction methods on
+the SpeedTree side of the SDK. `eCSpeedTreeCollisionDesc` is a separate thing and
+not this one: it derives from `eCPolyGeometryCollisionDesc` and answers ray
+queries against the drawn geometry, and it is never reachable from the physics
+scene, whose API speaks only in `eCCollisionShape`.
+
+### What this cost, and the correction it deserves
+
+An earlier version of this section said the definitions declare no collision at
+all. That was wrong, and wrong in a way worth recording.
+
+Token group 18000 has the shape of SpeedTree's `SCollisionObject` - a marker, a
+type, three vectors and a name - so it got read as one, and it came out empty in
+all 98 files. The reading was the artefact: the "type" was printed from an
+initialiser rather than from any byte, because the token it was supposedly read
+from does not appear where the group was assumed to start. Group 18000 is the
+baked shadow: its three vectors are an orthonormal basis and its string is
+`CompositeShadowMap.tga`, and our own parser had already named id 18005
+`shadowTexture` - so the claim contradicted the code it was made from.
+
+The real primitives had been in the id table the whole time, at widths 16, 20
+and 24, and this section had already been eating their numbers as height
+estimates.
+
+Two habits come out of it. A group named from the shape of its fields is a
+guess, and it stays a guess until its numbers are read against something whose
+size is known - which is all it took here. And a tool that prints a value it did
+not read from a file will happily report a constant for the whole archive:
+`g3sptcol` now names the ids it actually saw.
+
+The cost was not only ours. The premise went into the brief for a fan-out of
+investigators, and they built on it - one of them wrote that the engine's
+shape-construction path "is starved of input in shipped data", citing the ruled
+-out item. It was not starved. A wrong premise handed to a fresh reader comes
+back confirmed, in their own words, with their own evidence attached to it.
