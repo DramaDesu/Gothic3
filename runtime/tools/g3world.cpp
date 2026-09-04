@@ -941,6 +941,10 @@ int main(int argc, char **argv)
     // 1 the world with its collision over it, 2 the collision alone.
     int collisionArgument = 0;
     int collisionView = 0;
+    // How many of the world's people to draw, nearest the camera first.
+    // Every one is a separate skinned mesh on the card, so this is a knob
+    // rather than a policy until something batches them.
+    int npcLimit = 0;
     // How high the eye rides above the ground when walking, in world units.
     // A Gothic 3 character is about 180 tall.
     float walkHeight = 0.0f;
@@ -1024,6 +1028,8 @@ int main(int argc, char **argv)
         }
         if (std::string(argv[index]) == "--walk")
             walkHeight = hasValue && argv[index + 1][0] != '-' ? float(std::atof(argv[index + 1])) : 180.0f;
+        if (std::string(argv[index]) == "--npcs" && hasValue)
+            npcLimit = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--third-person")
             thirdPersonArgument = hasValue && argv[index + 1][0] != '-'
                                       ? float(std::atof(argv[index + 1]))
@@ -1971,6 +1977,107 @@ int main(int argc, char **argv)
         }
         return out;
     };
+    // The world's people, from the entity files beside the sectors. Their
+    // actors are shared - a hundred militiamen wear one body - so both the actor
+    // and the skeleton built from it are cached by name.
+    std::vector<render::CharacterRenderer::Piece> npcPieces;
+    std::map<std::string, genome::Actor *> actorOf;
+    std::map<std::string, genome::Skeleton *> skeletonOf;
+    std::vector<std::unique_ptr<genome::Actor>> ownedActors;
+    std::vector<std::unique_ptr<genome::Skeleton>> ownedSkeletons;
+    static const genome::Motion c_BindPose; // no clip: every bone at its rest
+    if (npcLimit > 0 && animations && world)
+    {
+        std::vector<genome::DynamicEntity> everyone;
+        for (const genome::PakEntry &entry : world->entries())
+        {
+            if (entry.deleted || entry.path.size() < 10 ||
+                entry.path.compare(entry.path.size() - 9, 9, ".lrentdat") != 0)
+                continue;
+            std::vector<genome::DynamicEntity> found;
+            std::string why;
+            if (!genome::loadEntityFile(world->read(entry.path, &why), found, &why))
+                continue;
+            for (genome::DynamicEntity &one : found)
+                if (!one.actorName.empty())
+                    everyone.push_back(std::move(one));
+        }
+
+        // Nearest the camera first. Sorted rather than filtered by a radius,
+        // because whether anyone is nearby at all is a fact about the camera.
+        const std::array<float, 3> from{float(std::atof(argv[cameraArgument])),
+                                        float(std::atof(argv[cameraArgument + 1])),
+                                        float(std::atof(argv[cameraArgument + 2]))};
+        const auto distance = [&](const genome::DynamicEntity &one) {
+            const std::array<float, 3> at = one.translation();
+            return (at[0] - from[0]) * (at[0] - from[0]) + (at[1] - from[1]) * (at[1] - from[1]) +
+                   (at[2] - from[2]) * (at[2] - from[2]);
+        };
+        std::sort(everyone.begin(), everyone.end(),
+                  [&](const genome::DynamicEntity &a, const genome::DynamicEntity &b) {
+                      return distance(a) < distance(b);
+                  });
+
+        std::size_t missing = 0;
+        for (const genome::DynamicEntity &one : everyone)
+        {
+            if (npcPieces.size() >= std::size_t(npcLimit))
+                break;
+
+            // The entity names an EmotionFX actor; the archive holds it under
+            // the same name with the extension the compiler gave it.
+            std::string file = one.actorName;
+            for (char &c : file)
+                c = char(std::tolower(static_cast<unsigned char>(c)));
+            const std::size_t dot = file.find_last_of('.');
+            if (dot != std::string::npos)
+                file = file.substr(0, dot);
+            file += ".xact";
+
+            genome::Actor *actor = nullptr;
+            const auto known = actorOf.find(file);
+            if (known != actorOf.end())
+                actor = known->second;
+            else
+            {
+                auto loaded = std::make_unique<genome::Actor>();
+                std::string why;
+                if (genome::loadActor(animations->read(file, &why), *loaded, &why))
+                {
+                    actor = loaded.get();
+                    ownedActors.push_back(std::move(loaded));
+                    auto skeleton = std::make_unique<genome::Skeleton>(genome::buildSkeleton(*actor));
+                    skeletonOf.emplace(file, skeleton.get());
+                    ownedSkeletons.push_back(std::move(skeleton));
+                }
+                actorOf.emplace(file, actor);
+            }
+            if (actor == nullptr)
+            {
+                ++missing;
+                continue;
+            }
+
+            render::CharacterRenderer::Piece piece;
+            piece.actor = actor;
+            piece.textures = resolveActorTextures(*actor);
+            piece.skeleton = skeletonOf[file];
+            piece.motion = &c_BindPose;
+            piece.world = one.world;
+            npcPieces.push_back(std::move(piece));
+        }
+        std::printf("people: %zu wearing an actor in the world, %zu drawn, %zu whose actor is missing, "
+                    "%zu distinct actors\n",
+                    everyone.size(), npcPieces.size(), missing, actorOf.size());
+        if (!everyone.empty())
+        {
+            const std::array<float, 3> at = everyone.front().translation();
+            std::printf("  nearest is %s at %.0f %.0f %.0f, %.0f away\n",
+                        everyone.front().name.c_str(), double(at[0]), double(at[1]), double(at[2]),
+                        double(std::sqrt(distance(everyone.front()))));
+        }
+    }
+
     if (!heroBody.submeshes.empty())
     {
         heroTextures.push_back(resolveActorTextures(heroBody));
@@ -2569,6 +2676,9 @@ int main(int argc, char **argv)
     {
         std::vector<render::CharacterRenderer::Piece> pieces{{&heroBody, heroTextures[0]},
                                                             {&heroHead, heroTextures[1]}};
+        // The crowd shares the hero's renderer: one pipeline, one bone buffer,
+        // one draw call apiece.
+        pieces.insert(pieces.end(), npcPieces.begin(), npcPieces.end());
         if (!character.create(device, pieces, &error))
             std::printf("hero: %s\n", error.c_str());
         else
@@ -3466,9 +3576,21 @@ int main(int argc, char **argv)
             const float cosine = std::cos(facing), sine = std::sin(facing);
             const genome::Matrix4 world{cosine,  0.0f, -sine,   0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
                                         sine,    0.0f, cosine,  0.0f, feet[0], feet[1], feet[2], 1.0f};
+            // The head shares the body's skeleton, clip and place, which is
+            // what makes them one person rather than two.
             std::vector<render::CharacterRenderer::Piece> pieces{{&heroBody, heroTextures[0]},
-                                                                {&heroHead, heroTextures[1]}};
-            character.update(device, pieces, heroSkeleton, heroClips[clip], clipTime, world);
+                                                                 {&heroHead, heroTextures[1]}};
+            for (render::CharacterRenderer::Piece &piece : pieces)
+            {
+                piece.skeleton = &heroSkeleton;
+                piece.motion = &heroClips[clip];
+                piece.time = clipTime;
+                piece.world = world;
+            }
+            // Everyone else keeps the skeleton, pose and place they were built
+            // with; only the hero moves.
+            pieces.insert(pieces.end(), npcPieces.begin(), npcPieces.end());
+            character.update(device, pieces);
         }
 
         // Behind the character, along the way the camera looks, so he is in

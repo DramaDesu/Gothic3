@@ -50,26 +50,40 @@ class CharacterRenderer
         const genome::Image *normal = nullptr;
     };
 
-    // A character is assembled from several actors sharing one skeleton: a body,
-    // a head, and whatever the slots carry.
+    // One drawn thing: an actor, its textures, and what poses and places it.
+    //
+    // A character is often several of these - a body and a head - and they
+    // belong together by carrying the same skeleton and the same world matrix
+    // rather than by being grouped. That is what lets one renderer hold a crowd:
+    // the pieces of one person and the people themselves are the same list.
     struct Piece
     {
         const genome::Actor *actor = nullptr;
         std::vector<SubmeshTextures> textures; // one per submesh
+
+        // Where the piece is posed from. The skeleton belongs to the body actor
+        // even when the piece is a head, since a head's own skeleton is shorter
+        // and posing with it misplaces bones by tens of centimetres.
+        const genome::Skeleton *skeleton = nullptr;
+        const genome::Motion *motion = nullptr;
+        float time = 0.0f;
+
+        // Folded into the skinning matrices rather than the view, because the
+        // vertex shader carries the normal through the skinning matrix
+        // separately from the position: a rotation applied only to the view
+        // would turn the body and leave its lighting pointing the old way.
+        genome::Matrix4 world{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     };
 
     bool create(Device &device, const std::vector<Piece> &pieces, std::string *error);
     void destroy(Device &device);
 
-    // Poses every piece from the same skeleton and uploads this frame's bone
+    // Poses every piece from its own skeleton and uploads this frame's bone
     // matrices. The vertex data itself never changes.
-    // The world transform is folded in here rather than into the view matrix,
-    // because the vertex shader carries the normal through the skinning matrix
-    // separately from the position: a rotation applied only to the view would
-    // turn the body and leave its lighting pointing the old way.
-    void update(Device &device, const std::vector<Piece> &pieces, const genome::Skeleton &skeleton,
-                const genome::Motion &motion, float time,
-                const genome::Matrix4 &world = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+    //
+    // Consecutive pieces sharing a skeleton, clip and time are posed once
+    // between them: a body and its head cost one sampling, not two.
+    void update(Device &device, const std::vector<Piece> &pieces);
 
     void draw(Device &device, const std::array<float, 16> &viewProjection, const std::array<float, 4> &light);
 

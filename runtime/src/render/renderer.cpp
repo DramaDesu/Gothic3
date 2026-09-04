@@ -369,22 +369,36 @@ genome::Matrix4 concat(const genome::Matrix4 &a, const genome::Matrix4 &b)
 }
 } // namespace
 
-void CharacterRenderer::update(Device &device, const std::vector<Piece> &pieces, const genome::Skeleton &skeleton,
-                               const genome::Motion &motion, float time, const genome::Matrix4 &world)
+void CharacterRenderer::update(Device &device, const std::vector<Piece> &pieces)
 {
-    const std::vector<genome::Matrix4> pose = genome::samplePose(skeleton, motion, time);
+    // Each piece resolves a pose against its own node order and bind pose, which
+    // is what lets a head follow the body's skeleton. The result is one flat
+    // array the shader indexes with a per-part base.
+    //
+    // The pose is sampled once for a run of pieces that share a skeleton, clip
+    // and time - a body and its head - since sampling is the expensive half and
+    // they would sample the same thing.
+    std::vector<genome::Matrix4> pose;
+    const genome::Skeleton *posedFrom = nullptr;
+    const genome::Motion *posedBy = nullptr;
+    float posedAt = -1.0f;
 
-    // Each piece resolves the shared pose against its own node order and bind
-    // pose, which is what lets a head follow the body's skeleton. The result is
-    // one flat array the shader indexes with a per-part base.
     std::size_t base = 0;
     for (const Piece &piece : pieces)
     {
-        if (!piece.actor)
+        if (!piece.actor || !piece.skeleton || !piece.motion)
             continue;
-        const std::vector<genome::Matrix4> skinning = genome::skinningMatrices(*piece.actor, skeleton, pose);
+        if (piece.skeleton != posedFrom || piece.motion != posedBy || piece.time != posedAt)
+        {
+            pose = genome::samplePose(*piece.skeleton, *piece.motion, piece.time);
+            posedFrom = piece.skeleton;
+            posedBy = piece.motion;
+            posedAt = piece.time;
+        }
+        const std::vector<genome::Matrix4> skinning =
+            genome::skinningMatrices(*piece.actor, *piece.skeleton, pose);
         for (std::size_t bone = 0; bone < skinning.size(); ++bone)
-            m_matrices[base + bone] = concat(world, skinning[bone]);
+            m_matrices[base + bone] = concat(piece.world, skinning[bone]);
         base += skinning.size();
     }
 

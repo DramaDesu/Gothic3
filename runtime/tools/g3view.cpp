@@ -304,7 +304,13 @@ int main(int argc, char **argv)
 
         // With no clip the sampler falls back to each bone's rest transform,
         // which is exactly the bind pose.
-        renderer.update(device, pieces, skeleton, motion, time);
+        for (render::CharacterRenderer::Piece &piece : pieces)
+        {
+            piece.skeleton = &skeleton;
+            piece.motion = &motion;
+            piece.time = time;
+        }
+        renderer.update(device, pieces);
 
         VkCommandBuffer command = device.commandBuffer();
 

@@ -112,6 +112,24 @@ but nothing has been measured at an angle - the walk-forward harness only ever
 walks one way. A harness that walks a few headings from the same spot would say
 whether sliding works or whether it only looks like it should.
 
+## Characters
+
+**Posing costs 24 us a character a frame, and most of it is wasted.**
+samplePose and skinningMatrices run for every piece every frame and the whole
+bone palette is uploaded, whether or not anything moved. In the test room 0, 24
+and 96 characters cost 0.71, 1.25 and 3.00 ms, so the world's 16604 would be
+four hundred. A bind-posed NPC never changes; even a moving one only needs its
+own slice rewritten.
+
+**NPCs stand in their bind pose.** A clip belongs to a skeleton, so the hero's
+walk cannot pose a goblin. What an NPC should play is its own idle, found the
+way the hero's three were - by name, in the animation archive - and that lookup
+is the next piece of work.
+
+**Wearing an actor is not being a person.** eCVisualAnimation_PS is on 16604
+entities including animated chests; gCNPC_PS is on 10279 and is the test for
+someone to talk to.
+
 ## Renderer
 
 - The CPU-side `genome::Image` for a texture is never freed after upload.
