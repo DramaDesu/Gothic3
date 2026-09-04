@@ -25,6 +25,10 @@ add_library(genome STATIC
 target_include_directories(genome PUBLIC src)
 target_link_libraries(genome PRIVATE miniz)
 
+add_library(physics STATIC src/physics/world.cpp)
+target_include_directories(physics PUBLIC src)
+target_link_libraries(physics PRIVATE genome)
+
 add_executable(g3pak tools/g3pak.cpp)
 target_link_libraries(g3pak PRIVATE genome)
 
@@ -118,7 +122,7 @@ add_executable(g3sector tools/g3sector.cpp)
 target_link_libraries(g3sector PRIVATE genome)
 
 add_executable(g3world tools/g3world.cpp)
-target_link_libraries(g3world PRIVATE genome render)
+target_link_libraries(g3world PRIVATE genome render physics)
 add_dependencies(g3world shaders)
 
 add_executable(g3pool tools/g3pool.cpp)

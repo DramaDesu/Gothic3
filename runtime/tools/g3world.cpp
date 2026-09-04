@@ -10,6 +10,7 @@
 #include "genome/material.h"
 #include "genome/mesh.h"
 #include "genome/collision.h"
+#include "physics/world.h"
 #include "genome/pak.h"
 #include "genome/residency.h"
 #include "genome/spt.h"
@@ -930,6 +931,9 @@ int main(int argc, char **argv)
     // 1 the world with its collision over it, 2 the collision alone.
     int collisionArgument = 0;
     int collisionView = 0;
+    // How high the eye rides above the ground when walking, in world units.
+    // A Gothic 3 character is about 180 tall.
+    float walkHeight = 0.0f;
     // Shakes the timing inside the cull so two runs never line up. For
     // comparisons only; it costs whatever it is set to.
     int cullJitter = 0;
@@ -997,6 +1001,8 @@ int main(int argc, char **argv)
         }
         if (std::string(argv[index]) == "--collision" && hasValue)
             collisionArgument = index + 1;
+        if (std::string(argv[index]) == "--walk")
+            walkHeight = hasValue && argv[index + 1][0] != '-' ? float(std::atof(argv[index + 1])) : 180.0f;
         if (std::string(argv[index]) == "--collision-view" && hasValue)
             collisionView = std::atoi(argv[index + 1]);
         if (std::string(argv[index]) == "--threads" && hasValue)
@@ -2386,6 +2392,34 @@ int main(int argc, char **argv)
     // Sector zero is everything that is not a sector - the landscape, and a
     // single tree when one was asked for - and it never leaves. The rest go in
     // one at a time, by exactly the call an arrival will use later.
+    // The collision as something to ask questions of. Built from exactly the
+    // batches the collision view draws, so the two cannot disagree about what
+    // is solid, and rebuilt whole when the streamed set changes - it is a
+    // fraction of what loading a sector already costs.
+    physics::CollisionWorld solid;
+    bool solidStale = false;
+    const auto rebuildSolid = [&](bool report) {
+        const auto start = now();
+        solid.clear();
+        const auto addFrom = [&](const std::vector<render::MeshInstances> &from) {
+            for (const render::MeshInstances &batch : from)
+            {
+                if (!batch.collision || batch.mesh == nullptr)
+                    continue;
+                for (const auto &transform : batch.transforms)
+                    solid.add(*batch.mesh, transform);
+            }
+        };
+        addFrom(batches);
+        for (const SectorContent &content : residentSectors)
+            addFrom(content.batches);
+        solid.build();
+        if (report)
+            std::printf("solid: %zu triangles in %zu cells, %zu references, built in %.0f ms\n",
+                        solid.triangleCount(), solid.cellCount(), solid.referenceCount(),
+                        since(start) * 1000.0);
+    };
+
     if (!batches.empty() && !renderer.addSector(device, 0, batches, {}, &error))
     {
         std::cerr << "renderer: " << error << "\n";
@@ -2399,6 +2433,7 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    rebuildSolid(true);
     renderer.reportArenas();
     if (const char *dump = std::getenv("G3_DUMP_ATLAS"))
     {
@@ -2454,6 +2489,53 @@ int main(int argc, char **argv)
         pitch = float(std::atof(argv[cameraArgument + 4])) * (cameraInRadians ? 1.0f : 3.14159265f / 180.0f);
         std::printf("camera at %.0f %.0f %.0f looking %s %s degrees\n", eye[0], eye[1], eye[2],
                     argv[cameraArgument + 3], argv[cameraArgument + 4]);
+    }
+
+    if (walkHeight > 0.0f)
+    {
+        // A grid of drops over the streamed rectangle. The sky is well
+        // above anything in the world, so a point that finds nothing found
+        // a genuine hole rather than a short reach.
+        const auto start = now();
+        const float sky = 30000.0f;
+        std::size_t asked = 0, answered = 0, visited = 0;
+        float lowest = 1e9f, highest = -1e9f;
+        for (int stepX = -20; stepX <= 20; ++stepX)
+            for (int stepZ = -20; stepZ <= 20; ++stepZ)
+            {
+                const std::array<float, 3> probe{eye[0] + float(stepX) * 500.0f, sky,
+                                                 eye[2] + float(stepZ) * 500.0f};
+                float ground = 0.0f;
+                ++asked;
+                if (solid.groundBelow(probe, sky * 2.0f, ground))
+                {
+                    ++answered;
+                    lowest = std::min(lowest, ground);
+                    highest = std::max(highest, ground);
+                }
+                visited += solid.lastVisited();
+            }
+        const double seconds = since(start);
+        std::printf("topmost surface: %zu of %zu points have one, %.0f..%.0f high, %.1f instances a query, %.0f us each\n",
+                    answered, asked, double(lowest), double(highest), double(visited) / double(asked),
+                    seconds / double(asked) * 1e6);
+
+        // Every surface under the camera in turn, by starting the next probe
+        // just under the last hit. One probe from the sky finds the roof and
+        // says nothing about what a character could stand on.
+        float from = sky;
+        for (int layer = 0; layer < 12; ++layer)
+        {
+            float here = 0.0f;
+            std::array<float, 3> face{};
+            if (!solid.groundBelow({eye[0], from, eye[2]}, sky * 2.0f, here, &face))
+                break;
+            std::printf("  surface %d: %.0f, %s the eye by %.0f, facing %.2f %.2f %.2f\n", layer,
+                        double(here), here > eye[1] ? "above" : "below",
+                        double(std::fabs(eye[1] - here)), double(face[0]), double(face[1]),
+                        double(face[2]));
+            from = here - 1.0f;
+        }
     }
     bool looking = false;
     bool occlusion = startWithOcclusion;
@@ -2592,6 +2674,31 @@ int main(int argc, char **argv)
             eye[1] += speed;
         if (window.keyDown('Q'))
             eye[1] -= speed;
+        if (window.keyPressed('G'))
+        {
+            walkHeight = walkHeight > 0.0f ? 0.0f : 180.0f;
+            std::printf("walking: %s\n", walkHeight > 0.0f ? "on" : "off");
+        }
+
+        if (solidStale)
+        {
+            rebuildSolid(false);
+            solidStale = false;
+        }
+        if (walkHeight > 0.0f)
+        {
+            // From the feet, plus enough to step up a stair and no more.
+            // Starting above the head instead meant the first surface below
+            // it could be a shelf, and standing on that raised the eye,
+            // which raised the next frame's start: the camera climbed the
+            // furniture. Falling is not limited the same way - there is no
+            // gravity yet, so a step off a cliff is a single long drop.
+            const float step = 60.0f;
+            float ground = 0.0f;
+            const std::array<float, 3> feet{eye[0], eye[1] - walkHeight + step, eye[2]};
+            if (solid.groundBelow(feet, 4000.0f, ground))
+                eye[1] = ground + walkHeight;
+        }
         if (window.keyPressed('O'))
             occlusion = !occlusion;
         // Off, over the world, or alone. Nothing is reloaded: the collision is
@@ -2694,6 +2801,7 @@ int main(int argc, char **argv)
                 {
                     const auto arrivalStart = std::chrono::steady_clock::now();
                     SectorContent &content = loaded.content;
+                    solidStale = true;
                     if (!renderer.addSector(device, content.id, content.batches, content.lighting, &error))
                     {
                         // It put itself back, so the tiles have to go back too -

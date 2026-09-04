@@ -328,3 +328,49 @@ investigators, and they built on it - one of them wrote that the engine's
 shape-construction path "is starved of input in shipped data", citing the ruled
 -out item. It was not starved. A wrong premise handed to a fresh reader comes
 back confirmed, in their own words, with their own evidence attached to it.
+
+## Standing on it
+
+Drawing collision proves it was read; standing on it proves it was placed. The
+same batches the collision view draws are indexed for queries in
+`src/physics/world.h`, and the viewer's `--walk` - or `G` while running - keeps
+the camera at head height above whatever is under its feet.
+
+![standing on the floor of a room](collision-standing.png)
+
+**Instances, not triangles.** The first version copied every instance's
+triangles into world space, which came to 5.34 million triangles, 190 MB, and
+611 ms to rebuild - for a world that streams, so that rebuild happens whenever
+the resident rectangle changes. Indexing instances instead - a mesh pointer, a
+matrix, the inverse of its linear part and a world box - makes the same set
+65 thousand entries and **4 ms**, and the query goes the other way: into the
+instance's own space, where its triangles already are.
+
+A query touches 3.8 instances on average through a ten-metre grid, and costs
+**285 us**. That is fine for the one query a frame a camera makes and too slow
+for a character controller that sweeps. The cost is not the grid, which is doing
+its job, but that an instance is then tested triangle by triangle: the next
+thing this wants is an index inside the mesh, not a better one over the world.
+
+### Two bugs, and what each looked like
+
+The first probe found ground at none of 1681 points, having looked at **no
+instance at all**. That shape of failure is worth recognising: not a wrong
+answer but no candidates, which points at the index rather than at the maths.
+The meshes built for collision never had their element bounds filled in, so
+every instance's box was a point at its own origin.
+
+The second was subtler and would have been easy to call a data problem. With the
+boxes fixed, a probe from the sky found a surface at 1680 of 1681 points, and a
+probe from the camera's feet found nothing. The vertical rejection compared the
+wrong end of the box - it threw out any instance reaching *above* the probe,
+which is precisely the walls of the room whose floor was wanted. Probing from
+the sky worked because nothing reaches above the sky. It would have been natural
+to conclude the floor had no collision.
+
+The listing that settled it prints every surface under a point rather than the
+first, by starting each probe just below the last hit. Under that camera:
+
+    9133 roof, 8749 ceiling, 8402 / 8399 / 8379 floor layers, 7979, 7909
+
+One number from a query says very little; the stack says where you are.
