@@ -1,9 +1,11 @@
 # Open items
 
+The corrected plan is `docs/plan.md`; this is the detail behind its items.
+
 What is deliberately unfinished, and why. An item earns a place here by being
 something we found and chose not to do yet - not by being imaginable.
 
-## Decisions waiting
+## Decided, and recorded here so the reasoning stays
 
 **The canopy is no longer solid, and the forest opened up.** This was the open
 decision here and the measurement settled it. Walking eight headings from one
@@ -31,12 +33,14 @@ our own are all still open.
 
 ## Collision
 
-**Use the named mesh, not only the rule.** We read the entity's own reference
-now, and it checks out - 4012 named files across four rectangles, all resolving,
-and zero disagreements with the suffix rule. So there is no correctness pressure
-here any more, only tidiness: the lookup still goes through the rule, and the
-`u16` that selects one sub-mesh inside a cooked file is read and ignored. Worth
-switching when something needs the sub-mesh.
+**Load the collision the entity names - the rule is wrong four times in five.**
+An earlier version of this item said the rule and the reference agree
+everywhere, on the strength of a counter that could not disagree: it counted a
+mismatch only when the named stem was none of `""`, `_col` or `_cv`, so naming
+`_cv` while the loader takes `_col` was "agreement" by construction. An
+independent parse over 165 sectors puts it at **81% of placements with a named
+shape getting a different file than they name** - 10836 of 13333 - always finer
+than the game uses. The fix is in `docs/plan.md`, fix 6.
 
 **Scaled variants have a naming rule we do not follow.** A cooked triangle mesh
 cannot be scaled at use, so the game cooks a variant per scale and names it with
@@ -67,7 +71,7 @@ looked at the collision file each placement names instead. There are stairs at
 Walking at one of them took a step for the first time, and the step lifted the
 body by 97 against a threshold of 70: raising the capsule and letting it settle
 can leave it standing well above what the threshold allows, so a climb passed as
-a stride. Clamped now. What is still missing is a clean approach - a body
+a stride. Refused now - a step that settles above 70 is treated as a wall, which means the one observed 97-lift step is exactly what the code rejects. What is still missing is a clean approach - a body
 dropped near a staircase spends the run falling rather than walking, so the
 positive case rests on that single observed step.
 
@@ -114,7 +118,12 @@ whether sliding works or whether it only looks like it should.
 
 ## Characters
 
-**Posing costs 24 us a character a frame, and most of it is wasted.**
+**A character costs 24 us a frame, and two thirds of it is the GPU.** The
+attribution to posing below was written from whole-frame medians; the fence
+phase says otherwise - host-visible vertex and index buffers, no cull on the
+character path. The order of fixes is in `docs/plan.md`, build 3.
+
+**The posing third is still mostly wasted.**
 samplePose and skinningMatrices run for every piece every frame and the whole
 bone palette is uploaded, whether or not anything moved. In the test room 0, 24
 and 96 characters cost 0.71, 1.25 and 3.00 ms, so the world's 16604 would be
