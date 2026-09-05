@@ -447,7 +447,8 @@ int main(int argc, char **argv)
     if (argc < 2)
     {
         std::puts("usage: g3world <_compiledMesh.pak> [mesh filter] [--sectors <Projects_compiled.pak> [sector "
-              "filter]] [--shot <out.ppm>]");
+              "filter]] [flags]");
+        std::puts("flags: --baked-adds --bench --billboard --camera --collision --collision-view --cull-grain --cull-jitter --cull-repeat --fly --lod --no-occlusion --normal-strength --npcs --occlusion-pixels --radians --sectors --shot --size --specular --squeeze --stream --third-person --threads --tree --uncapped --validate --walk --walk-forward");
         return 2;
     }
 
@@ -1012,9 +1013,26 @@ int main(int argc, char **argv)
     float treeLodDistance = 6000.0f;
     // And where it becomes a single quad. Four hundred metres.
     float treeBillboardDistance = 40000.0f;
+    // Every flag this viewer knows, in one place: the check below and the
+    // usage above both read it, so a flag cannot be accepted and ignored.
+    // A run with a flag that did nothing once passed for a measurement.
+    static const char *const c_KnownFlags[] = {"--baked-adds", "--bench", "--billboard", "--camera", "--collision", "--collision-view", "--cull-grain", "--cull-jitter", "--cull-repeat", "--fly", "--lod", "--no-occlusion", "--normal-strength", "--npcs", "--occlusion-pixels", "--radians", "--sectors", "--shot", "--size", "--specular", "--squeeze", "--stream", "--third-person", "--threads", "--tree", "--uncapped", "--validate", "--walk", "--walk-forward"};
     for (int index = 2; index < argc; ++index)
     {
         const bool hasValue = index + 1 < argc;
+        if (std::string(argv[index]).rfind("--", 0) == 0)
+        {
+            bool known = false;
+            for (const char *flag : c_KnownFlags)
+                known = known || std::string(argv[index]) == flag;
+            if (!known)
+            {
+                std::printf("unknown flag %s; the flags are:\n", argv[index]);
+                for (const char *flag : c_KnownFlags)
+                    std::printf("  %s\n", flag);
+                return 2;
+            }
+        }
         if (std::string(argv[index]) == "--sectors" && hasValue)
             sectorArgument = index + 1;
         if (std::string(argv[index]) == "--shot" && hasValue)
@@ -4142,7 +4160,11 @@ int main(int argc, char **argv)
                 std::printf("wrote %s\n", shotPath);
             else
                 std::printf("capture failed: %s\n", shotError.c_str());
-            break;
+            // A plain shot is done here. A benched one goes on to its
+            // last frame and the report: breaking out here discarded the
+            // numbers behind every shot recipe in the docs.
+            if (benchFrames == 0)
+                break;
         }
     }
 

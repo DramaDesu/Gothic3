@@ -252,10 +252,12 @@ only things that really were hidden - it works, it is simply not worth its
 price. The card never being waited for is the whole argument: 0.54M triangles it
 absorbs for free are not worth 1.24 ms of processor.
 
-It is off by default now and `--occlusion` turns it back on. The condition for
-turning it on again is written into the code beside the switch: when the frame
-starts waiting on the fence, which means higher resolution, heavier shading, or
-ray tracing.
+It is on by default and `--no-occlusion` turns it off; there is no
+`--occlusion`, and an earlier version of this sentence named one - a run with
+that flag reproduced the default exactly and read as a non-result, which is
+why the parser now rejects a flag it does not know. The condition for turning
+it off is written into the code beside the switch: when the frame is not
+waiting on the fence, the test costs more than the triangles it saves.
 
 `--occlusion-pixels N` skips the test for instances smaller than N pixels on
 screen, which was the first thing tried. It does reduce the cost - the cull goes

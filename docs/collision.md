@@ -510,7 +510,9 @@ collision file each placement *names* - which we read now - found them at once:
 **What the first real step showed.** Walking at one of those took a step, and it
 lifted the body by 97 against a threshold of 70. Raising the capsule and letting
 it settle can leave it standing on something well above the threshold, so a climb
-passed as a stride; the lift is clamped to the step height now. Step-down fires
+passed as a stride; a lift above the step height is refused now - a step
+that settles above 70 is treated as a wall, not shortened to 70 - which means
+the one observed 97-lift event is exactly what the code now rejects. Step-down fires
 and works. Step-up now rests on that one observed step - a body dropped near a
 staircase spends the run falling rather than walking, so a clean approach to
 measure many is still wanted.
