@@ -1,217 +1,193 @@
-# The plan, corrected by an audit
+# The plan
 
-Six readers went over the runtime, each with one angle, and every serious
-finding was handed to someone told to refute it. None was refuted. None landed
-in `src/genome`, `src/physics` or the streamed-world path of `src/render`: those
-are measured, honest and sound, and the docs and commit messages describe them
-truthfully. Everything serious is in `tools/g3world.cpp`, whose `main()` is now
-3925 lines and where every feature of the last month has landed.
+## What this is for
 
-The verdict, which the plan below follows: **the libraries are better than the
-tool that drives them**, three of the stated capabilities are mislabelled, and
-the dangerous items are cheap. Gameplay next is still the right direction. The
-scheduled "architecture pass once there are three real consumers" is **not due**
-- `CollisionWorld` has one consumer, `CharacterRenderer` has one update path,
-the sector feed has one client. Two extractions are due, each because a consumer
-is about to exist. A pass is not.
+A greatly improved Gothic 3, built as a hybrid: the game's core and content
+stay, its systems are replaced with good ones. The game shipped unfinished -
+the systems were never resolved and the content has holes - and the owner's
+judgment, which this plan takes as its premise, is that all of it closes with
+quality systems rather than with a new game.
 
-## What was mislabelled, and by whom
+So the split is fixed:
 
-These are corrections to this repository's own record. Each was written in good
-faith and each is wrong.
+- **Content is data, and we read it.** The world (2177 sectors), its people
+  (35437 entities in `.lrentdat`, 10279 of them NPCs, 7651 with a daily
+  routine), the dialogues and quests (`Infos.pak`, `Quests.pak`,
+  `Strings.pak`), the actors, clips, materials, collision. None of this is
+  rewritten. Where the content has holes, the fix is more data, authored the
+  same way.
+- **Systems are ours, and we write them.** Movement, combat, AI, streaming,
+  rendering, animation, physics. These are where the game fell short, and
+  where the runtime exists to be better. Reimplementing a system is not
+  reimplementing the game: the rules are ours, the world they run in is
+  Gothic's.
 
-**"Zero disagreements between the named collision file and the suffix rule."**
-`docs/backlog.md` and `docs/collision.md` say the entity's named shape agrees
-with the `""` / `_col` / `_cv` rule everywhere, on the strength of a counter at
-`g3world.cpp:1486-1488`. That counter counts a disagreement only when the named
-stem is *none* of the three - so a placement naming `_cv` while the loader takes
-`_col` is "agreement" by construction. It could not fail. An independent parse
-over 165 sectors: **81% of placements with a named shape get a different file
-than they name** (10836 of 13333), always finer than the game uses - a triangle
-mesh where the game says hull, or a different mesh outright for ten wall and
-statue stems, 20-47 cm off in extent. The "names nothing" list beside it prints
-resolved names, because its `else` binds to the wrong `if`.
+The original game is the **oracle**, not the target. The hook track
+(`scripts/Script_Mcp`, the `gothic3-live` skill) can put the shipping game at
+any coordinate and read what it does - where the hero is, what he is doing,
+how hard an orc hits and how often. That is the specification a replacement
+system is measured against before it is allowed to be different. "Improved"
+is only a claim once "the same" has been shown.
 
-**"The player has a body" - and it freezes.** `samplePose` holds the last key
-(`motion.cpp:287-296`) and `clipTime` is never wrapped (`g3world.cpp:3573`).
-Walk is 1.04 s and run 0.80 s, so by the time anyone first moves, the hero
-slides in a fixed mid-stride pose. `g3view` loops; the world viewer does not.
+The runtime is 64-bit, Vulkan, multithreaded, and reads the game's data
+directly with no game process behind it. That was chosen over hooking the
+original because the original is 32-bit, DX9 and single-ticked, and none of
+the three improvement axes fit inside that. The engine is also the owner's
+vehicle for learning multithreading, cache behaviour and memory - so the
+architecture is allowed to be built for that, provided each step is pulled by
+a real consumer rather than sketched ahead of one.
 
-**"Clamped now"** (the step-up lift). It is a refusal: a step that settles above
-70 is treated as a wall. The single 97-lift event that backs "step-up works" is
-exactly the case the code now rejects.
+## Where the three axes stand
 
-**"The cost is the posing"** (24 us a character). Derived from whole-frame
-medians; the fence phase already in the bench says two thirds is GPU -
-host-visible vertex and index buffers, no cull on the character path, PCIe at
-19-20 GB/s. The posing is a third.
+**Streaming** is the axis where the runtime is probably already better than
+the game: a loader on its own thread, GPU arenas with refcounted geometry, no
+queue waits on upload, a parallel cull at 0.4 ms. *Probably*, because the
+audit found `--fly` has been dead since the controller rewrite, so every
+flight benchmark since Sep 4 measured a stationary camera. The axis is built
+and unproven.
 
-**"The input phase does nothing but GetAsyncKeyState"** (`streaming.md`). It
-contains the collision rebuild, ~15 ms on the resident set, landing in the
-frame *after* the arrival on a frame the bench labels as having taken nothing.
-A controller spike and a rebuild are currently indistinguishable.
+**Combat** is the long pole. Nothing of it exists in the runtime, and it needs
+a game layer under it - a player with animation state, NPCs that act, damage.
+It is also the axis with the best specification: the hook track has measured
+the original (`docs/combat-model.md` - 37 damage a hit, 0.53 s minimum
+interval, the action machine 1-35, `AssessHit` as the lever, stun-lock as the
+known defect).
 
-**Every flight benchmark since Sep 4 measured a stationary camera.** `--fly`
-has moved nothing since `c302f35`: the controller rewrite turned movement into
-a wish vector and the fly branch applies its move after the wish is consumed.
-Two 3.5 km flights streamed 0 in, 0 out. The flight behind `streaming.md` and
-`world.md` has no recorded command line anywhere.
+**Rendering** reproduces the original's look with normal maps and specular
+added. Its improvements - PBR, ray tracing, DLSS - are deferred by the owner's
+own decision until there is a game to put them in.
 
-## Stop doing
+## The phases
 
-1. **Closing an item on a check that cannot disagree.** A new counter must be
-   shown firing on one real case before its zero is written down. The
-   collision counter above is the cautionary case; it is also the third time
-   this repository has recorded an invariant that was zero by its own
-   precondition.
-2. **Attributing cost without a split.** Only what a phase timer or a shape
-   test - resolution, camera turned 180 degrees - has isolated gets a name.
-3. **Adding gameplay state as locals of `main()` captured by `[&]`.** The loader
-   counters became a use-after-scope exactly this way. New state gets a struct
-   with a name.
-4. **Measuring with instruments known to be broken** - `--fly`, `--bench N
-   --shot` (the report is discarded), the input phase as a proxy for the
-   controller, and any tool other than `g3world` without a full
-   `cmake --build` first (14 of 17 executables are behind the graph).
-5. **Planning against 16604 wearers as a drawn set.** The code draws the N
-   nearest; 400 ms and 3 GB extrapolations describe nothing it will do.
-6. **Treating "the architecture pass" as a phase.** Do the extraction a consumer
-   pulls, when it pulls it. The loader split in `849f95f` is the model: a
-   measured 200 ms stall demanded it.
+Ordered by what the goal needs, not by what is most broken. Each phase names
+what "done" looks like, because the project's recorded failures have all been
+claims that outran their evidence.
 
-## Fix first - ordered by what endangers the next steps
+### 0. Make the instruments honest - about a week
 
-1. **Undefined behaviour from the loader thread, under an hour.** The six
-   counters at `g3world.cpp:1136` (`placed, sectors, missing, grass, planted,
-   missingTrees`) are incremented on the loader thread on every `--stream`
-   arrival through references into a scope that closed at `:1812`. The shipping
-   build is Release `/O2`, and the compiler was shown to colour later
-   frame-loop locals onto those slots. Every edit to `main()` reshuffles which
-   local gets corrupted, silently. Move them to function scope beside the
-   loader accumulators (`:868-874`) or into a `LoadCounts` beside `loadSector`,
-   and print them after `loader.stop()`.
-2. **Repair `--fly`, an hour.** Apply the fly move (`:3386`) before the wish is
-   consumed (`:3132`). Guard re-arrival of an in-flight sector (`:3442-3446`
-   treats a sector still in the loader as absent - it only bites at fly
-   speeds, which the repair reintroduces). Then record the exact flight command
-   line in `streaming.md` beside its numbers.
-3. **Book the collision rebuild honestly, an hour.** Give `rebuildSolid(false)`
-   at `:3127` its own phase and work bit, or move it into the streaming section
-   of the frame that set `solidStale`. Make departures set `solidStale` too
-   (`:3418-3434` do not). Correct `streaming.md:287`.
-4. **Loop the clips, three lines.** `std::fmod` on `clipTime` against the clip's
-   duration as `g3view.cpp:294` does, reset on clip change. NPC idle clips go
-   down the same path and would inherit the freeze for every person in view.
-5. **Make the tunnelling guard real, a day.** Reproduced: a drop from 48.5 m at
-   a fixed 1/60 put the body 104 cm inside a roof slab in one run of five.
-   Pressing G from a high camera is the documented way to start walking. The
-   -3000 clamp allows 50 cm a frame, more than the 35 radius. Sub-step the
-   integrate-and-settle when a step exceeds ~0.9 radius, or sweep the previous
-   feet position over the vertical travel with `groundBelow` before settling.
-6. **Load the collision the entity names, half a day.** Replace
-   `collisionFor(placement.meshName)` at `:1505` with a lookup by
-   `shape.meshName` selecting part `shape.meshIndex` (read at `world.cpp:244`,
-   used nowhere), keeping the suffix rule only for placements that name
-   nothing. The cache is keyed by visual name and one visual names `bare` in
-   some placements and `_cv` in others, so the key must become the named file.
-   Then recount, and rewrite the two docs with the real number.
-7. **The doc lies and the flag trap, an hour.** "Clamped" becomes "refused above
-   70"; `world.md:255` names `--occlusion`, which is dead - the switch is
-   `--no-occlusion`; the parser at `:993-1062` accepts any `--` argument
-   silently, so an unknown flag reproduces a non-result. Reject unknown flags
-   and list all 29 in the usage. Make `--bench N --shot` capture on the last
-   bench frame instead of discarding the report.
+The audit (`docs/audit-2026-09.md`) found seven cheap things, and every one is
+an instrument or a lie in the record rather than a feature. They come first
+because every later phase measures with these:
 
-## Then build - ordered
+- the loader counters that are undefined behaviour from the loader thread
+  (`g3world.cpp:1136`, referenced by a `std::function` at `:483`, called at
+  `:3025` after the block closed at `:1812`);
+- `--fly`, so a camera can move;
+- the collision rebuild booked into the input phase;
+- the hero's clips, which never loop;
+- the tunnelling guard, which lets 50 cm a frame through a 35 cm radius;
+- the collision file the entity names, which the loader ignores for about half
+  of all hulls;
+- the three doc lies and the parser that accepts any flag silently.
 
-1. **Extract the character controller into a named type.** Constants
-   `:2925-2941`, state `:2942-2973`, `settle` and the step/snap logic through
-   `~:3372` become `CharacterController::step(const CollisionWorld&, const
-   Input&, float dt)` in `src/physics` or a new `src/game`. It depends only on
-   `CollisionWorld`, a wish vector and a delta. Add a **Vulkan-free test
-   executable** - `src/physics` links only `genome` - with synthetic meshes
-   against `groundBelow`, `capsuleContacts`, the step gate and the 48.5 m
-   drop; the measured walks are the byte-for-byte regression: 3991 of 5250 on
-   the slope, 1741/1884/1735 in the wood, 496 into a trunk. This is the first
-   seam with a second consumer waiting - the test - and where all of the first
-   year of gameplay will live. After fix 3 and fix 5.
-2. **A multi-heading walk harness.** `--walk-forward` from one spot over N
-   headings, covered distance per heading. Sliding alongside obstacles has
-   never been measured; it is the next thing a player feels, and the
-   regression instrument for the controller.
-3. **Make the character path scale before animating it**, in this order: a
-   per-piece frustum and distance test in `CharacterRenderer::draw`
-   (`renderer.cpp:420-428`; the fence was 37 ms at 1000 pieces with the camera
-   turned away); device-local vertex and index buffers via the existing
-   `uploadDeviceLocal` instead of host-visible (`renderer.cpp:127/133`);
-   textures shared per `genome::Image` (1245 MB duplicated at 1000 people);
-   then the CPU posing - bone-to-part and bone-to-node index maps built once
-   instead of name scans per frame (`motion.cpp:273, :355-365`), scratch
-   vectors reused, `npcPieces` not copied per frame, matrices cached for pieces
-   whose inputs did not change. The byte-identical frame from `440468a` is the
-   regression. The GPU wall arrives first: 3.1 / 21.3 / 31.1 ms fence at 96 /
-   400 / 1000 pieces. After fix 4.
-4. **NPC idle clips.** Per-actor idle found by name in the animation archive as
-   the hero's three were; each NPC with its own time and loop; sampling shared
-   per (skeleton, clip, time) run as the renderer already does. Keep NPC state
-   as a struct of arrays - position, actor, clip, time - from the start: the
-   first honest ECS-shaped data the project will have, and the first natural
-   job for the worker pool. After build 3.
-5. **The first projectile, and the second consumer of `CollisionWorld`.** A
-   per-instance group and mask on `CollisionWorld::add` and the queries, so an
-   arrow hits the canopy the walker ignores. **At that point** extract the
-   three collision-source lambdas (`:517-610` cooked, `:622-735` entity
-   primitives, `:741-850` tree primitives) into a collision module that yields
-   positions, indices, group and convex - `CollisionPart::convex` is currently
-   dropped - and build both the drawable batches and the world from it. Drop
-   the physics-only `solid` flag from `render::MeshInstances`. This is the
-   extraction a consumer pulls. After fix 6 and build 1.
-6. **Streaming cost on a moving camera, then decide.** With `--fly` repaired,
-   measure the per-arrival cost including the cold BVH build for unseen meshes
-   (`physics/world.cpp:285-318`, single-threaded on the main thread). It is
-   per distinct mesh per session, not a startup one-off as the backlog says.
-   If the tail is real: build trees on the loader thread (~50 lines) and tag
-   instances by sector so only the grid rebuilds (~150). Measure before
-   spending. After fix 2 and fix 3.
-7. **Give the loader its state a name** - `LoaderState` for the archives, the
-   caches, the atlas and the counters, passed to `loadSector` by reference;
-   then `SectorLoader` + `loadSector` + `SectorContent` into a world library
-   whose input is archives and whose output is a `SectorContent`. When a second
-   client exists - a headless streaming test or the memory-growth measurement
-   - and not before. It is the seam behind fix 1, and the natural home for
-   freeing images and meshes on `dropSector` if a long session shows growth.
+Done: each instrument shown working on one real case before its number is
+written anywhere. That is now a rule, and it is the third time it has had to
+be.
 
-## Leave alone
+### 1. Prove streaming on a moving camera - days
 
-Verified sound and not to be touched for the ECS ambition: `SectorLoader`,
-`PatchAtlas`, the refusal and unwanted-arrival paths, the burst collapse of
-`lightsStale` / `solidStale`, position-hashed tree variants, per-sector batch
-index maps; the `GpuArena`, refcounted geometry with deferred release, the
-device-local static world at 0.44 ms for 1.45 M triangles, the parallel cull
-with its six-bucket invariant, the occlusion buffer, the residency rule;
-`CollisionWorld`'s internals at 3 us; the whole `genome` layer, which fails
-loudly and has no upward dependency; the frame-phase shape, minus the one
-misbooking. The "which physics engine" decision stays "none". Host memory growth
-from never-freed images is bounded at 1.5-2 GB and is a debt to pay inside
-build 7. The three duplicated RAII timers and the duplicated `lookAt` are
-cosmetic. The scaled-variant naming rule and the navigation map are correctly
-parked.
+With `--fly` back: the per-arrival cost including the cold BVH build for
+meshes never seen this session (`physics/world.cpp:285-318`, single-threaded,
+on the main thread), memory growth over a long flight, and whether the tail is
+real. Then, and only if the number says so, trees built on the loader thread
+and instances tagged by sector so only the grid rebuilds.
 
-## Open
+Done: a flight command line committed beside its numbers, and a claim the
+runtime streams better than the original that names what was measured in
+both.
 
-- Whether the shipping binary currently corrupts a frame-loop local through
-  the dangling counters. Fix 1 makes it moot; an ASan build before it would say
-  whether any recorded `--stream` number was affected.
-- The true per-arrival hitch on a moving camera. Decides build 6.
-- The origin of the spike frames - machine, a pre-empted pool worker, or the
-  unbooked rebuild. Fix 3 separates the last; the rest needs Tracy on a spike.
-- Whether the game's physics scene uses the `_cv` hull where the entity names
-  one. The live game can answer this for one placement.
-- What `SensorMinSlideAngle = 20` in the hero template means against the 0.64
-  standable threshold.
-- Whether `.lrentdat` NPC positions sit on the collision ground or need a snap;
-  a rotated NPC's head attachment was checked algebraically, not visually.
-- Host memory growth per sector over a long session. Decides build 7.
-- The flight parameters behind every number in `streaming.md` and `world.md`.
-- Whether the 21 `*_col*.xcmsh` entries in the mesh archive are visuals or
-  collision the loader should read.
+### 2. The game layer - weeks
+
+This is where the hybrid starts being a game rather than a viewer.
+
+**The controller becomes a type.** `CharacterController::step(const
+CollisionWorld&, const Input&, float dt)` in `src/physics` or a new
+`src/game`, with a Vulkan-free test executable against synthetic meshes and
+the measured walks as byte-for-byte regressions (3991 of 5250 on the slope,
+1741/1884/1735 in the wood, 496 into a trunk). This is the first seam with a
+second consumer - the test - and where the first year of gameplay lives.
+
+**A multi-heading walk harness**, because sliding alongside things has never
+been measured and it is the next thing a player feels.
+
+**NPCs live their routines.** The 7651 daily routines are already read; an NPC
+walking between its `WorkingPoint` and `RelaxingPoint` on the hero's
+controller, playing its own idle and walk found by name in the animation
+archive, is the first living world. NPC state as a struct of arrays -
+position, actor, clip, time, routine - from the start: the first honest
+ECS-shaped data the project has, and the first natural job for the worker
+pool.
+
+**The character path made to scale first**, in the order the audit measured:
+a per-piece frustum test, device-local buffers, shared textures, then the CPU
+posing. The GPU wall arrives before the CPU one - 3.1 / 21.3 / 31.1 ms at 96
+/ 400 / 1000 pieces.
+
+**A tick that is not the viewer's frame.** The game loop - input, controller,
+NPC routines, animation state - separated from rendering, so it can be
+stepped headless and tested. This is the point at which `g3world.cpp` stops
+being where gameplay lives.
+
+Done: a town with its people going about their day, drawn at a frame time
+that is measured with the rebuild booked honestly, and a headless test that
+walks the hero and one NPC through a routine with no window open.
+
+### 3. Combat, the same and then better - months
+
+Reproduce the original first. The action machine, hit timing, damage and the
+stun behaviour are all measured on the hook track; the runtime's combat is
+done when it produces those numbers against the same orc. Only then does it
+change - and what changes is the owner's list, not this document's guess.
+
+The first projectile arrives here, and with it the second consumer of
+`CollisionWorld`: a per-instance group and mask so an arrow hits the canopy
+the walker ignores. That is when the three collision-source lambdas leave
+`main()` and become a module, and when the `solid` flag leaves the render
+batch. Not before.
+
+Done: the shipping game and the runtime, same save, same orc, same numbers -
+then a documented difference that the owner asked for.
+
+### 4. The systemic problems - the owner's list
+
+The owner knows the game's problems and this document does not presume to.
+What the community and the hook track have recorded - stun-lock, AI that does
+not use what it has, faction and balance systems left half-built, the emptier
+last third of the world - is a starting point for that list, not the list.
+Each item lands as a system in phase 2's game layer, measured against the
+original where the original has behaviour to measure.
+
+### 5. Rendering improvements - when there is a game in them
+
+PBR, ray tracing, DLSS, in the order the pinned reading suggests. Deferred by
+choice. The renderer's static path is already sound and measured and is not
+to be disturbed for these until they are due.
+
+## Architecture, and what pulls it
+
+No architecture pass. Extractions happen when a consumer pulls them, and the
+audit was explicit that today each subsystem has one consumer: the controller
+extraction is due because its test is waiting; the collision module is due
+when the projectile needs a second query set; the loader gets a named state
+when a headless streaming test needs one. The ECS shape comes in through the
+data - NPC state as arrays in phase 2 - rather than through a framework. The
+loader split in `849f95f` is the model: a measured 200 ms stall demanded it.
+
+## What we do not do
+
+- **Fidelity for its own sake.** The original is an oracle for systems that
+  should match first. A system that has matched is free to differ.
+- **Rewrite gameplay from decompilation.** The systems are ours; the content
+  that would need decompiling is data instead, and we read the data.
+- **Take a physics engine.** None reads this data, and the parsing was the
+  work. Revisit when rigid bodies are wanted.
+- **Port to another engine.** Decided on Aug 30 and not reopened.
+- **Close an item on a check that cannot disagree.** See phase 0.
+
+## The record
+
+`docs/backlog.md` holds the open items behind these phases;
+`docs/audit-2026-09.md` holds the audit that ordered phase 0; the per-subsystem
+docs (`streaming.md`, `collision.md`, `world.md`, `lighting.md`,
+`combat-model.md`, `genome-formats.md`) hold what was measured. A number in
+this plan that is not in one of those is a claim, and should be treated as one.
