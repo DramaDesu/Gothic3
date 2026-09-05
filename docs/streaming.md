@@ -149,6 +149,39 @@ A benched flight uses a fixed sixtieth-of-a-second step so that the same command
 flies the same path every run - the same 28 arrivals and 36 departures every
 time - because two measurements taken at different distances cannot be compared.
 
+**The flight, so it can be flown again.** Every number above was taken without
+its command line being written anywhere, and for a stretch of days the flight
+behind them was not flying at all: `--fly` moved nothing from the controller
+rewrite on Sep 4 until it was repaired - the flight was added to the movement
+wish after the wish had already been spent - so those runs measured a camera
+standing still. The command that flies now:
+
+    g3world _compiledMesh.pak g3_world_lowpoly_landscape_01/
+        --sectors Projects_compiled.pak _cstat.node
+        --tree Speedtrees.pak --stream --collision _compiledPhysic.pak
+        --fly 8000 --camera 53000 9000 49900 0 0 --bench 600 --uncapped
+
+Eighty metres a second due north from above the wood, ten seconds, eight
+sector boundaries. Two runs of it: 6 sectors arrived and 39 left, then 5 and
+39, with 4 and then 3 resident at the end. The path is fixed by the step; the
+*arrivals* are not, because the loader is a real thread and which frame takes
+a sector depends on when it finishes. So a flight's arrival count is a
+property of the machine that day, and a departure count is not - the same 39
+left both times.
+
+Two things that flight shows and this document did not know. The loader falls
+behind at that speed: one sector at a time, 13 ms each on average, and the
+camera crosses cells faster than they can be filled, so the resident set
+thins from 36 to 3 - the plan's phase 1 is about exactly this. And the worst
+frame, 45 ms, "took a sector in": the arrival's Vulkan half plus the collision
+rebuild, on the main thread, which the phase accounting still books as input
+(fix 3 of the audit).
+
+A sector that is still in the loader when the rectangle moves is no longer
+asked for a second time. The arrival list used to check residency only, and a
+requested-but-not-yet-taken sector is not resident, so at flying speed it was
+queued again and loaded twice.
+
 ## Four things, in the order they were done
 
 **The atlas tiles went across together.** Each was its own staging buffer, its

@@ -3005,6 +3005,9 @@ int main(int argc, char **argv)
     std::vector<std::size_t> sectorTriangles;
     std::vector<std::size_t> newTriangles;
     std::vector<std::string> arriving;
+    // The one sector the loader is working on, so the arrival list does not
+    // ask for it again. One at a time is the loader's rule.
+    std::string inFlight;
     // Atlas tiles a departed sector gave back, held until no submitted frame
     // can still be sampling them. The next arrival would otherwise take one and
     // paint over it mid-frame.
@@ -3130,6 +3133,13 @@ int main(int argc, char **argv)
             thirdPerson = thirdPerson > 0.0f ? 0.0f : 350.0f;
             std::printf("camera: %s\n", thirdPerson > 0.0f ? "behind" : "first person");
         }
+
+        // The flight is a wish like any other, so it has to be added before the
+        // wish is spent. It used to be added after, which is why --fly moved
+        // nothing from the controller rewrite until this line: every flight
+        // benchmark in between measured a camera standing still.
+        if (flySpeed != 0.0f)
+            move(forward, flySpeed * delta);
 
         if (solidStale)
         {
@@ -3390,8 +3400,6 @@ int main(int argc, char **argv)
         // already there as batches and the cull decides which are wanted.
         if (window.keyPressed('C'))
             renderer.setCollisionView((renderer.collisionView() + 1) % 3);
-        if (flySpeed != 0.0f)
-            move(forward, flySpeed * delta);
 
         phases.input = millisSince(now);
         const auto streamingStart = std::chrono::steady_clock::now();
@@ -3446,7 +3454,11 @@ int main(int argc, char **argv)
                     const auto box = boundsOf.find(sectorKey(entry.path));
                     if (box == boundsOf.end() || !genome::overlaps(box->second, heldCells))
                         continue;
-                    bool alreadyHere = false;
+                    // Resident, or on its way: a sector still in the loader is
+                    // not resident yet, and asking only about residency queued
+                    // it a second time whenever the rectangle moved while it was
+                    // in flight.
+                    bool alreadyHere = entry.path == inFlight;
                     for (const SectorContent &content : residentSectors)
                         alreadyHere = alreadyHere || content.name == entry.path;
                     if (!alreadyHere)
@@ -3465,12 +3477,16 @@ int main(int argc, char **argv)
                     if (!one.deleted && one.path == path)
                     {
                         loader.request(one, nextSectorId++);
+                        inFlight = path;
                         break;
                     }
             }
 
             LoadedSector loaded;
-            if (loader.take(loaded) && loaded.ok)
+            const bool taken = loader.take(loaded);
+            if (taken)
+                inFlight.clear(); // whether or not it loaded; either way it is no longer in flight
+            if (taken && loaded.ok)
             {
                 // It may no longer be wanted: the camera can turn round while a
                 // sector is being read. Giving the tiles back is all the
