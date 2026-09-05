@@ -872,6 +872,14 @@ int main(int argc, char **argv)
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     };
     std::size_t lightmapsFound = 0, lightmapsMissing = 0;
+    // What the loader has placed, over the whole run. These used to live
+    // inside the world-loading block below, and loadSector - a std::function
+    // at this scope, assigned there as a [&] lambda - kept incrementing them
+    // from the loader thread on every streamed arrival, long after that
+    // block had closed. Undefined behaviour, and in the Release build a
+    // write into whichever later local the compiler had put in the same
+    // stack slot. They live here now, with the thread that writes them.
+    std::size_t placed = 0, sectors = 0, missing = 0, grass = 0, planted = 0, missingTrees = 0;
     static const genome::WorldMatrix c_Identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
     const bool wantLandscape = filter != "none";
@@ -1133,7 +1141,6 @@ int main(int argc, char **argv)
         else
         {
             sectorFilter = sectorArgument + 1 < argc ? argv[sectorArgument + 1] : "_cstat.node";
-            std::size_t placed = 0, sectors = 0, missing = 0, grass = 0, planted = 0, missingTrees = 0;
 
 
             // The residency index: every sector's own bounding box, which is
@@ -3911,6 +3918,11 @@ int main(int argc, char **argv)
 
     vkDeviceWaitIdle(device.device());
     loader.stop();
+    // The totals over the whole run, streamed arrivals included - the print
+    // after the initial load only saw the initial load.
+    std::printf("in all: %zu sectors, %zu objects placed, %zu meshes missing, %zu plants, "
+                "%zu trees planted, %zu tree definitions missing\n",
+                sectors, placed, missing, grass, planted, missingTrees);
     renderer.stopProfiling();
     // Safe on an object that was never created - every handle inside is guarded
     // - and it is what actually pulls the skinned renderer into this binary.
