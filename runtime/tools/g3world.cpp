@@ -2950,6 +2950,7 @@ int main(int argc, char **argv)
     // at him.
     float thirdPerson = thirdPersonArgument;
     float clipTime = 0.0f;
+    std::size_t lastClip = std::size_t(-1);
     // What the body is standing on, read after the resolve. It outlives the
     // frame that found it because the next frame's movement is projected
     // onto it.
@@ -3397,6 +3398,9 @@ int main(int argc, char **argv)
                 covered += std::sqrt((feet[0] - wasAt[0]) * (feet[0] - wasAt[0]) +
                                      (feet[2] - wasAt[2]) * (feet[2] - wasAt[2]));
                 if (++walkFrames % 60 == 0)
+                    std::printf("  clip %zu at %.2f of %.2f s\n", lastClip, double(clipTime),
+                                double(heroClips.empty() ? 0.0f : heroClips[lastClip == std::size_t(-1) ? 0 : lastClip].duration));
+                if (walkFrames % 60 == 0)
                     std::printf("walk %4zu: at %.0f %.0f %.0f, asked %.0f covered %.0f, %s on %.2f %.2f %.2f, %zu tried %zu climbed %zu descended, lifted %.0f biggest %.0f, refused %zu no-ground %zu no-lift %zu no-gain\n",
                                 walkFrames, double(feet[0]), double(feet[1]), double(feet[2]), asked,
                                 covered, onGround ? "grounded" : "airborne", double(support[0]),
@@ -3608,7 +3612,19 @@ int main(int argc, char **argv)
             for (std::size_t which = 0; which < heroClips.size(); ++which)
                 if (pace >= c_ClipSpeeds[which] * 0.6f)
                     clip = which;
-            clipTime += delta;
+
+            // The sampler holds the last key past the end of a clip, which is
+            // its job; wrapping the time is the caller's, and this caller did
+            // not - so after one second of walking the hero slid along in a
+            // frozen mid-stride pose. A change of clip starts the new one at
+            // its beginning rather than at the old one's time.
+            if (clip != lastClip)
+            {
+                clipTime = 0.0f;
+                lastClip = clip;
+            }
+            const float duration = heroClips[clip].duration;
+            clipTime = duration > 0.0f ? std::fmod(clipTime + delta, duration) : clipTime + delta;
 
             const float facing = yaw;
             const float cosine = std::cos(facing), sine = std::sin(facing);
