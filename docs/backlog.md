@@ -33,14 +33,12 @@ our own are all still open.
 
 ## Collision
 
-**Load the collision the entity names - the rule is wrong four times in five.**
-An earlier version of this item said the rule and the reference agree
-everywhere, on the strength of a counter that could not disagree: it counted a
-mismatch only when the named stem was none of `""`, `_col` or `_cv`, so naming
-`_cv` while the loader takes `_col` was "agreement" by construction. An
-independent parse over 165 sectors puts it at **81% of placements with a named
-shape getting a different file than they name** - 10836 of 13333 - always finer
-than the game uses. The fix is in `docs/plan.md`, fix 6.
+**The entity's named collision is loaded now.** Done in phase 0 of the plan.
+The rule was wrong for 2551 of 4012 named files across four rectangles - 64% -
+and always in the same direction, a triangle mesh where the game says hull. The
+rule remains only for placements that name nothing. The retraction of "zero
+disagreements", and the check that could not see the case, are in
+`docs/collision.md`.
 
 **Scaled variants have a naming rule we do not follow.** A cooked triangle mesh
 cannot be scaled at use, so the game cooks a variant per scale and names it with

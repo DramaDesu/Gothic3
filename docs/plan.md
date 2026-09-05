@@ -143,8 +143,10 @@ This is where the hybrid starts being a game rather than a viewer.
 **The controller becomes a type.** `CharacterController::step(const
 CollisionWorld&, const Input&, float dt)` in `src/physics` or a new
 `src/game`, with a Vulkan-free test executable against synthetic meshes and
-the measured walks as byte-for-byte regressions (3991 of 5250 on the slope,
-1741/1884/1735 in the wood, 496 into a trunk). This is the first seam with a
+the measured walks as byte-for-byte regressions (3799 of 5250 on the slope,
+1742 in the wood, 494 into a trunk - the baselines after fix 6 replaced the
+rule's triangle meshes with the game's hulls; they were 3991, 1741 and 496
+before it). This is the first seam with a
 second consumer - the test - and where the first year of gameplay lives.
 
 **A multi-heading walk harness**, because sliding alongside things has never

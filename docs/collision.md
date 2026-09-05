@@ -205,41 +205,63 @@ forest collides. That is the next thing to find, and it is a different question
 - a tree's collision in this engine is likely a shape in its own definition
 rather than a cooked mesh in an archive.
 
-## What the entity says, and what the name rule guesses
+## What the entity says, and what the name rule guessed
 
 Finding the cooked mesh by appending `""`, `"_col"` and `"_cv"` to the visual's
-name is a convention. The reference is in the entity: an `eCCollisionShape_PS`
-holds a list of `eCCollisionShape`, and each one carries its type, its shape
-group, its material, and - when the shape is a triangle mesh or a convex hull -
-the cooked file named outright with a `u16` selecting one sub-mesh inside it.
+name was a convention, and it was wrong four times in five. The reference is in
+the entity: an `eCCollisionShape_PS` holds a list of `eCCollisionShape`, and a
+file-backed one names the cooked file outright with a `u16` selecting one part
+inside it. The loader uses that now, and keeps the rule only for placements
+that name nothing.
 
-We read that list now. The schema is g3dit's, which is an open reading of the
-same files rather than an authority, so it is checked instead of trusted: every
-named file is looked up in the archive, and a misread record would produce
-strings that resolve to nothing. Across four streamed rectangles, **4012 named
-files, all 4012 resolve.**
+**The number, and the retraction.** An earlier version of this section said
+the rule and the reference agreed everywhere - zero disagreements across four
+rectangles. That was written from a counter that compared the named stem
+against the three suffixes rather than against the file the rule would
+actually load, so a placement naming `_cv` while the rule took `_col` counted
+as agreement. It could not see the case, and the case is most of them. The
+same four rectangles, with the comparison made against the rule's real pick:
 
-**The rule and the reference agree everywhere we have looked** - zero
-disagreements in those same 4012. So the suffix convention was not luck holding
-by a thread; it is what the data does. We keep it, because only about two thirds
-of placements name a file at all, and prefer nothing over it yet.
+    58700 8300 56800    758 of 1197 differ
+    53000 12500 47000   641 of 1010
+    44000 6000 44000    540 of 835
+    70000 6000 70000    612 of 970
+    in all             2551 of 4012 - 64%
 
-What the reference gives that the rule cannot is the rest of the record. In one
-rectangle:
+The typical disagreement is `G3_Object_Stone_01_col -> G3_Object_Stone_01_CV`:
+the entity says convex hull, the rule found the triangle mesh first. The rule
+was always finer than the game. Rocks, branches, stumps, pots, buckets - the
+small solid things a body brushes past - collide as hulls in the game, and now
+here.
 
-    by kind: trimesh 387, convexhull 810, box 253, capsule 46
+**What the part index means, checked rather than assumed.** A house's `_COL`
+file holds two or three parts, and its entity carries one shape per part -
+`#0`, `#1`, `#2` - which between them keep every triangle of the file
+(96 + 116 + 550 = 762 for `House_Hut_02`). Of 295 distinct named sets in one
+rectangle, none was out of range and none lost everything. The index is real,
+and the entity enumerates the parts it wants.
 
-The first two are the 1197 that name a file. **The other 299 name nothing** -
-they are primitives authored on the entity, with their numbers in the record: a
-box carries a centre, half extents and a 3x3 orientation; a capsule carries a
-height, a radius, an orientation and a centre. No name rule can find those,
-and until now we drew nothing for them at all.
+**A hull looks like nothing from inside it.** The first overlay after the
+change appeared to have lost the candle stand: its wrought-iron curls showed
+textured against green where the rule's fine triangle mesh had covered them.
+It had not lost anything. The entity names `g3_object_fire_chandelier_01_cv`,
+164 triangles, and it loads and draws; but a hull of a two-metre stand is a
+blob the camera was standing inside, so its near faces were behind the near
+plane and its far faces lay behind the curls. The collision-only view shows the
+blob filling the left of the frame. The rule had been drawing geometry the
+game does not use.
 
-They are placed now, in the same collision view as everything else - 1181
-placements in that rectangle carry between them 66 distinct shape sets, which is
-what a box being a box gets you. In the room above they are the slab on the wall
-banner, the box on the corner cabinet, the shelf, the cylinder standing on the
-candle, and the disc under the rug.
+**The walk baselines moved with it, and that is the point.** The slope walk
+covers 3799 of 5250 where it covered 3991; the trunk stops at 494 where it
+stopped at 496; the wood is 1742 where it was 1741. Hulls are thicker than the
+triangle meshes they replace, so a body brushing props on the way up a slope
+is slowed a little more - by the geometry the game uses. The solid world is
+3.24 million placed triangles where it was 4.29.
+
+**Batched by what was loaded.** Two placements of one visual can name
+different files - `g3_object_signboard_01` names a bare file in some places
+and `_cv` in others - so a collision batch is keyed by the named files and
+parts, not by the visual.
 
 ## Trees
 

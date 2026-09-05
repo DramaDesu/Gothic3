@@ -503,6 +503,14 @@ int main(int argc, char **argv)
     // centimetres.
     std::unique_ptr<genome::PakArchive> collisionArchive;
     std::map<std::string, genome::Mesh *> collisionOf;
+    // And the meshes loaded by what the entity names, keyed by that: the files
+    // and the part index of every file-backed shape, joined.
+    std::map<std::string, genome::Mesh *> namedCollisionOf;
+    std::size_t namedLoaded = 0, namedPartsMissing = 0, namedFailed = 0;
+    std::set<std::string> namedFailures;
+    // Files with more than one part, and what the index kept of them.
+    std::size_t namedMultiPart = 0, namedKeptAll = 0, namedKeptNone = 0;
+    std::set<std::string> namedPartial;
     std::size_t collisionFound = 0, collisionMissing = 0, collisionTriangles = 0;
     // How the entity's own reference fares against the rule that stands in for
     // it: how many placements name a file, how many of those names resolve, and
@@ -514,6 +522,44 @@ int main(int argc, char **argv)
     std::map<int, std::size_t> shapesByKind;
     std::map<std::uint32_t, std::size_t> shapesByGroup;
     std::vector<std::string> collisionMissingNames;
+    // A cooked mesh as something drawable, in centimetres and with flat
+    // normals - the cooked mesh carries none, and the debug shading only needs
+    // enough to read the shape. One part, or all of them.
+    const auto meshFromCooked = [&](const genome::CollisionMesh &cooked, int onlyPart, genome::Mesh &into) {
+        std::size_t triangles = 0;
+        for (std::size_t which = 0; which < cooked.parts.size(); ++which)
+        {
+            if (onlyPart >= 0 && std::size_t(onlyPart) != which)
+                continue;
+            const genome::CollisionPart &part = cooked.parts[which];
+            genome::MeshElement element;
+            element.positions.reserve(part.positions.size());
+            for (const std::array<float, 3> &position : part.positions)
+                element.positions.push_back({position[0] * 100.0f, position[1] * 100.0f, position[2] * 100.0f});
+            element.normals.assign(element.positions.size(), {0.0f, 1.0f, 0.0f});
+            element.texCoords.assign(element.positions.size(), {0.0f, 0.0f});
+            element.indices = part.indices;
+            for (std::size_t at = 0; at + 2 < element.indices.size(); at += 3)
+            {
+                const std::array<float, 3> &a = element.positions[element.indices[at]];
+                const std::array<float, 3> &b = element.positions[element.indices[at + 1]];
+                const std::array<float, 3> &c = element.positions[element.indices[at + 2]];
+                const std::array<float, 3> u{b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+                const std::array<float, 3> v{c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+                const std::array<float, 3> n{u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+                                             u[0] * v[1] - u[1] * v[0]};
+                const float length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                if (length > 1e-6f)
+                    for (int corner = 0; corner < 3; ++corner)
+                        element.normals[element.indices[at + corner]] = {n[0] / length, n[1] / length,
+                                                                        n[2] / length};
+            }
+            triangles += element.indices.size() / 3;
+            into.elements.push_back(std::move(element));
+        }
+        return triangles;
+    };
+
     const auto collisionFor = [&](const std::string &meshName) -> genome::Mesh * {
         if (!collisionArchive)
             return nullptr;
@@ -565,37 +611,7 @@ int main(int argc, char **argv)
         if (have)
         {
             auto mesh = std::make_unique<genome::Mesh>();
-            for (const genome::CollisionPart &part : cooked.parts)
-            {
-                genome::MeshElement element;
-                element.positions.reserve(part.positions.size());
-                for (const std::array<float, 3> &position : part.positions)
-                    element.positions.push_back({position[0] * 100.0f, position[1] * 100.0f,
-                                                 position[2] * 100.0f});
-                // Flat normals from the triangles themselves: the cooked mesh
-                // carries none, and the debug shading only needs enough to
-                // read the shape.
-                element.normals.assign(element.positions.size(), {0.0f, 1.0f, 0.0f});
-                element.texCoords.assign(element.positions.size(), {0.0f, 0.0f});
-                element.indices = part.indices;
-                for (std::size_t at = 0; at + 2 < element.indices.size(); at += 3)
-                {
-                    const std::array<float, 3> &a = element.positions[element.indices[at]];
-                    const std::array<float, 3> &b = element.positions[element.indices[at + 1]];
-                    const std::array<float, 3> &c = element.positions[element.indices[at + 2]];
-                    const std::array<float, 3> u{b[0] - a[0], b[1] - a[1], b[2] - a[2]};
-                    const std::array<float, 3> v{c[0] - a[0], c[1] - a[1], c[2] - a[2]};
-                    const std::array<float, 3> n{u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
-                                                 u[0] * v[1] - u[1] * v[0]};
-                    const float length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-                    if (length > 1e-6f)
-                        for (int corner = 0; corner < 3; ++corner)
-                            element.normals[element.indices[at + corner]] = {n[0] / length, n[1] / length,
-                                                                            n[2] / length};
-                }
-                collisionTriangles += element.indices.size() / 3;
-                mesh->elements.push_back(std::move(element));
-            }
+            collisionTriangles += meshFromCooked(cooked, -1, *mesh);
             made = mesh.get();
             ownedMeshes.push_back(std::move(mesh));
             ++collisionFound;
@@ -1216,6 +1232,118 @@ int main(int argc, char **argv)
                     if (placement.meshName.empty())
                         continue;
 
+                    // What the entity names, or what the rule finds when it names
+                    // nothing. Keyed by what was loaded, not by the visual: one
+                    // visual names a bare file in some placements and _cv in
+                    // others, and those cannot share a batch.
+                    {
+                        std::string signature;
+                        for (const genome::CollisionShape &shape : placement.shapes)
+                        {
+                            if (shape.meshName.empty())
+                                continue;
+                            std::string stem = shape.meshName;
+                            const std::size_t dot = stem.find_last_of('.');
+                            if (dot != std::string::npos)
+                                stem = stem.substr(0, dot);
+                            for (char &c : stem)
+                                c = char(std::tolower(static_cast<unsigned char>(c)));
+                            signature += stem + "#" + std::to_string(shape.meshIndex) + "|";
+                        }
+
+                        genome::Mesh *cooked = nullptr;
+                        std::string collisionKey;
+                        if (!signature.empty())
+                        {
+                            collisionKey = "named:" + signature;
+                            const auto cached = namedCollisionOf.find(signature);
+                            if (cached != namedCollisionOf.end())
+                                cooked = cached->second;
+                            else
+                            {
+                                auto mesh = std::make_unique<genome::Mesh>();
+                                for (const genome::CollisionShape &shape : placement.shapes)
+                                {
+                                    if (shape.meshName.empty())
+                                        continue;
+                                    std::string stem = shape.meshName;
+                                    const std::size_t dot = stem.find_last_of('.');
+                                    if (dot != std::string::npos)
+                                        stem = stem.substr(0, dot);
+                                    std::string why;
+                                    genome::CollisionMesh file;
+                                    bool have = collisionArchive &&
+                                                genome::loadCollisionMesh(collisionArchive->read(stem + ".xnvmsh", &why),
+                                                                          file, &why);
+                                    if (!have)
+                                        have = genome::loadCollisionMesh(archive->read(stem + ".xnvmsh", &why), file, &why);
+                                    if (!have)
+                                    {
+                                        ++namedFailed;
+                                        if (namedFailures.size() < 8)
+                                            namedFailures.insert(placement.meshName + "  names  " + shape.meshName +
+                                                                 "  ->  " + why);
+                                        continue;
+                                    }
+                                    // The index selects one part of the file. Out of
+                                    // range means the whole of it, and is counted.
+                                    int part = int(shape.meshIndex);
+                                    if (std::size_t(part) >= file.parts.size())
+                                    {
+                                        ++namedPartsMissing;
+                                        part = -1;
+                                    }
+                                    std::size_t inFile = 0;
+                                    for (const genome::CollisionPart &each : file.parts)
+                                        inFile += each.indices.size() / 3;
+                                    const std::size_t kept = meshFromCooked(file, part, *mesh);
+                                    collisionTriangles += kept;
+                                    if (file.parts.size() > 1)
+                                        ++namedMultiPart;
+                                    if (kept == inFile)
+                                        ++namedKeptAll;
+                                    else if (kept == 0)
+                                        ++namedKeptNone;
+                                    if (kept != inFile && namedPartial.size() < 8)
+                                        namedPartial.insert(placement.meshName + "  " + stem + "#" +
+                                                            std::to_string(shape.meshIndex) + ": " +
+                                                            std::to_string(file.parts.size()) + " parts, kept " +
+                                                            std::to_string(kept) + " of " + std::to_string(inFile));
+                                }
+                                if (!mesh->elements.empty())
+                                {
+                                    cooked = mesh.get();
+                                    ownedMeshes.push_back(std::move(mesh));
+                                    ++namedLoaded;
+                                }
+                                namedCollisionOf.emplace(signature, cooked);
+                            }
+                        }
+                        else
+                        {
+                            collisionKey = placement.meshName;
+                            cooked = collisionFor(placement.meshName);
+                        }
+
+                        if (cooked != nullptr)
+                        {
+                            auto batch = collisionBatchOf.find(collisionKey);
+                            if (batch == collisionBatchOf.end())
+                            {
+                                render::MeshInstances shape;
+                                shape.mesh = cooked;
+                                shape.collision = true;
+                                shape.occludes = false;
+                                batch = collisionBatchOf.emplace(collisionKey, batches.size()).first;
+                                batches.push_back(std::move(shape));
+                            }
+                            batches[batch->second].transforms.push_back(placement.world);
+                            batches[batch->second].bounds.push_back(
+                                {placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
+                                 placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
+                        }
+                    }
+
                     // The primitives the entity authors on itself. They are
                     // handled here rather than beside the cooked meshes because
                     // they belong to the placement, not to its visual.
@@ -1390,14 +1518,6 @@ int main(int argc, char **argv)
                                  placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
                             ++placed;
 
-                            const auto shape = collisionBatchOf.find(placement.meshName);
-                            if (shape != collisionBatchOf.end())
-                            {
-                                batches[shape->second].transforms.push_back(placement.world);
-                                batches[shape->second].bounds.push_back(
-                                    {placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
-                                     placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
-                            }
                         }
                         continue;
                     }
@@ -1461,6 +1581,8 @@ int main(int argc, char **argv)
                                 there = true;
                             if (there)
                                 ++namedResolved;
+                            else if (namedUnresolved.size() < 8)
+                                namedUnresolved.insert(shape.meshName); // bound to the right if now
                             // A shape whose file is named for stairs, whatever
                             // the visual it belongs to is called.
                             if (bare.find("stair") != std::string::npos ||
@@ -1472,11 +1594,13 @@ int main(int argc, char **argv)
                                               placement.world[14]);
                                 namedStairs.insert(std::string(where) + placement.meshName);
                             }
-                            else if (namedUnresolved.size() < 8)
-                                namedUnresolved.insert(shape.meshName);
 
-                            // The suffix rule's answer for this placement, for
-                            // comparison: the visual's stem, bare or with _col.
+                            // Against the file the rule would ACTUALLY load - the
+                            // first of bare, _col, _cv that exists - not against
+                            // the three suffixes. The old comparison accepted any
+                            // of the three, so a placement naming _cv while the
+                            // rule takes _col counted as agreement, and it could
+                            // not disagree by construction.
                             std::string guess = placement.meshName;
                             const std::size_t slash = guess.find_last_of('/');
                             if (slash != std::string::npos)
@@ -1484,18 +1608,34 @@ int main(int argc, char **argv)
                             const std::size_t guessDot = guess.find_last_of('.');
                             if (guessDot != std::string::npos)
                                 guess = guess.substr(0, guessDot);
+                            std::string rulePick;
+                            for (const char *suffix : {"", "_col", "_cv"})
+                            {
+                                if (collisionArchive && !collisionArchive->read(guess + suffix + ".xnvmsh", &why).empty())
+                                {
+                                    rulePick = guess + suffix;
+                                    break;
+                                }
+                            }
+                            for (const char *suffix : {"", "_col", "_cv"})
+                            {
+                                if (!rulePick.empty())
+                                    break;
+                                if (!archive->read(guess + suffix + ".xnvmsh", &why).empty())
+                                    rulePick = guess + suffix;
+                            }
 
-                            std::string lowered = bare, loweredGuess = guess;
+                            std::string lowered = bare, loweredPick = rulePick;
                             for (char &c : lowered)
                                 c = char(std::tolower(static_cast<unsigned char>(c)));
-                            for (char &c : loweredGuess)
+                            for (char &c : loweredPick)
                                 c = char(std::tolower(static_cast<unsigned char>(c)));
-                            if (lowered != loweredGuess && lowered != loweredGuess + "_col" &&
-                                lowered != loweredGuess + "_cv")
+                            if (lowered != loweredPick)
                             {
                                 ++namedDiffers;
                                 if (namedDisagreements.size() < 8)
-                                    namedDisagreements.insert(guess + "  ->  " + bare);
+                                    namedDisagreements.insert((rulePick.empty() ? guess + " (rule: nothing)" : rulePick) +
+                                                              "  ->  " + bare);
                             }
                         }
                         if (named)
@@ -1506,22 +1646,6 @@ int main(int argc, char **argv)
                     batches.push_back(std::move(batch));
                     ++placed;
 
-                    // The same object's collision, in its own batch with the
-                    // same transform. Its index is remembered so that later
-                    // placements of the same mesh extend it too.
-                    if (genome::Mesh *cooked = collisionFor(placement.meshName))
-                    {
-                        render::MeshInstances shape;
-                        shape.mesh = cooked;
-                        shape.collision = true;
-                        shape.occludes = false;
-                        shape.transforms.push_back(placement.world);
-                        shape.bounds.push_back(
-                            {placement.boundsMin[0], placement.boundsMin[1], placement.boundsMin[2],
-                             placement.boundsMax[0], placement.boundsMax[1], placement.boundsMax[2]});
-                        collisionBatchOf.emplace(placement.meshName, batches.size());
-                        batches.push_back(std::move(shape));
-                    }
                 }
                 worldLights.insert(worldLights.end(), layer.lights.begin(), layer.lights.end());
 
@@ -1788,8 +1912,19 @@ int main(int argc, char **argv)
                 if (namedShapes != 0)
                 {
                     std::printf("named shapes: %zu placements name %zu files, %zu resolve, %zu differ from "
-                                "the rule\n",
-                                namedPlacements, namedShapes, namedResolved, namedDiffers);
+                                "the rule's pick; %zu distinct named sets loaded, %zu parts out of range\n",
+                                namedPlacements, namedShapes, namedResolved, namedDiffers, namedLoaded,
+                                namedPartsMissing);
+                    std::printf("  named files: %zu with several parts; the index kept all of %zu, none of %zu\n",
+                                namedMultiPart, namedKeptAll, namedKeptNone);
+                    for (const std::string &line : namedPartial)
+                        std::printf("    partial: %s\n", line.c_str());
+                    if (namedFailed != 0)
+                    {
+                        std::printf("  %zu named files failed to load:\n", namedFailed);
+                        for (const std::string &line : namedFailures)
+                            std::printf("    %s\n", line.c_str());
+                    }
                     for (const std::string &name : namedUnresolved)
                         std::printf("  names nothing: %s\n", name.c_str());
                     for (const std::string &pair : namedStairs)
