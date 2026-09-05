@@ -2983,9 +2983,13 @@ int main(int argc, char **argv)
     struct FramePhases
     {
         float input = 0.0f, streaming = 0.0f, begin = 0.0f, cull = 0.0f, record = 0.0f, present = 0.0f;
+        // The collision world rebuilt, on the frame after the resident set
+        // changed. Booked apart from input, where it used to hide: a 45 ms
+        // rebuild read as a 45 ms key poll.
+        float solid = 0.0f;
         // The three things beginFrame can block in, which together make up begin.
         float retire = 0.0f, fence = 0.0f, acquire = 0.0f;
-        float total() const { return input + streaming + begin + cull + record + present; }
+        float total() const { return input + streaming + begin + cull + record + present + solid; }
     };
     FramePhases phases;
     std::vector<FramePhases> framePhases;
@@ -3141,10 +3145,17 @@ int main(int argc, char **argv)
         if (flySpeed != 0.0f)
             move(forward, flySpeed * delta);
 
+        phases.solid = 0.0f;
         if (solidStale)
         {
+            // Its own phase and its own work bit. This used to fall inside
+            // input, and the bench then described the frame as having taken
+            // nothing while a rebuild of the whole resident set ran in it.
+            const auto solidStart = std::chrono::steady_clock::now();
             rebuildSolid(false);
             solidStale = false;
+            phases.solid = millisSince(solidStart);
+            workThisFrame |= 4;
         }
         if (walkHeight <= 0.0f)
         {
@@ -3401,7 +3412,7 @@ int main(int argc, char **argv)
         if (window.keyPressed('C'))
             renderer.setCollisionView((renderer.collisionView() + 1) % 3);
 
-        phases.input = millisSince(now);
+        phases.input = millisSince(now) - phases.solid;
         const auto streamingStart = std::chrono::steady_clock::now();
 
         // Sectors arrive and leave as the camera moves. The rectangle changing
@@ -3440,6 +3451,10 @@ int main(int argc, char **argv)
                     }
                     workThisFrame |= 2;
                     lightsStale = true;
+                    // The collision of what just left has to leave too. Without
+                    // this it stayed until the next arrival happened to rebuild,
+                    // and a body could stand on a floor no longer drawn.
+                    solidStale = true;
                     renderer.dropSector(device, residentSectors[index].id);
                     freedTiles.emplace_back(device.frameCounter(), std::move(residentSectors[index].tiles));
                     residentSectors.erase(residentSectors.begin() + std::ptrdiff_t(index));
@@ -3794,9 +3809,10 @@ int main(int argc, char **argv)
                     // Each phase's own median, not one frame's: the parts come from
                     // different frames and need not add up to any of them.
                     std::printf("the median of each phase: %.2f input, %.2f streaming, %.2f waiting to begin, %.2f cull, "
-                                "%.2f recording, %.2f presenting\n",
+                                "%.2f recording, %.2f presenting, %.2f rebuilding collision\n",
                                 pick(&FramePhases::input), pick(&FramePhases::streaming), pick(&FramePhases::begin),
-                                pick(&FramePhases::cull), pick(&FramePhases::record), pick(&FramePhases::present));
+                                pick(&FramePhases::cull), pick(&FramePhases::record), pick(&FramePhases::present),
+                                pick(&FramePhases::solid));
                     std::printf("and the median wait was: %.2f retiring, %.2f on our own fence, %.2f acquiring\n",
                                 pick(&FramePhases::retire), pick(&FramePhases::fence), pick(&FramePhases::acquire));
                 }
@@ -3804,20 +3820,47 @@ int main(int argc, char **argv)
                 {
                     const FramePhases &split = framePhases[worst];
                     std::printf("that frame went: %.1f input, %.1f streaming, %.1f waiting to begin, %.1f cull, "
-                                "%.1f recording, %.1f presenting - %.1f of %.1f accounted\n",
+                                "%.1f recording, %.1f presenting, %.1f rebuilding collision - %.1f of %.1f accounted\n",
                                 split.input, split.streaming, split.begin, split.cull, split.record, split.present,
-                                split.total(), frameTimes[worst]);
+                                split.solid, split.total(), frameTimes[worst]);
                     std::printf("and the waiting was: %.1f retiring transfers, %.1f on our own fence, "
                                 "%.1f acquiring an image\n",
                                 split.retire, split.fence, split.acquire);
                 }
                 const std::uint8_t did = worst < frameWork.size() ? frameWork[worst] : 0;
+                // Three kinds of work, any of which can share a frame.
+                std::string didWhat;
+                const auto also = [&](const char *what) {
+                    didWhat += (didWhat.empty() ? "" : " and ");
+                    didWhat += what;
+                };
+                if (did & 1)
+                    also("took a sector in");
+                if (did & 2)
+                    also("dropped sectors");
+                if (did & 4)
+                    also("rebuilt the collision world");
+                if (didWhat.empty())
+                    didWhat = "neither took, dropped nor rebuilt anything";
                 std::printf("the worst frame was number %zu of %zu at %.2f ms, and it %s\n", worst,
-                            frameTimes.size(), frameTimes[worst],
-                            did == 3   ? "both took a sector in and dropped some"
-                            : did == 1 ? "took a sector in"
-                            : did == 2 ? "dropped sectors"
-                                       : "neither took nor dropped anything");
+                            frameTimes.size(), frameTimes[worst], didWhat.c_str());
+                // The rebuild is rare, so its median is zero whether or not the
+                // phase works. How often it fired and its largest cost is what
+                // says it is booked at all.
+                {
+                    std::size_t rebuilds = 0;
+                    float largest = 0.0f, summed = 0.0f;
+                    for (const FramePhases &frame : framePhases)
+                        if (frame.solid > 0.0f)
+                        {
+                            ++rebuilds;
+                            summed += frame.solid;
+                            largest = std::max(largest, frame.solid);
+                        }
+                    if (rebuilds != 0)
+                        std::printf("the collision world was rebuilt %zu times, %.1f ms at most, %.1f ms in all\n",
+                                    rebuilds, double(largest), double(summed));
+                }
                 if (walkForward)
                     std::printf("walked: asked for %.0f, covered %.0f, ended at %.0f %.0f %.0f, %s\n",
                                 asked, covered, double(feet[0]), double(feet[1]), double(feet[2]),

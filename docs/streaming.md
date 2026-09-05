@@ -316,11 +316,15 @@ worst frame is 12.8 ms and an arrival costs 1 ms on the frame.
   retirements, and finally a partition of the frame into six phases that account
   for every millisecond of it. Caught: 264.7 ms, of which 227.9 sat in
   vkWaitForFences on the frame two back, 0.0 in acquiring an image, 0.0 in
-  streaming, 0.0 in the cull and 0.0 in recording - while the input phase, which
-  does nothing but GetAsyncKeyState, took 25.7 ms of the same frame. Both the
-  CPU and the GPU were taken away at once, which is not a shape any code here
-  can make. Two of the four hypotheses were real defects and are fixed; this one
-  is the machine.
+  streaming, 0.0 in the cull and 0.0 in recording - while the input phase took
+  25.7 ms of the same frame. At the time this was read as the machine taking
+  the CPU away, because the input phase was believed to do nothing but poll
+  keys. It did not: the collision world's rebuild ran inside it, on the frame
+  after any change to the resident set, and a rebuild is 6 to 45 ms depending
+  on what is resident. That rebuild is booked in its own phase now, so the
+  next such frame will say which it was. The 227.9 ms in vkWaitForFences on
+  the frame two back is still not this program's; the 25.7 ms of "input" may
+  well have been.
 - **Synchronization validation has never actually run here.** The unwaited
   uploads are correct by the spec rule that a barrier orders against later
   submissions on the same queue, and that is an argument rather than a check. It
