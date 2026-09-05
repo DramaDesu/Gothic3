@@ -32,10 +32,21 @@ is only a claim once "the same" has been shown.
 The runtime is 64-bit, Vulkan, multithreaded, and reads the game's data
 directly with no game process behind it. That was chosen over hooking the
 original because the original is 32-bit, DX9 and single-ticked, and none of
-the three improvement axes fit inside that. The engine is also the owner's
-vehicle for learning multithreading, cache behaviour and memory - so the
-architecture is allowed to be built for that, provided each step is pulled by
-a real consumer rather than sketched ahead of one.
+the three improvement axes fit inside that.
+
+Two things about it are the owner's, stated plainly so the plan cannot drift
+from them:
+
+- **It is his version, kept and tuned for years.** Not a patch, not a mod, not
+  a port to be handed off - a codebase he owns and keeps turning. Every choice
+  here favours what can be tuned later over what is finished sooner.
+- **It is high-performance as a goal, not as a side effect.** Performance is
+  the first-rank requirement alongside the improved systems, and the reason the
+  original could not be the base. Systems are designed for scale from their
+  first line - data laid out for the cache, work laid out for the pool, nothing
+  per-object that could be per-batch - and measured on every step. The engine
+  is also the owner's vehicle for learning multithreading, cache behaviour and
+  memory, which is the same thing said from the other side.
 
 ## Where the three axes stand
 
@@ -56,6 +67,35 @@ known defect).
 **Rendering** reproduces the original's look with normal maps and specular
 added. Its improvements - PBR, ray tracing, DLSS - are deferred by the owner's
 own decision until there is a game to put them in.
+
+## Performance, as a requirement
+
+The number that matters is not the frame time of the viewer today; it is what
+the runtime can hold while staying under budget. Targets are stated here as
+what the plan aims at, to be measured rather than assumed - every one is a
+claim until a phase's "done" shows it:
+
+- **A town at full life.** Its people all present and animated - the ones in
+  view at full cost, the rest ticking their routines without being drawn - at
+  a frame well under the budget on the owner's card. Today 96 bind-posed
+  people cost 3 ms, two thirds of it the GPU, and the CPU posing is a quarter
+  of that; both scale badly and both have named fixes in phase 2.
+- **The whole world resident in memory, and streamed geometry never a
+  hitch.** The world is 6.8 by 6.4 km; the original stutters on it and the
+  community patch had to rewrite its file system to help. The runtime already
+  holds the full world at 3.58 GB peak and loads a sector off the main
+  thread; the unproven part is the moving-camera tail (phase 1).
+- **Every core busy where the work allows.** The pool is there and the cull
+  uses it at 4.6x. Simulation - NPC routines, animation sampling, collision
+  queries - is laid out so it can go the same way: state as arrays, work as
+  batches, no shared mutable maps in the tick.
+- **A query budget, not a query count.** Collision at 3 us a ground query and
+  a few instances a capsule is what lets a hundred bodies ask every frame.
+  The budget is held by keeping the indexes honest, not by asking less.
+
+What performance does *not* mean here: chasing the viewer's frame time below
+1 ms, or optimising a path before it has a consumer. The static world path is
+already at 0.44 ms for 1.45 M triangles and is left alone.
 
 ## The phases
 
@@ -125,8 +165,10 @@ posing. The GPU wall arrives before the CPU one - 3.1 / 21.3 / 31.1 ms at 96
 
 **A tick that is not the viewer's frame.** The game loop - input, controller,
 NPC routines, animation state - separated from rendering, so it can be
-stepped headless and tested. This is the point at which `g3world.cpp` stops
-being where gameplay lives.
+stepped headless, tested, and eventually run on its own thread against a
+render thread. This is the point at which `g3world.cpp` stops being where
+gameplay lives, and the point at which the multithreaded shape of the engine
+is decided by a real tick rather than by a diagram.
 
 Done: a town with its people going about their day, drawn at a frame time
 that is measured with the rebuild booked honestly, and a headless test that
