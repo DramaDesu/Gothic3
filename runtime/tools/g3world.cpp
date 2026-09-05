@@ -3184,8 +3184,10 @@ int main(int argc, char **argv)
                 onGround = false;
             }
             fallSpeed -= c_Gravity * delta;
-            // A body moving further than its own radius in one step can pass
-            // through a wall before anything has a chance to push it back.
+            // A terminal velocity, and only that. It was once described as the
+            // tunnelling guard, and it is not one: 3000 cm/s at a sixtieth of a
+            // second is 50 cm a frame, more than the body's radius. The guard is
+            // the sub-stepping below.
             fallSpeed = std::max(fallSpeed, -3000.0f);
 
             // Along the ground rather than into it. Horizontal movement into a
@@ -3207,11 +3209,6 @@ int main(int argc, char **argv)
                 }
             }
 
-            const std::array<float, 3> wasAt = feet;
-            feet[0] += along[0];
-            feet[1] += along[1];
-            feet[2] += along[2];
-            feet[1] += fallSpeed * delta;
 
             // Push out of everything the body is inside, and take the ground
             // from the normals that did the pushing. Four passes: one contact
@@ -3258,7 +3255,30 @@ int main(int argc, char **argv)
             // Forgotten each frame, so they describe this frame.
             support = {0.0f, 0.0f, 0.0f};
             blockedByWall = false;
-            onGround = settle();
+
+            // The frame's whole displacement, taken in pieces none of which is
+            // longer than nine tenths of the radius, settling after each. A
+            // body moved further than its own radius in one step can be
+            // entirely past a surface before the resolve gets a look at it -
+            // and a fall at terminal velocity is a step of 50 cm against a
+            // radius of 35. Measured before this: a drop from 48.5 m ended
+            // 104 cm inside a roof slab in one run of five.
+            const std::array<float, 3> wasAt = feet;
+            const std::array<float, 3> displacement{along[0], along[1] + fallSpeed * delta, along[2]};
+            const float longest = std::max({std::fabs(displacement[0]), std::fabs(displacement[1]),
+                                            std::fabs(displacement[2])});
+            const int pieces = std::max(1, int(std::ceil(longest / (0.9f * c_BodyRadius))));
+            for (int piece = 0; piece < pieces; ++piece)
+            {
+                for (int axis = 0; axis < 3; ++axis)
+                    feet[axis] += displacement[axis] / float(pieces);
+                onGround = settle();
+                // Standing already: the rest of the fall is spent, and pushing
+                // the remaining pieces into the floor would only be pushed out
+                // again.
+                if (onGround && displacement[1] < 0.0f)
+                    break;
+            }
 
             // How far along the ground the body actually got. A step is worth
             // trying when it got much less than it asked for and it was walking

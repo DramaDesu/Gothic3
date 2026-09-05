@@ -116,6 +116,18 @@ but nothing has been measured at an angle - the walk-forward harness only ever
 walks one way. A harness that walks a few headings from the same spot would say
 whether sliding works or whether it only looks like it should.
 
+**Tunnelling: guarded on the arithmetic, not on an observed failure.** The
+audit reported a drop that ended 104 cm inside a sloped roof in one run of
+five, with the recipe `--camera 58595 9547 56463 0 0 --walk --bench 360
+--uncapped`. Run five times here before the fix it landed on that roof at 9090
+every time, and a true 48.5 m drop onto a flat roof landed at 9135 five of five
+- a 50 cm step with a 35 cm radius cannot skip a slab, since the sphere's
+before-and-after cover 120 cm without a gap; what can go wrong is the resolve
+choosing the far side of a thin sloped face at deep penetration. The
+displacement is sub-stepped to nine tenths of the radius now, which makes that
+depth impossible. Every controller regression is unchanged to the unit. If
+someone sees the audit's failure, its recipe is above.
+
 ## Characters
 
 **A character costs 24 us a frame, and two thirds of it is the GPU.** The
